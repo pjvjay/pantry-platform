@@ -8,7 +8,11 @@ mechanism**.
 This umbrella repo pins all five components as git submodules, carries the
 architecture docs, and ships a one-command local run.
 
-**Live demo:** https://pantry.example.com/pantry/
+**Demo:** deployed to AKS via the full pipeline (see the verified run in
+[pantry-gitops's commit history](https://github.com/pjvjay/pantry-gitops/commits/main) —
+every `bump … to dev-<sha>` commit is CI deploying). The dev cluster runs
+**on demand** to keep idle cost at zero; reproduce the whole stack locally in
+one command (below).
 
 ## The repos
 
