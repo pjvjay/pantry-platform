@@ -1,0 +1,61 @@
+# One-command local run of the whole platform — same containers, same
+# migration flow as the cluster, minus Kubernetes.
+#
+#   git clone --recurse-submodules https://github.com/pjvjay/pantry-platform
+#   export ANTHROPIC_API_KEY=sk-ant-...   # optional; browsing works without
+#   docker compose up --build
+#   → http://localhost:8080/pantry/
+#
+# Service names mirror the K8s Services (the frontend's nginx proxies
+# /pantry/api → http://pantry-api:8000 in BOTH environments).
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: pantry
+      POSTGRES_USER: pantry_app
+      POSTGRES_PASSWORD: localdev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pantry_app -d pantry"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  # Same image the ArgoCD PreSync hook runs in the cluster.
+  migrate:
+    build: ./pantry-db
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: pantry
+      DB_USER: pantry_app
+      DB_PASSWORD: localdev
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  pantry-api:
+    build: ./pantry-api
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: pantry
+      DB_USER: pantry_app
+      DB_PASSWORD: localdev
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ROUTING_STRATEGY: ${ROUTING_STRATEGY:-cascade}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  pantry-frontend:
+    build: ./pantry-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - pantry-api
+
+volumes:
+  pg-data:

@@ -1,0 +1,15 @@
+[submodule "pantry-api"]
+	path = pantry-api
+	url = https://github.com/pjvjay/pantry-api.git
+[submodule "pantry-frontend"]
+	path = pantry-frontend
+	url = https://github.com/pjvjay/pantry-frontend.git
+[submodule "pantry-db"]
+	path = pantry-db
+	url = https://github.com/pjvjay/pantry-db.git
+[submodule "pantry-gitops"]
+	path = pantry-gitops
+	url = https://github.com/pjvjay/pantry-gitops.git
+[submodule "pantry-infra"]
+	path = pantry-infra
+	url = https://github.com/pjvjay/pantry-infra.git
