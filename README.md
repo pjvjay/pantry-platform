@@ -111,7 +111,6 @@ git commit -am "pin: <what changed>"    # record the new known-good set
 ## Origin
 
 The app itself (the Claude model-router pipeline) predates the platform —
-it was a standalone interview artifact. This umbrella wraps it in the same
-GitOps architecture as the production
-[a prior project](https://an-internal-repo) polyrepo, scaled down
-to be readable in an afternoon.
+it was a standalone interview artifact. This umbrella wraps it in a
+production-grade GitOps polyrepo architecture, scaled down to be readable
+in an afternoon.
