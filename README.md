@@ -1,9 +1,12 @@
 # 🥫 pantry-platform
 
-A complete, small-scale **GitOps reference implementation**: a three-tier app
-(React SPA → FastAPI + LLM pipeline → Postgres) split across five repos,
-deployed to AKS by ArgoCD, where **a git commit is the only deployment
-mechanism**.
+A complete, small-scale **GitOps reference implementation**: a grocery-matching
+app (recipes → best-value store picks) — React + FastAPI running a Claude-based
+agentic workflow that **generates NL2SQL** to query a Postgres grocery database
+for the most relevant data meeting natural-language search constraints, then
+uses a **model router** to cost-effectively select the model based on the size
+of the data and the evaluated complexity; on AKS via GitOps (GitHub Actions,
+Argo CD), where **a git commit is the only deployment mechanism**.
 
 This umbrella repo pins all five components as git submodules, carries the
 architecture docs, and ships a one-command local run.
