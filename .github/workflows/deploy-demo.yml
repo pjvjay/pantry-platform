@@ -1,0 +1,41 @@
+# Sync demo/ to the Hugging Face Space whenever it changes.
+#
+# One-time setup:
+#   1. Create the (free) Space: huggingface.co/new-space →
+#      owner pjvjay, name pantry-planner, SDK "Docker", public.
+#   2. Add a repo secret HF_TOKEN: a Hugging Face access token with
+#      "Write" scope (hf.co/settings/tokens).
+#
+# The Space rebuilds its image on every push it receives. Because the
+# Dockerfile pulls ghcr.io/pjvjay/pantry-{api,frontend}:latest, use
+# workflow_dispatch to refresh the demo after app releases without any
+# demo/ change.
+name: deploy-demo
+
+on:
+  push:
+    branches: [main]
+    paths: ["demo/**"]
+  workflow_dispatch:
+
+jobs:
+  push-space:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push demo/ to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is not set (hf.co/settings/tokens, Write scope)"
+            exit 1
+          fi
+          cd demo
+          git init -b main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Sync from pantry-platform ${GITHUB_SHA::7}"
+          git push --force "https://pjvjay:${HF_TOKEN}@huggingface.co/spaces/pjvjay/pantry-planner" main

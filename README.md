@@ -11,7 +11,15 @@ Argo CD), where **a git commit is the only deployment mechanism**.
 This umbrella repo pins all five components as git submodules, carries the
 architecture docs, and ships a one-command local run.
 
-**Demo:** deployed to AKS via the full pipeline (see the verified run in
+**▶ Live demo:** **[huggingface.co/spaces/pjvjay/pantry-planner](https://huggingface.co/spaces/pjvjay/pantry-planner)** —
+a single-container build of the same GHCR images in
+[demo mode](https://github.com/pjvjay/pantry-api#demo-mode) (deterministic
+stand-ins at the two LLM call sites; the query-plan SQL, abort gates, and
+trip/week optimizers run for real). Free-tier Space: give it ~30 s to wake
+if it's been idle.
+
+**GitOps deployment:** the production path deploys to AKS via the full
+pipeline (see the verified run in
 [pantry-gitops's commit history](https://github.com/pjvjay/pantry-gitops/commits/main) —
 every `bump … to dev-<sha>` commit is CI deploying). The dev cluster runs
 **on demand** to keep idle cost at zero; reproduce the whole stack locally in
