@@ -11,14 +11,13 @@ Argo CD), where **a git commit is the only deployment mechanism**.
 This umbrella repo pins all five components as git submodules, carries the
 architecture docs, and ships a one-command local run.
 
-**▶ Live demo:** a single-container build of the same GHCR images in
+**▶ Live demo:** **[pantry-planner-demo.onrender.com/pantry/](https://pantry-planner-demo.onrender.com/pantry/)** —
+a single-container build of the same GHCR images in
 [demo mode](https://github.com/pjvjay/pantry-api#demo-mode) (deterministic
 stand-ins at the two LLM call sites; the query-plan SQL, abort gates, and
-trip/week optimizers run for real) — see [`demo/`](demo/) for the demo
-image and [`render.yaml`](render.yaml) for the free-tier deploy blueprint
-(Hugging Face Space-compatible too). *The public link lands here once the
-service is provisioned;* meanwhile, `docker compose up` below runs the
-identical stack locally in one command.
+trip/week optimizers run for real). Free-tier hosting: if it's been idle,
+give it ~a minute to wake. Deploy config: [`demo/`](demo/) +
+[`render.yaml`](render.yaml).
 
 **GitOps deployment:** the production path deploys to AKS via the full
 pipeline (see the verified run in
