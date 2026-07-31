@@ -11,12 +11,13 @@ Argo CD), where **a git commit is the only deployment mechanism**.
 This umbrella repo pins all five components as git submodules, carries the
 architecture docs, and ships a one-command local run.
 
-**▶ Live demo:** **[huggingface.co/spaces/pjvjay/pantry-planner](https://huggingface.co/spaces/pjvjay/pantry-planner)** —
-a single-container build of the same GHCR images in
+**▶ Live demo:** a single-container build of the same GHCR images in
 [demo mode](https://github.com/pjvjay/pantry-api#demo-mode) (deterministic
 stand-ins at the two LLM call sites; the query-plan SQL, abort gates, and
-trip/week optimizers run for real). Free-tier Space: give it ~30 s to wake
-if it's been idle.
+trip/week optimizers run for real) — see [`demo/`](demo/) for the Hugging
+Face Space image. *Public Space link lands here once the Space is
+provisioned;* meanwhile, `docker compose up` below runs the identical
+stack locally in one command.
 
 **GitOps deployment:** the production path deploys to AKS via the full
 pipeline (see the verified run in
