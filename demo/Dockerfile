@@ -25,4 +25,5 @@ WORKDIR /tmp
 
 EXPOSE 7860
 
-CMD ["sh", "-c", "python -m pantry_planner.db seed && exec uvicorn pantry_planner.demo_server:root --host 0.0.0.0 --port 7860"]
+# PORT is injected by Render; Hugging Face uses app_port 7860 — honor both.
+CMD ["sh", "-c", "python -m pantry_planner.db seed && exec uvicorn pantry_planner.demo_server:root --host 0.0.0.0 --port ${PORT:-7860}"]

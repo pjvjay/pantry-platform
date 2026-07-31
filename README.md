@@ -14,10 +14,11 @@ architecture docs, and ships a one-command local run.
 **▶ Live demo:** a single-container build of the same GHCR images in
 [demo mode](https://github.com/pjvjay/pantry-api#demo-mode) (deterministic
 stand-ins at the two LLM call sites; the query-plan SQL, abort gates, and
-trip/week optimizers run for real) — see [`demo/`](demo/) for the Hugging
-Face Space image. *Public Space link lands here once the Space is
-provisioned;* meanwhile, `docker compose up` below runs the identical
-stack locally in one command.
+trip/week optimizers run for real) — see [`demo/`](demo/) for the demo
+image and [`render.yaml`](render.yaml) for the free-tier deploy blueprint
+(Hugging Face Space-compatible too). *The public link lands here once the
+service is provisioned;* meanwhile, `docker compose up` below runs the
+identical stack locally in one command.
 
 **GitOps deployment:** the production path deploys to AKS via the full
 pipeline (see the verified run in

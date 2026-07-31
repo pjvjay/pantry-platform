@@ -1,0 +1,19 @@
+# Render Blueprint — deploys the public demo (demo/Dockerfile) as a free
+# web service. Same image contract as the Hugging Face Space variant:
+# GHCR artifacts + DEMO_MODE=1, SPA at /pantry, API at /pantry/api.
+#
+# Free-tier behavior: spins down after 15 min idle; first request after
+# idle takes ~1 min to wake (the app's import chain is the long pole).
+services:
+  - type: web
+    name: pantry-planner-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: demo/Dockerfile
+    dockerContext: demo
+    healthCheckPath: /pantry/api/health
+    autoDeploy: true
+    buildFilter:
+      paths:
+        - demo/**
+        - render.yaml
