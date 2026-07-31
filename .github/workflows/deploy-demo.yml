@@ -29,8 +29,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           if [ -z "$HF_TOKEN" ]; then
-            echo "::error::HF_TOKEN secret is not set (hf.co/settings/tokens, Write scope)"
-            exit 1
+            echo "::notice::HF_TOKEN not set — skipping Space sync (the free demo deploys via render.yaml; HF is the optional PRO path)"
+            exit 0
           fi
           cd demo
           git init -b main
