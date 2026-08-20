@@ -57,8 +57,9 @@ Rollback = `git revert`.
 ```mermaid
 flowchart TB
     user["Browser"] -->|HTTPS| ing["ingress-nginx<br/>(shared AKS ingress + Let's Encrypt)"]
+    agent["MCP client<br/>Claude Desktop · Claude Code"] -->|"HTTPS or local stdio"| ing
     ing -->|"/pantry"| fe["pantry-frontend<br/>nginx + React"]
-    ing -->|"/pantry/api (rewrite)"| api["pantry-api<br/>FastAPI :8000"]
+    ing -->|"/pantry/api (rewrite)"| api["pantry-api<br/>FastAPI :8000<br/>REST + MCP /mcp"]
     api -->|SQL| pg[("CNPG Postgres 17<br/>ns pantry-db")]
     api -->|"Haiku ↔ Sonnet<br/>model router"| claude["Anthropic API"]
     job["migrate Job<br/>(ArgoCD PreSync)"] -->|"DDL + seeds"| pg
@@ -95,6 +96,22 @@ docker compose up --build
 
 Same containers, same migration flow as the cluster — compose plays the role
 of ArgoCD + ingress.
+
+## Use it from an MCP client
+
+The same pipeline is exposed over the
+[Model Context Protocol](https://modelcontextprotocol.io), so Claude Desktop,
+Claude Code, or any agent can browse the catalog, resolve where products come
+from, and run the planners as tools. Two transports, one server definition:
+a `pantry-mcp` console script (stdio, for locally-launched clients) and a
+Streamable HTTP endpoint mounted on the API itself at `/pantry/api/mcp`.
+
+```bash
+claude mcp add --transport http pantry http://localhost:8080/pantry/api/mcp
+```
+
+Setup, the full tool list, and the no-auth caveat for the HTTP endpoint:
+[pantry-api § MCP server](https://github.com/pjvjay/pantry-api#mcp-server).
 
 ## Deploy it
 
