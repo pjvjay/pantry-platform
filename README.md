@@ -140,3 +140,12 @@ The app itself (the Claude model-router pipeline) predates the platform —
 it was a standalone interview artifact. This umbrella wraps it in a
 production-grade GitOps polyrepo architecture, scaled down to be readable
 in an afternoon.
+
+## License
+
+[MIT](LICENSE).
+
+This repo carries the architecture docs, the compose stack and the submodule
+pins. Each component repo is its own project — `pantry-api` already declares
+MIT in its `pyproject.toml`; the others state no licence of their own yet, so
+this file covers what lives here rather than speaking for them.
