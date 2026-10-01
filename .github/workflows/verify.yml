@@ -1,0 +1,59 @@
+# ============================================================
+# pantry-platform — pull-request verification
+#
+# This repo is submodule pins plus the compose stack, so the only thing
+# worth checking is that the PINNED SET is real and coherent:
+#
+#   1. every pin resolves — checkout with submodules fails on a pin that
+#      points at a commit the remote no longer has
+#   2. every app pin is an ANCESTOR of that repo's main — a pin must mark a
+#      merged commit, never a branch tip. A pin to an unmerged branch is
+#      what left this repo diverged from what actually shipped in August.
+#   3. docker compose still parses with the pinned set
+#
+# Required by the ruleset on main.
+# ============================================================
+
+name: verify
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0          # ancestry checks need history, in submodules too
+
+      - name: Every app pin is a merged commit on its repo's main
+        run: |
+          set -euo pipefail
+          fail=0
+          for sub in pantry-api pantry-db pantry-frontend pantry-gitops pantry-infra; do
+            [ -d "$sub/.git" ] || [ -f "$sub/.git" ] || { echo "::error::$sub did not check out"; fail=1; continue; }
+            git -C "$sub" fetch -q origin main
+            pin=$(git -C "$sub" rev-parse --short HEAD)
+            if git -C "$sub" merge-base --is-ancestor HEAD origin/main; then
+              echo "ok    $sub @ $pin is on main"
+            else
+              echo "::error::$sub pinned at $pin is NOT on that repo's main — pins must point at merged commits"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Compose stack parses with the pinned set
+        run: docker compose config --quiet && echo "compose config ok"
