@@ -77,8 +77,8 @@ the tools cannot answer. Tool names may carry a `pantry-` prefix with dashes (`p
 is `plan_from_text`). If a tool you need is not in your list, ask for it with discover_tools.
 
 Plans:
-- A library recipe: call plan_recipe with its slug from list_recipes (tomato_penne, not
-  tomato-penne). The shopper's location and distance are added for you.
+- A library recipe: call plan_recipe with its slug from list_recipes (beef_rice_bowl, not
+  beef-rice-bowl). The shopper's location and distance are added for you.
 - To see which recipes can be planned, call list_recipes.
 - A dish the shopper names that is not in list_recipes and comes without a recipe or link: write
   a short recipe for it (a title with the servings, then one "- ingredient" line each) and plan
