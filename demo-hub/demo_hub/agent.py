@@ -457,10 +457,11 @@ class Agent:
         return self.settings.local_lean_tools and model.startswith("ollama:")
 
     def _with_location(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """A plan call gets the shopper's location (DEMO_SHOPPER_LOCATION) from the hub: the
-        models never see lat/lon (``_plan_tools``), so none drops it (pantry would choose no
-        stores), types it (about 30 tokens) or makes one up (a 3B model sent -74, -84). The
-        model's max_km stands; without one, the shopper's."""
+        """A location-taking tool (LOCATION_TOOLS) gets the shopper's location
+        (DEMO_SHOPPER_LOCATION) from the hub: the models never see lat/lon (``_plan_tools``), so
+        none drops it (pantry would choose no stores), types it (about 30 tokens) or makes one up
+        (a 3B model sent -74, -84; the 8B sent lon +123.11). A plan's valid max_km stands;
+        without one, or outside 0.5-100 km, the shopper's."""
         loc = self.settings.shopper_location
         tool = canonical(name)
         if not loc or tool not in LOCATION_TOOLS:
@@ -473,10 +474,11 @@ class Agent:
         return out
 
     def _plan_tools(self, tools: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
-        """The tools with lat/lon taken out of the plan tools' parameters when the hub supplies
-        the shopper's location (pantry's stores are all in Vancouver); for a local model also
-        max_km (the shopper's distance stands) and verbose (the full plan is for the browser):
-        two arguments a small model got wrong (max_km 0, verbose true)."""
+        """The tools with lat/lon taken out of every location-taking tool's parameters when the
+        hub supplies the shopper's location (pantry's stores are all in Vancouver); for a local
+        model also the plan tools' max_km (the shopper's distance stands) and verbose (the full
+        plan is for the browser): two arguments a small model got wrong (max_km 0, verbose
+        true). The country lists say what they take."""
         if not self.settings.shopper_location:
             return tools
         lean = self._lean(model)

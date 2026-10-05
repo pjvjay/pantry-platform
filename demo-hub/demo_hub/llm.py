@@ -239,8 +239,9 @@ class ChatClient:
         if think is not None:
             body["think"] = think
         if not think and self.settings.local_max_tokens and not json_schema:
-            # a runaway reply (the 8B wrote 856 tokens, 5 minutes, into a recipe's method) is
-            # cut; with thinking on the reasoning counts too, so it is left alone
+            # a runaway reply is cut (the 8B once wrote 856 tokens in one step, then over 1,800 in
+            # the next, at 1.5-2.7 tokens/s); with thinking on the reasoning counts too, so it is
+            # left alone
             options["num_predict"] = self.settings.local_max_tokens
         if json_schema:
             body["format"] = json_schema
