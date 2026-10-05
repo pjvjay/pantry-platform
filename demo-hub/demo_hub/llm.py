@@ -108,6 +108,9 @@ class ChatTurn:
     # Where the time went: ``wall_s`` always; from Ollama also the prompt tokens it actually read
     # (a cached prefix is not re-read), and the seconds spent reading, generating and loading.
     metrics: dict[str, float] = field(default_factory=dict)
+    # The model's own reasoning before it answered, when it shows it (a thinking model in
+    # Ollama: Granite with thinking on); "" otherwise. Not replayed to the model.
+    reasoning: str = ""
 
 
 def tool_arguments(raw: Any, tool: str) -> dict[str, Any]:
@@ -477,4 +480,5 @@ def _ollama_turn(data: dict[str, Any]) -> ChatTurn:
                "thinking_chars": len(str(message.get("thinking") or ""))}
     return ChatTurn(message=stored, text=text, tool_calls=calls,
                     finish_reason=str(data.get("done_reason") or ""),
-                    input_tokens=prompt, output_tokens=output, metrics=metrics)
+                    input_tokens=prompt, output_tokens=output, metrics=metrics,
+                    reasoning=str(message.get("thinking") or ""))

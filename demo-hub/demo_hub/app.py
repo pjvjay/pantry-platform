@@ -18,22 +18,42 @@ import asyncio
 import json
 import os
 import subprocess
+import tempfile
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from demo_hub import mcp_targets
+from demo_hub import mcp_targets, pricing
 from demo_hub.agent import AGENT_TARGETS, Agent
+from demo_hub.evals import evaluate
+from demo_hub.images import ImageCache, ImageError
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
 from demo_hub.mcp_targets import McpTargetError, Targets, open_session
 from demo_hub.settings import Settings
 from demo_hub.sims import PRESETS, SimsClient, SimsError
+from demo_hub.telemetry import (
+    HttpStats,
+    TraceRecorder,
+    TraceStore,
+    add_gateway_spans,
+    compute_metrics,
+)
+
+TELEMETRY_KINDS = ("page", "api", "chat")
+STORES_TTL_S = 600.0
 
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
               "proxy-authorization", "proxy-authenticate", "host", "content-length",
@@ -89,7 +109,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     targets = Targets(settings)
     agent = Agent(settings, targets, ChatClient(settings))
     sims = SimsClient(settings)
+    scratch = Path(tempfile.gettempdir()) / "pantry-demo-hub"
+    store = TraceStore(settings.traces_dir or scratch / "traces")
+    images = ImageCache(settings.images_dir or scratch / "images")
+    http_stats = HttpStats()
+    stores_cache: dict[str, Any] = {"at": 0.0, "names": []}
     app.state.settings, app.state.agent, app.state.targets = settings, agent, targets
+    app.state.traces, app.state.images, app.state.http_stats = store, images, http_stats
+
+    @app.middleware("http")
+    async def timing(request: Request, call_next: Any) -> Response:
+        """Every hub request timed per route; the browser sees the hub's own time in a
+        Server-Timing header (for a stream: until its headers)."""
+        started = time.perf_counter()
+        response = await call_next(request)
+        ms = (time.perf_counter() - started) * 1000
+        route = request.scope.get("route")
+        name = getattr(route, "path", None) or request.url.path
+        if not str(name).startswith("/pantry/assets"):
+            http_stats.record(f"{request.method} {name}", ms, response.status_code)
+        response.headers["Server-Timing"] = f"hub;dur={ms:.1f}"
+        return response
+
+    async def known_stores() -> list[str]:
+        """pantry's store names (for the grounded_stores eval), cached for ten minutes."""
+        if time.monotonic() - stores_cache["at"] < STORES_TTL_S and stores_cache["names"]:
+            return list(stores_cache["names"])
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{settings.pantry_api_url}/stores")
+            if r.status_code == 200:
+                stores_cache.update(at=time.monotonic(), names=[s["name"] for s in r.json()])
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            pass
+        return list(stores_cache["names"])
+
+    async def add_gateway(trace: dict[str, Any]) -> None:
+        if await add_gateway_spans(trace, settings.contextforge_url, settings.contextforge_jwt):
+            store.save(trace)
 
     # --- status --------------------------------------------------------------------------------
 
@@ -210,12 +267,100 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except LLMError as exc:
             raise HTTPException(422, str(exc)) from exc
 
+        recorder = TraceRecorder(conversation_id=conv.id, model=conv.model, target=conv.target,
+                                 message=body.message, disclosure=conv.disclosure_mode,
+                                 turn=len(conv.user_texts) + 1)
+
+        def sse(event: dict[str, Any]) -> bytes:
+            return f"data: {json.dumps(event, default=str)}\n\n".encode()
+
         async def events() -> AsyncIterator[bytes]:
-            async for event in agent.run(conv, body.message):
-                yield f"data: {json.dumps(event, default=str)}\n\n".encode()
+            # Every event is recorded into the turn's trace and stamped for the browser; the
+            # answer's evals arrive just before "done". The trace is kept even when the browser
+            # goes away mid-answer, and ContextForge's spans join it once the turn is over.
+            try:
+                async for event in agent.run(conv, body.message):
+                    if event.get("type") == "done":     # graded with the turn's end in view
+                        recorder.evals = evaluate([*recorder.events, event],
+                                                  await known_stores(), conv.model)
+                        yield sse(recorder.on({"type": "evals", "trace_id": recorder.id,
+                                               **recorder.evals}))
+                    yield sse(recorder.on(event))
+            finally:
+                if recorder.status == "running":
+                    recorder.status = "cancelled"
+                trace = recorder.to_dict()
+                store.save(trace)
+                if any(s["kind"] == "tool" for s in trace["spans"]):
+                    asyncio.get_running_loop().create_task(add_gateway(trace))
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # --- traces, metrics and the browser's own measurements ------------------------------------
+
+    @app.get("/hub/traces")
+    async def trace_list(limit: int = 50) -> list[dict[str, Any]]:
+        return store.list(max(1, min(limit, 500)))
+
+    @app.get("/hub/traces/{trace_id}")
+    async def trace_detail(trace_id: str) -> dict[str, Any]:
+        trace = store.get(trace_id)
+        if trace is None:
+            raise HTTPException(404, f"no trace {trace_id}")
+        return trace
+
+    @app.get("/hub/metrics")
+    async def metrics(limit: int = 200) -> dict[str, Any]:
+        store.refresh()
+        recent = list(store.recent.values())[-max(1, min(limit, 500)):]
+        return {**compute_metrics(recent, http_stats, list(store.frontend)),
+                "prices_usd_per_1m": {k: {"input": v[0], "output": v[1]}
+                                      for k, v in pricing.PRICES.items()},
+                "prices_source": pricing.PRICES_SOURCE,
+                "free_tier_requests_per_day": pricing.FREE_TIER_REQUESTS_PER_DAY}
+
+    @app.post("/hub/telemetry", status_code=204)
+    async def telemetry(request: Request) -> Response:
+        """The browser's own measurements: a page load (web vitals), a batch of API calls, or
+        one chat turn's stream. Small JSON objects only."""
+        raw = await request.body()
+        if len(raw) > 64_000:
+            raise HTTPException(413, "telemetry batch too large")
+        try:
+            record = json.loads(raw)
+        except ValueError as exc:
+            raise HTTPException(400, "telemetry must be JSON") from exc
+        if not isinstance(record, dict) or record.get("kind") not in TELEMETRY_KINDS:
+            raise HTTPException(422, f"telemetry kind must be one of {TELEMETRY_KINDS}")
+        store.add_browser(record)
+        return Response(status_code=204)
+
+    # --- images --------------------------------------------------------------------------------
+
+    def _image(found: tuple[Path, str] | None) -> Response:
+        if found is None:
+            return Response(status_code=404, headers={"Cache-Control": "max-age=3600"})
+        path, ctype = found
+        return FileResponse(path, media_type=ctype, headers={
+            "Cache-Control": "public, max-age=604800", "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'"})
+
+    @app.get("/hub/images/ingredient")
+    async def ingredient_image(name: str) -> Response:
+        try:
+            return _image(await images.ingredient(name[:120]))
+        except ImageError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+
+    @app.get("/hub/images/remote")
+    async def remote_image(url: str) -> Response:
+        if len(url) > 2_000:
+            raise HTTPException(414, "image URL too long")
+        try:
+            return _image(await images.remote(url))
+        except ImageError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
 
     @app.delete("/hub/agent/conversations/{conversation_id}")
     async def agent_forget(conversation_id: str) -> dict[str, bool]:

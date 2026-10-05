@@ -39,6 +39,9 @@ def upstream(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
             return httpx.Response(200, json={"echo": dict(request.url.params.multi_items()),
                                              "body": request.content.decode()},
                                   headers={"x-upstream": "yes"})
+        if host == "pantry.test" and path == "/stores":
+            return httpx.Response(200, json=[{"id": 1, "name": "Pantry Mart Downtown", "lat": 49.28,
+                                              "lon": -123.12, "address": ""}])
         if host == "pantry.test" and path == "/plan/nl":
             return httpx.Response(409, json={"detail": {"aborted": {"code": "budget_infeasible"}}})
         if host == "cf.test" and path == "/health":
@@ -166,7 +169,8 @@ def test_mcp_routes_run_the_operation_on_a_session(monkeypatch: pytest.MonkeyPat
 def test_agent_options_and_stream(monkeypatch: pytest.MonkeyPatch, upstream: Any, tmp_path: Path) -> None:
     skill = tmp_path / "SKILL.md"
     skill.write_text("body")
-    client = make_client(Settings(**{**SETTINGS.__dict__, "recipe_shopper_skill": str(skill)}))
+    client = make_client(Settings(**{**SETTINGS.__dict__, "recipe_shopper_skill": str(skill),
+                                     "traces_dir": str(tmp_path / "traces")}))
     options = client.get("/hub/agent/options").json()
     assert options["default_model"] == "gemini:gemini-3-flash-preview" and options["skill_loaded"] is True
     assert [t["id"] for t in options["targets"]] == ["gateway-recipes", "pantry", "gateway-sim"]
@@ -174,13 +178,29 @@ def test_agent_options_and_stream(monkeypatch: pytest.MonkeyPatch, upstream: Any
     async def fake_run(conv: Any, message: str) -> Any:
         yield {"type": "start", "conversation_id": conv.id}
         yield {"type": "assistant", "text": f"you said {message}"}
+        yield {"type": "done", "steps": 1, "stop": "answered", "seconds": 0.1,
+               "input_tokens": 3, "output_tokens": 2}
 
     agent = client.app.state.agent  # type: ignore[attr-defined]
     monkeypatch.setattr(agent, "run", fake_run)
     r = client.post("/hub/agent/chat", json={"message": "hi"})
     assert r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["server-timing"].startswith("hub;dur=")
     events = [json.loads(line[6:]) for line in r.text.split("\n\n") if line.startswith("data: ")]
-    assert events[1] == {"type": "assistant", "text": "you said hi"}
+    # every event is stamped for the browser: ms since the turn began, and epoch ms
+    assert all(isinstance(e["ts"], float) and e["at"] > 1.7e12 for e in events)
+    assert {k: v for k, v in events[1].items() if k not in ("ts", "at")} == \
+        {"type": "assistant", "text": "you said hi"}
+    trace_id = events[0]["trace_id"]
+    # the answer's evals arrive just before "done", and the turn is kept as a trace
+    assert [e["type"] for e in events[-2:]] == ["evals", "done"]
+    assert events[-2]["trace_id"] == trace_id and events[-2]["answer_confidence"] is not None
+    # graded with the turn's end in view: a finished turn passes "finished"
+    assert {c["name"]: c["passed"] for c in events[-2]["checks"]}["finished"] is True
+    listed = client.get("/hub/traces").json()
+    assert listed[0]["id"] == trace_id and listed[0]["status"] == "answered"
+    assert client.get(f"/hub/traces/{trace_id}").json()["evals"]["checks"]
+    assert client.get("/hub/traces/tr-missing").status_code == 404
     conv_id = events[0]["conversation_id"]
     assert client.delete(f"/hub/agent/conversations/{conv_id}").json() == {"forgotten": True}
     assert client.delete(f"/hub/agent/conversations/{conv_id}").json() == {"forgotten": False}

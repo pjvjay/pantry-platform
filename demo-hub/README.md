@@ -160,12 +160,47 @@ mid-conversation makes it re-read the conversation once.
 | pantry pipeline | Burr UI, http://127.0.0.1:7241 (started by `up.sh`); "Burr trace" links in the Planner and on Assistant tool cards | one run per plan call (`run-<recipe>-<time>-<id>`), every step's inputs and outputs |
 | pantry's LLM calls | `~/.pantry-demo/logs/pantry-api.log`; Planner trace; Assistant "inside pantry" | each attempt phase by phase: DNS, connect, TLS, upload, waiting for Google (and Google's own server-timing), download, retry waits |
 
+Every Assistant turn is also kept as one **trace** (`demo_hub/telemetry.py`), built from the agent's
+own event stream, so the agent loop carries no tracing code, and shown on the **Metrics** tab as a
+waterfall: the turn; each model step (tokens read, cached and new, and written; read and write
+rates; time to first token; model load; the model's reasoning when it shows it, e.g. Granite with
+thinking on; its cost at Google's list price, `pricing.py`); each MCP tool call (result size, the
+characters the model actually reads, the plan's own confidence); under it ContextForge's request
+and tool invocation (from its observability API, so the gateway's overhead shows), pantry's Burr
+steps (`pipeline` on the plan) and pantry's own LLM calls; and the browser's measurements. Traces
+are JSON lines in `~/.pantry-demo/traces/` (`DEMO_TRACES_DIR`); `GET /hub/traces`,
+`/hub/traces/{id}` and `/hub/metrics` serve them, the last rolled up per model, tool, observer,
+eval check, pantry step, browser measure and hub route.
+
+**Online evals and confidence** (`demo_hub/evals.py`): every answer is graded the moment it
+finishes, deterministically, against the turn's own tool results: finished, only offered tools,
+no failed calls, every dollar amount and every store named came from a tool result, a plan's
+answer has the table and names every product, a retried plan kept its location, no scope
+violation. The share that passed is the **answer confidence**, shown under the answer with the
+plan's own confidence (the selector's per-line confidence, exact matches, origin coverage).
+
+**The browser** (`pantry-frontend/src/telemetry.ts`) measures itself and posts to
+`/hub/telemetry`: the page's first byte, Largest Contentful Paint, Interaction to Next Paint,
+layout shift and long tasks; every `/hub` and `/pantry/api` call (with the hub's own time from its
+`Server-Timing` header); and each chat stream: first byte, first event, how late events arrived,
+time to paint. So a slow page shows up as the browser, the hub, the model, the gateway or pantry.
+
+**Pictures**: plan tool calls show a card per purchase with the ingredient's photo (its Wikipedia
+thumbnail, `GET /hub/images/ingredient?name=`), where the trip buys it, the price, origin and
+confidence; a fetched recipe page shows the photos it holds (`GET /hub/images/remote?url=`,
+public http(s) hosts only, raster images up to 3 MB). The hub fetches each once and serves it from
+`~/.pantry-demo/images/`, so the browser never calls a third party.
+
 ContextForge records the gateway traces with `OBSERVABILITY_ENABLED=true` in its `.env`, but the
 admin UI's Observability tab does not render them in 1.0.11 (its dashboard component needs eval,
 which the admin page's CSP and Alpine's CSP build do not allow); `gateway-traces.sh` reads the
 same data from its API.
 
 ## Comparing local models: the bench
+
+`scripts/report-bench.sh` runs the cases behind `docs/local-models-report.md` through ContextForge,
+each kept as a trace with its evals (`WITH_GEMINI=1` adds Gemini 3 Flash and 3.1 Flash-Lite), and
+`python -m demo_hub.report <run dirs>` computes the report's tables from them.
 
 `demo_hub/bench.py` runs the same shopper requests through the Assistant's own agent loop (same
 prompt, same MCP tools on the direct pantry server) for each model, several times, and grades

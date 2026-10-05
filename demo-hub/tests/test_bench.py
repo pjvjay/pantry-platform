@@ -13,6 +13,7 @@ import pytest
 from demo_hub import bench
 from demo_hub.bench import CASES, Run, grade, money_in, summarise
 from demo_hub.llm import LLMError
+from demo_hub.settings import Settings
 
 PENNE = {"query": "penne", "match": "direct", "total": 2, "items": [
     {"name": "Penne Rigate 500g", "store": "GreenLeaf Grocers Kitsilano", "price": 1.97},
@@ -171,7 +172,7 @@ def test_main_runs_interleaved_resumes_and_reports(tmp_path: Path, monkeypatch: 
     order: list[tuple[str, str, int]] = []
 
     async def fake_run_case(agent: Any, model: str, case: Any, rep: int, tools: Any,
-                            disclosure: str = "all") -> Run:
+                            disclosure: str = "all", *rest: Any) -> Run:
         order.append((model, case.id, rep))
         assert tools == bench.CORE_TOOLS
         return Run.from_events(model, case.id, rep, events("I can only help with groceries."))
@@ -221,7 +222,7 @@ def test_main_gives_each_variant_its_own_settings(tmp_path: Path, monkeypatch: p
     seen: dict[str, Any] = {}
 
     async def fake_run_case(agent: Any, spec: str, case: Any, rep: int, tools: Any,
-                            disclosure: str = "all") -> Run:
+                            disclosure: str = "all", *rest: Any) -> Run:
         seen[spec] = agent.chat.settings.ollama_think
         return Run.from_events(spec, case.id, rep, events("I can only help with groceries."))
 
@@ -236,3 +237,31 @@ def test_main_gives_each_variant_its_own_settings(tmp_path: Path, monkeypatch: p
     assert seen == {"ollama:g": None, "ollama:g#think=false": False}
     meta = json.loads((tmp_path / "meta.json").read_text())
     assert meta["model_info"]["ollama:g#think=false"] == {"model": "ollama:g", "options": {"think": False}}
+
+
+def test_a_bench_run_is_kept_as_a_tagged_trace_with_its_online_evals(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from demo_hub.telemetry import TraceStore
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.settings = Settings()
+            self.conversations: dict[str, Any] = {}
+
+        def conversation(self, cid: Any, model: str, target: str, disclosure: str) -> Any:
+            return SimpleNamespace(id="c1", model=model, tools=None)
+
+        async def run(self, conv: Any, message: str) -> Any:
+            for e in events("I can only help with groceries."):
+                yield e
+
+    store = TraceStore(tmp_path)
+    case = next(c for c in bench.CASES if c.id == "out-of-scope")
+    run = asyncio.run(bench.run_case(FakeAgent(), "ollama:m", case, 2, None, "progressive",
+                                     "pantry", store, ["Pantry Mart Downtown"]))
+    trace = store.get(run.trace_id)
+    assert trace is not None and (trace["source"], trace["case"], trace["rep"]) == \
+        ("bench", "out-of-scope", 2)
+    assert trace["evals"]["checks"] and run.answer_confidence == trace["evals"]["answer_confidence"]
+    assert bench.record(run, [])["trace_id"] == run.trace_id
