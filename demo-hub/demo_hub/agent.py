@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -60,6 +61,8 @@ REASONING_CHARS = 8_000            # a step's reasoning sent to the browser and 
 # Plan-summary fields for the browser's trace views, never sent to the model.
 FOR_BROWSER = {"llm_calls", "burr_run", "pipeline"}
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
+# plan tools that choose stores only with a location: the hub fills the shopper's when it is left out
+PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text"}
 
 PREAMBLE = """\
 You are a grocery-planning assistant for shoppers in Vancouver, BC, connected to the pantry MCP
@@ -69,16 +72,16 @@ the tools cannot answer. Tool names may carry a `pantry-` prefix with dashes (`p
 is `plan_from_text`). If a tool you need is not in your list, ask for it with discover_tools.
 
 Plans:
-- A library recipe (list_recipes): call plan_recipe with the shopper's lat, lon and max_km
-  (downtown Vancouver is 49.2827, -123.1207; 5 km unless the shopper says otherwise). Without
-  them it chooses no stores.
+- A library recipe (list_recipes): call plan_recipe with its slug. The shopper's location
+  (downtown Vancouver, 5 km) is added for you; pass lat, lon and max_km only when the shopper
+  names another place or distance.
 - To see which recipes can be planned, call list_recipes.
 - A dish the shopper names that is not in list_recipes and comes without a recipe or link: write
   a short recipe for it (a title with the servings, then one "- ingredient" line each) and plan
   it with plan_from_text, allow_partial true.
 - A recipe link or a pasted recipe: follow the recipe-shopper procedure.
-- If a plan call fails or times out, call it again with the same arguments, the location
-  included; never drop the location to get an answer.
+- If a plan call fails or times out, call it again with the same arguments; never drop a
+  location the shopper gave to get an answer.
 - A line's trip_store and trip_price are where the recommended trip buys it; its store and price
   are only its cheapest offer in range. With no trip, the plan chose no stores: say so.
 - Origin: report the plan's own origin_status and coverage; call get_product_origins only with the
@@ -124,21 +127,67 @@ def load_policy(spec: str) -> Policy:
     return policy
 
 
-def openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{"type": "function", "function": {
-        "name": t["name"],
-        "description": (t.get("description") or "")[:1024],
-        "parameters": t.get("inputSchema") or {"type": "object", "properties": {}},
-    }} for t in tools]
+def openai_tools(tools: list[dict[str, Any]], lean: bool = False) -> list[dict[str, Any]]:
+    """The tools as function definitions. ``lean`` (local models) drops what costs reading time
+    and tells the model nothing: docstring indentation, a schema's titles, ``anyOf [X, null]``
+    around optional fields and their null defaults; and keeps a description to its first
+    paragraphs, up to LEAN_DESCRIPTION characters (plan_recipe: 1,997 characters to about 900)."""
+    out = []
+    for t in tools:
+        description = t.get("description") or ""
+        parameters = t.get("inputSchema") or {"type": "object", "properties": {}}
+        if lean:
+            description = lean_description(description)
+            parameters = lean_schema(parameters)
+        out.append({"type": "function", "function": {
+            "name": t["name"], "description": description[:1024], "parameters": parameters}})
+    return out
+
+
+LEAN_DESCRIPTION = 600
+
+
+def lean_description(text: str, limit: int = LEAN_DESCRIPTION) -> str:
+    """Paragraphs with their lines joined and indentation gone, as many whole ones as fit in
+    ``limit`` (the first always, cut at a sentence if it is longer)."""
+    paragraphs = [" ".join(line.strip() for line in p.splitlines() if line.strip())
+                  for p in re.split(r"\n\s*\n", text.strip())]
+    paragraphs = [p for p in paragraphs if p]
+    if not paragraphs:
+        return ""
+    kept = [paragraphs[0]]
+    for p in paragraphs[1:]:
+        if len("\n".join([*kept, p])) > limit:
+            break
+        kept.append(p)
+    out = "\n".join(kept)
+    if len(out) > limit:
+        cut = out[:limit].rfind(". ")
+        out = out[:cut + 1] if cut > limit // 2 else out[:limit]
+    return out
+
+
+def lean_schema(node: Any) -> Any:
+    if isinstance(node, list):
+        return [lean_schema(x) for x in node]
+    if not isinstance(node, dict):
+        return node
+    options = node.get("anyOf")
+    if isinstance(options, list) and len(options) == 2 and {"type": "null"} in options:
+        merged = {k: v for k, v in node.items() if k != "anyOf"}
+        merged.update(next(o for o in options if o != {"type": "null"}))
+        node = merged
+    return {k: lean_schema(v) for k, v in node.items()
+            if k != "title" and not (k == "default" and v is None)}
 
 
 TOOLS_PREFIX = "More tools are now available; call them like the others"
 
 
-def announce_tools(tools: list[dict[str, Any]]) -> str:
+def announce_tools(tools: list[dict[str, Any]], lean: bool = False) -> str:
     """Tools offered after the first step, as a message: name, description and parameters."""
     lines = [f"{TOOLS_PREFIX}:"]
-    for t in openai_tools(tools):
+    for t in openai_tools(tools, lean):
         fn = t["function"]
         lines.append(f"- {fn['name']}: {fn['description']}\n  parameters: "
                      f"{json.dumps(fn['parameters'], ensure_ascii=False)}")
@@ -269,7 +318,7 @@ class Agent:
         system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
                   else system_prompt(self.settings)}
         functions = ([DISCOVER_FUNCTION] if d.discoverable else []) + openai_tools(
-            d.offered_tools())
+            d.offered_tools(), lean=self._lean(model))
         return await self.chat.warm(model, [system], functions)
 
     async def run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
@@ -314,13 +363,13 @@ class Agent:
                     if self._stable_tools(conv):
                         offered, later = self._split_offered(conv, offered)
                         if later:
-                            conv.messages.append({"role": "user",
-                                                  "content": announce_tools(later)})
+                            conv.messages.append({"role": "user", "content": announce_tools(
+                                later, lean=self._lean(conv.model))})
                             conv.announced.update(t["name"] for t in later)
                             yield {"type": "notice", "text": "tools announced in the conversation: "
                                    + ", ".join(t["name"] for t in later)}
                     functions = ([DISCOVER_FUNCTION] if d.discoverable else []) + openai_tools(
-                        offered)
+                        offered, lean=self._lean(conv.model))
                     while True:
                         # A model call can take minutes on a local CPU model: say what is awaited.
                         yield {"type": "thinking", "step": steps, "model": conv.model}
@@ -360,14 +409,34 @@ class Agent:
                         yield self._done(conv, steps, "answered", started)
                         return
                     for call in turn.tool_calls:
+                        sent = self._with_location(call["name"], call["arguments"])
+                        filled = sorted(k for k in sent if k not in call["arguments"])
+                        call = {**call, "arguments": sent}
                         yield {"type": "tool_call", "id": call["id"], "name": call["name"],
-                               "arguments": call["arguments"], "step": steps}
+                               "arguments": sent, "step": steps,
+                               **({"filled_by_hub": filled} if filled else {})}
                         async for event in self._tool(conv, session, call, steps):
                             yield event
                 yield self._done(conv, steps, "step budget reached", started)
         except (LLMError, McpTargetError) as exc:
             yield {"type": "error", "message": str(exc)}
             yield self._done(conv, steps, "error", started)
+
+    def _lean(self, model: str) -> bool:
+        return self.settings.local_lean_tools and model.startswith("ollama:")
+
+    def _with_location(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """A plan call without a location gets the shopper's (DEMO_SHOPPER_LOCATION): without one
+        pantry chooses no stores, and a model that drops it (or must type it) costs an answer or
+        about 30 tokens of writing."""
+        loc = self.settings.shopper_location
+        if not loc or canonical(name) not in PLAN_LOCATION_TOOLS or (
+                arguments.get("lat") is not None and arguments.get("lon") is not None):
+            return arguments
+        filled = {"lat": loc[0], "lon": loc[1]}
+        if arguments.get("max_km") is None:
+            filled["max_km"] = loc[2]
+        return {**arguments, **filled}
 
     def _stable_tools(self, conv: Conversation) -> bool:
         return (self.settings.local_stable_tools and conv.model.startswith("ollama:")

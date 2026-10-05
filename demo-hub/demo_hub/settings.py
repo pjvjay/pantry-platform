@@ -66,6 +66,12 @@ class Settings:
     # Keep a local model's tools block as it was at the conversation's first step and announce
     # tools offered later in a message (agent.announce_tools): the prompt only grows.
     local_stable_tools: bool = False
+    # A local model's tool definitions without indentation, schema titles and null wrappers,
+    # and descriptions to their first paragraphs (agent.openai_tools).
+    local_lean_tools: bool = True
+    # The shopper's location the hub adds to a plan call that leaves it out: lat, lon, km
+    # (DEMO_SHOPPER_LOCATION="49.2827,-123.1207,5"; "" adds none).
+    shopper_location: tuple[float, float, float] | None = (49.2827, -123.1207, 5.0)
     # How long Ollama keeps the model, and with it the cached prompt, after a call.
     ollama_keep_alive: str = "30m"
     # Every model call's timing, for the next call's estimate ("" keeps it in memory only).
@@ -110,6 +116,9 @@ class Settings:
             not in ("0", "false", "no"),
             local_stable_tools=env.get("DEMO_LOCAL_STABLE_TOOLS", "0").lower()
             in ("1", "true", "yes"),
+            local_lean_tools=env.get("DEMO_LOCAL_LEAN_TOOLS", "1").lower()
+            not in ("0", "false", "no"),
+            shopper_location=_location(env.get("DEMO_SHOPPER_LOCATION", "49.2827,-123.1207,5")),
             ollama_keep_alive=env.get("DEMO_OLLAMA_KEEP_ALIVE", Settings.ollama_keep_alive),
             ollama_temperature=float(env["OLLAMA_TEMPERATURE"]) if env.get("OLLAMA_TEMPERATURE")
             else None,
@@ -128,3 +137,12 @@ def _flag(raw: str) -> bool | None:
     if value in ("0", "false", "no", "off"):
         return False
     return None
+
+
+def _location(value: str) -> tuple[float, float, float] | None:
+    """"lat,lon,km" -> the tuple; "" -> None."""
+    parts = [x.strip() for x in value.split(",") if x.strip()]
+    if not parts:
+        return None
+    lat, lon, km = (float(x) for x in (parts + ["5"])[:3])
+    return lat, lon, km

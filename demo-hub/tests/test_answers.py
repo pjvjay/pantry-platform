@@ -116,3 +116,37 @@ def test_a_cloud_model_still_reads_the_json(session: FakeSession) -> None:  # no
     run(Agent(Settings(observer_model=""), FakeTargets(), chat), "plan it")
     tool_message = next(m for m in chat.requests[1]["messages"] if m["role"] == "tool")
     assert json.loads(tool_message["content"])["summary"]["recipe_name"] == "Tomato Penne"
+
+
+def test_lean_tools_drop_indentation_titles_and_null_wrappers() -> None:
+    from demo_hub.agent import lean_description, lean_schema, openai_tools
+    doc = ("Plan a recipe: matches every ingredient.\n    Get slugs from list_recipes first.\n\n"
+           "    Pass the shopper's location\n    to get stores.\n\n    " + "x" * 700)
+    assert lean_description(doc) == ("Plan a recipe: matches every ingredient. Get slugs from "
+                                      "list_recipes first.\nPass the shopper's location to get stores.")
+    schema = {"title": "plan_recipeArguments", "type": "object", "required": ["slug"],
+              "properties": {"slug": {"title": "Slug", "type": "string"},
+                             "lat": {"anyOf": [{"type": "number", "maximum": 90}, {"type": "null"}],
+                                     "default": None, "title": "Lat"}}}
+    assert lean_schema(schema) == {"type": "object", "required": ["slug"], "properties": {
+        "slug": {"type": "string"}, "lat": {"type": "number", "maximum": 90}}}
+    tool = {"name": "t", "description": doc, "inputSchema": schema}
+    assert openai_tools([tool])[0]["function"]["parameters"] == schema       # cloud: untouched
+    assert len(str(openai_tools([tool], lean=True))) < len(str(openai_tools([tool]))) / 2
+
+
+def test_the_hub_adds_the_shoppers_location_to_a_plan_call_without_one() -> None:
+    agent = Agent(Settings(observer_model=""), FakeTargets(), ScriptedChat())
+    assert agent._with_location("pantry-plan-recipe", {"slug": "tomato_penne"}) == {
+        "slug": "tomato_penne", "lat": 49.2827, "lon": -123.1207, "max_km": 5.0}
+    given = {"slug": "s", "lat": 49.0, "lon": -123.0}
+    assert agent._with_location("pantry-plan-recipe", given) == given        # the shopper's own
+    assert agent._with_location("pantry-find-product", {"query": "x"}) == {"query": "x"}
+    off = Agent(Settings(observer_model="", shopper_location=None), FakeTargets(), ScriptedChat())
+    assert off._with_location("plan_recipe", {"slug": "s"}) == {"slug": "s"}
+
+
+def test_shopper_location_parses_from_the_environment() -> None:
+    from demo_hub.settings import _location
+    assert _location("49.2827,-123.1207,5") == (49.2827, -123.1207, 5.0)
+    assert _location("49.3,-123.1") == (49.3, -123.1, 5.0) and _location("") is None

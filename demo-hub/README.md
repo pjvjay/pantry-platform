@@ -172,6 +172,16 @@ are JSON lines in `~/.pantry-demo/traces/` (`DEMO_TRACES_DIR`); `GET /hub/traces
 `/hub/traces/{id}` and `/hub/metrics` serve them, the last rolled up per model, tool, observer,
 eval check, pantry step, browser measure and hub route.
 
+**One run, every system** (`GET /hub/runs/{id}`, `demo_hub/runs.py`; the **run** button on the
+Metrics tab and **run details** under each answer): the trace above joined with what lives
+elsewhere, on one clock: each plan call's Burr run read from pantry's tracker files
+(`DEMO_BURR_DIR`, set by `up.sh`): every action at its recorded start and end, its result, any
+exception and the state it changed; and each tool call's ContextForge trace (request, tool
+invocation, status, response size, tool and gateway ids). The page shows the run's numbers, where
+its time went (queued, reading, writing, tools, ContextForge, observers, the hub), a timeline you
+can zoom into (a 0.6 s tool call inside a 7-minute turn), each model step, each tool call with its
+gateway and Burr detail, the observers, the evals, the browser's numbers and the answer.
+
 **Online evals and confidence** (`demo_hub/evals.py`): every answer is graded the moment it
 finishes, deterministically, against the turn's own tool results: finished, only offered tools,
 no failed calls, every dollar amount and every store named came from a tool result, a plan's
@@ -195,6 +205,27 @@ ContextForge records the gateway traces with `OBSERVABILITY_ENABLED=true` in its
 admin UI's Observability tab does not render them in 1.0.11 (its dashboard component needs eval,
 which the admin page's CSP and Alpine's CSP build do not allow); `gateway-traces.sh` reads the
 same data from its API.
+
+## Making local models faster
+
+A Granite 8B answer on the demo laptop (4 Intel cores, no GPU) spent about 57% of its time reading
+its prompt and 43% writing (docs/local-models-report.md). What the hub does about it, measured in
+`docs/local-speed.md`:
+
+| | What | Setting |
+|---|---|---|
+| The table, by code | a plan's (or week's) table is built from the tool result and appended to the model's two or three sentences (`answers.py`); exact by construction | always |
+| Compact plans | a local model reads a plan as short lines, about a fifth of the JSON | `DEMO_LOCAL_COMPACT_PLANS` (on) |
+| Tool order | `discover_tools` first, then tools in the order offered: one added later goes last, so the cached prompt holds up to it | always |
+| Warm-up | the model reads the instructions and first tools while the shopper types (`POST /hub/agent/warm`; the Assistant calls it when a local model is chosen) | always for `ollama:` models |
+| Lean tool definitions | a local model's tools without docstring indentation, schema titles and null wrappers, descriptions to their first paragraphs: the catalog's definitions from 16,540 characters to 10,214 | `DEMO_LOCAL_LEAN_TOOLS` (on) |
+| The shopper's location, by the hub | a plan call without lat/lon gets the shopper's (downtown Vancouver, 5 km): no tokens spent typing it, and no plan loses its stores | `DEMO_SHOPPER_LOCATION` (`49.2827,-123.1207,5`; empty: off) |
+| Stable tools | the tools block stays as it was at the first step; later tools are announced in a message, so the prompt only grows | `DEMO_LOCAL_STABLE_TOOLS` (off) |
+| Keep the model loaded | how long Ollama keeps the model, and its cache, after a call | `DEMO_OLLAMA_KEEP_ALIVE` (30m) |
+
+`python -m demo_hub.speed --model M [--model M2]` measures a model's read and write rates on the
+Assistant's own instructions; `MODELS="spec ..." [WARM=1] scripts/speed-bench.sh OUT` runs the
+report's three cases per model.
 
 ## Comparing local models: the bench
 
