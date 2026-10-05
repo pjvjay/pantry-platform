@@ -220,7 +220,7 @@ its prompt and 43% writing (docs/local-models-report.md). What the hub does abou
 | Warm-up | the model reads the instructions and first tools while the shopper types (`POST /hub/agent/warm`; the Assistant calls it when a local model is chosen) | always for `ollama:` models |
 | Lean tool definitions | a local model's tools without docstring indentation, schema titles and null wrappers, descriptions to their first paragraphs: the catalog's definitions from 16,540 characters to 10,214 | `DEMO_LOCAL_LEAN_TOOLS` (on) |
 | The shopper's location, by the hub | a plan call without lat/lon gets the shopper's (downtown Vancouver, 5 km): no tokens spent typing it, and no plan loses its stores | `DEMO_SHOPPER_LOCATION` (`49.2827,-123.1207,5`; empty: off) |
-| Stable tools | the tools block stays as it was at the first step; later tools are announced in a message, so the prompt only grows | `DEMO_LOCAL_STABLE_TOOLS` (off) |
+| Stable tools | the tools block stays as it was at the first step; later tools are announced in a message, so the prompt only grows. Measured and left off: the 8B did not call a tool it was only told about | `DEMO_LOCAL_STABLE_TOOLS` (off) |
 | Keep the model loaded | how long Ollama keeps the model, and its cache, after a call | `DEMO_OLLAMA_KEEP_ALIVE` (30m) |
 
 `python -m demo_hub.speed --model M [--model M2]` measures a model's read and write rates on the

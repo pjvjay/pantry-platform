@@ -325,7 +325,8 @@ The header polls pantry's health and runtime settings: 149 calls each over this 
 
    Tighten the menu clerk so a listing request adds no planning tools.
 3. **Make Granite faster without changing the model.** Estimated together: 7.4 minutes → about 2
-   minutes per answer on this laptop.
+   minutes per answer on this laptop. *Done since, with more (`local-speed.md`): the 8B measured
+   a median 85 s per answer, 3 of 3 correct.*
    - Keep the instructions and tool definitions warm: a warm-up request at start-up and after each
      turn, plus a second Ollama slot so the bench and the console don't evict each other.
    - Let code render the plan table from the tool result, and have the model write two or three
