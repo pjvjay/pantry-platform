@@ -1,0 +1,51 @@
+{
+ "products": [
+  {
+   "product": "Fresh Garlic",
+   "claim_type": "product-of",
+   "ingredient_origin": "China",
+   "manufactured_in": "China",
+   "verbatim": "Product of China",
+   "confidence": "medium",
+   "note": "database record disagrees with the label photo"
+  },
+  {
+   "product": "Olive Oil 1L",
+   "claim_type": "packaged-in",
+   "ingredient_origin": "Italy, Spain, Greece",
+   "manufactured_in": "Canada",
+   "verbatim": "Packaged in Canada from imported olive oils",
+   "confidence": "medium",
+   "note": ""
+  },
+  {
+   "product": "Chicken Thighs Bone-In",
+   "claim_type": "product-of",
+   "ingredient_origin": "Canada",
+   "manufactured_in": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "note": ""
+  },
+  {
+   "product": "Whole Milk 1L",
+   "claim_type": "product-of",
+   "ingredient_origin": "Canada",
+   "manufactured_in": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "note": ""
+  },
+  {
+   "product": "Eggs Large Dozen",
+   "claim_type": "product-of",
+   "ingredient_origin": "Canada",
+   "manufactured_in": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "note": ""
+  }
+ ],
+ "model": "demo",
+ "usage": {}
+}

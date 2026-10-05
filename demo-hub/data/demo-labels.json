@@ -1,0 +1,324 @@
+{
+ "labels": [
+  {
+   "product": "Penne Rigate 500g",
+   "claim_type": "product-of",
+   "country": "Italy",
+   "verbatim": "Product of Italy",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/penne-rigate-500g.jpg"
+  },
+  {
+   "product": "Gluten-Free Penne 340g",
+   "claim_type": "product-of",
+   "country": "United States",
+   "verbatim": "Product of USA",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/gluten-free-penne-340g.jpg"
+  },
+  {
+   "product": "Canned Diced Tomatoes",
+   "claim_type": "product-of",
+   "country": "United States",
+   "verbatim": "Product of U.S.A.",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/canned-diced-tomatoes.jpg"
+  },
+  {
+   "product": "Crushed Tomatoes Canned 796ml",
+   "claim_type": "product-of",
+   "country": "Italy",
+   "verbatim": "Prodotto in Italia / Product of Italy",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/crushed-tomatoes-canned-796ml.jpg"
+  },
+  {
+   "product": "Passata Strained Tomatoes 680ml",
+   "claim_type": "product-of",
+   "country": "Italy",
+   "verbatim": "Product of Italy",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/passata-strained-tomatoes-680ml.jpg"
+  },
+  {
+   "product": "Fresh Garlic",
+   "claim_type": "grown-in",
+   "country": "Mexico",
+   "verbatim": "Grown in Mexico",
+   "confidence": "medium",
+   "importer_only": "",
+   "note": "",
+   "file": "demo/fresh-garlic.jpg"
+  },
+  {
+   "product": "Extra Virgin Olive Oil 500ml",
+   "claim_type": "product-of",
+   "country": "Spain",
+   "verbatim": "Product of Spain",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/extra-virgin-olive-oil-500ml.jpg"
+  },
+  {
+   "product": "Mozzarella Shredded 200g",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/mozzarella-shredded-200g.jpg"
+  },
+  {
+   "product": "Spaghetti Pasta 500g",
+   "claim_type": "made-in",
+   "country": "Canada",
+   "verbatim": "Made in Canada from domestic and imported ingredients",
+   "confidence": "medium",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/spaghetti-pasta-500g.jpg"
+  },
+  {
+   "product": "Ground Beef Lean",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/ground-beef-lean.jpg"
+  },
+  {
+   "product": "Ground Beef Medium 900g",
+   "claim_type": "product-of",
+   "country": "United States",
+   "verbatim": "Product of USA",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/ground-beef-medium-900g.jpg"
+  },
+  {
+   "product": "Yellow Onion",
+   "claim_type": "grown-in",
+   "country": "United States",
+   "verbatim": "Grown in USA",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/yellow-onion.jpg"
+  },
+  {
+   "product": "Red Onion",
+   "claim_type": "grown-in",
+   "country": "Mexico",
+   "verbatim": "Product of Mexico",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/red-onion.jpg"
+  },
+  {
+   "product": "Basmati Rice 2kg",
+   "claim_type": "product-of",
+   "country": "India",
+   "verbatim": "Product of India",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/basmati-rice-2kg.jpg"
+  },
+  {
+   "product": "Jasmine Rice 2kg",
+   "claim_type": "product-of",
+   "country": "Thailand",
+   "verbatim": "Product of Thailand",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/jasmine-rice-2kg.jpg"
+  },
+  {
+   "product": "Long Grain White Rice 1kg",
+   "claim_type": "product-of",
+   "country": "United States",
+   "verbatim": "Product of USA",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/long-grain-white-rice-1kg.jpg"
+  },
+  {
+   "product": "Chicken Thighs Boneless 450g",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/chicken-thighs-boneless-450g.jpg"
+  },
+  {
+   "product": "Boneless Skinless Chicken Breast",
+   "claim_type": "product-of",
+   "country": "United States",
+   "verbatim": "Product of U.S.A.",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/boneless-skinless-chicken-breast.jpg"
+  },
+  {
+   "product": "Broccoli Crown",
+   "claim_type": "grown-in",
+   "country": "United States",
+   "verbatim": "Grown in USA",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/broccoli-crown.jpg"
+  },
+  {
+   "product": "Frozen Broccoli 500g",
+   "claim_type": "product-of",
+   "country": "Mexico",
+   "verbatim": "Product of Mexico",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/frozen-broccoli-500g.jpg"
+  },
+  {
+   "product": "Fresh Ginger",
+   "claim_type": "grown-in",
+   "country": "China",
+   "verbatim": "Product of China",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/fresh-ginger.jpg"
+  },
+  {
+   "product": "Canola Oil 1L",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/canola-oil-1l.jpg"
+  },
+  {
+   "product": "Cheddar Cheese Block 300g",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/cheddar-cheese-block-300g.jpg"
+  },
+  {
+   "product": "Butter Salted 454g",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/butter-salted-454g.jpg"
+  },
+  {
+   "product": "Pure Maple Syrup 540ml",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/pure-maple-syrup-540ml.jpg"
+  },
+  {
+   "product": "Liquid Honey 500g",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Canada No. 1 Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/liquid-honey-500g.jpg"
+  },
+  {
+   "product": "Hass Avocados 2-Pack",
+   "claim_type": "grown-in",
+   "country": "Mexico",
+   "verbatim": "Product of Mexico",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/hass-avocados-2-pack.jpg"
+  },
+  {
+   "product": "Limes 4-Pack",
+   "claim_type": "grown-in",
+   "country": "Mexico",
+   "verbatim": "Product of Mexico",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/limes-4-pack.jpg"
+  },
+  {
+   "product": "Atlantic Salmon Fillet 400g",
+   "claim_type": "farmed-in",
+   "country": "Canada",
+   "verbatim": "Farm raised in Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/atlantic-salmon-fillet-400g.jpg"
+  },
+  {
+   "product": "Raw Shrimp 340g",
+   "claim_type": "farmed-in",
+   "country": "Vietnam",
+   "verbatim": "Farmed in Vietnam",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/raw-shrimp-340g.jpg"
+  },
+  {
+   "product": "Light Soy Sauce 500ml",
+   "claim_type": "made-in",
+   "country": "China",
+   "verbatim": "Made in China",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/light-soy-sauce-500ml.jpg"
+  },
+  {
+   "product": "Dark Soy Sauce 500ml",
+   "claim_type": "packaged-in",
+   "country": "Canada",
+   "verbatim": "Imported by Coastline Foods Ltd., Vancouver BC",
+   "confidence": "medium",
+   "importer_only": true,
+   "note": "importer address only: not an origin",
+   "file": "demo/dark-soy-sauce-500ml.jpg"
+  }
+ ]
+}

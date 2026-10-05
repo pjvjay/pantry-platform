@@ -1,0 +1,478 @@
+"""The Assistant: a grocery agent that plans by calling the pantry MCP tools.
+
+Each user message runs a tool-use loop: the model sees the target's MCP catalog as functions,
+asks for calls, the hub runs them on the MCP session and feeds the results back, until the model
+answers without asking for a tool (or the step budget runs out). Every step is yielded as an
+event, so the browser shows the tool traffic as it happens.
+
+The system prompt is a short preamble plus pantry-api's recipe-shopper skill (its frontmatter
+stripped), the same SOP the simulations grade the agent against.
+
+Tools are disclosed progressively by default (``disclosure.py``, the policy in
+``assistant_policy.py`` written with the ``observers`` SDK): a conversation starts with a few
+tools, and observers watching the shopper's messages and the tool traffic enable more, and the
+skill, when they see what calls for them; the agent can also ask for tools with
+``discover_tools``. ``disclosure="all"`` offers every tool and the skill from the first call and
+runs no observers, as before.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import json
+import time
+import uuid
+from collections import OrderedDict
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from demo_hub.disclosure import (
+    DISCOVER,
+    DISCOVER_FUNCTION,
+    JUDGE_SYSTEM,
+    REPORT_SCHEMA,
+    Disclosure,
+    Judge,
+    canonical,
+    judge_prompt,
+    parse_reports,
+)
+from demo_hub.llm import (
+    ChatClient,
+    ChatTurn,
+    LLMError,
+    ModelUnavailable,
+    QuotaExhausted,
+    parse_model,
+)
+from demo_hub.mcp_targets import McpTargetError, Targets, call_tool, open_session
+from demo_hub.observers import Condition, Policy, View
+from demo_hub.settings import Settings
+
+MAX_CONVERSATIONS = 50
+GOAL_PREFIX = "Goal enabled by observation"
+RESULT_CHARS_FOR_MODEL = 16_000
+# Plan-summary fields for the browser's trace views, never sent to the model.
+FOR_BROWSER = {"llm_calls", "burr_run"}
+AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
+
+PREAMBLE = """\
+You are a grocery-planning assistant for shoppers in Vancouver, BC. You are connected to the
+pantry MCP server through tools. Every product, price, store, distance, origin and total you
+mention must come from a tool result in this conversation; never invent or estimate one, and say
+plainly when the tools cannot answer. Tool names may carry a `pantry-` prefix with dashes
+(`pantry-plan-from-text` is the skill's `plan_from_text`). For a recipe link or a pasted recipe,
+follow the recipe-shopper procedure (below, or added to the conversation when a recipe arrives).
+If a tool you need is not in your list, ask for it with discover_tools when you have it. When
+the shopper names a dish without a recipe or
+link ("stir-fry veggies for 3 meals"), write a short recipe for it yourself (a title with the
+servings, then one "- ingredient" line each) and plan it with plan_from_text, allow_partial
+true: it picks a store near the shopper for every item. For a library recipe (list_recipes),
+call plan_recipe with the shopper's lat, lon and max_km (downtown Vancouver is 49.2827,
+-123.1207; 5 km unless the shopper says otherwise): without them it chooses no stores. If a
+plan call fails or times out, call it again with the same arguments, the location included;
+never drop the location to get an answer. Never answer with a recipe alone: the answer is what
+to buy, the total, the recommended trip, and what could not be found. A line's `trip_store` and
+`trip_price` say where the recommended trip buys it; its `store` and `price` are only its
+cheapest offer in range. Name a store, a trip or a shopping location only when the result shows
+it: lines without a store and no `trip` mean the plan chose no stores, so say so. How much of a
+basket's origin is verified is the plan's own `origin_status` and `coverage`; call
+get_product_origins only with the basket's product_ids, never for the whole catalog.
+
+Answer a plan in Markdown, in this shape and nothing more:
+### <recipe name> (<servings>)
+| Item | Product | Store | Price | Origin |
+|---|---|---|---|---|
+(one row per line: ingredient, product, trip_store and trip_price, or store and price when there
+is no trip, and origin_country or origin_status)
+**Total:** the lines' total; with a trip, its total with travel and its stop(s)
+**Origin:** origin_status and the share verified (coverage), only when origin was asked about
+**Not found:** the not_stocked, out_of_range and skipped ingredients, or "nothing"
+No other notes, no field names, no restating the table in prose. For other questions
+(a product's price, a week of dinners, where a product comes from), call the matching tool and
+report its result.
+
+Environment notes: you cannot run scripts or open a shell here. Read a recipe page with the
+fetch tool (markdown, max_length 20000; call again with start_index if it is truncated before the
+ingredient list). The server's default shopping location is downtown Vancouver.
+"""
+
+
+def load_skill(path: str) -> str:
+    """The SKILL.md body without its YAML frontmatter; "" when the file is missing."""
+    if not path:
+        return ""
+    try:
+        text = Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4:]
+    return text.strip()
+
+
+def system_prompt(settings: Settings) -> str:
+    skill = load_skill(settings.recipe_shopper_skill)
+    return PREAMBLE + (f"\n# Recipe-shopper procedure\n\n{skill}\n" if skill else "")
+
+
+def load_policy(spec: str) -> Policy:
+    """``package.module:NAME`` -> the Policy object it names (DEMO_AGENT_POLICY)."""
+    module, _, attr = spec.partition(":")
+    policy = getattr(importlib.import_module(module), attr or "POLICY")
+    if not isinstance(policy, Policy):
+        raise TypeError(f"{spec} is not an observers.Policy")
+    return policy
+
+
+def openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"type": "function", "function": {
+        "name": t["name"],
+        "description": (t.get("description") or "")[:1024],
+        "parameters": t.get("inputSchema") or {"type": "object", "properties": {}},
+    }} for t in tools]
+
+
+def result_for_model(result: dict[str, Any], limit: int = RESULT_CHARS_FOR_MODEL) -> str:
+    """The tool result as the model reads it: the structured content as JSON (or the text), at
+    most `limit` characters. A plan summary's `llm_calls` and `burr_run` (where pantry's LLM time
+    went and its Burr trace, for the browser) are left out: the model has no use for them and pays
+    for every token. JSON over
+    the limit is shrunk by shortening its longest lists, so it stays valid and says what was left
+    out; only what still does not fit is cut."""
+    body = result.get("structured")
+    summary = body.get("summary") if isinstance(body, dict) else None
+    if isinstance(summary, dict) and FOR_BROWSER & summary.keys():
+        body = {**body, "summary": {k: v for k, v in summary.items() if k not in FOR_BROWSER}}
+    if body is not None:
+        text = json.dumps(body, ensure_ascii=False)
+        if len(text) > limit:
+            text = json.dumps(shrink_json(body, limit), ensure_ascii=False)
+    else:
+        text = result.get("text", "")
+    if result.get("is_error"):
+        text = f"ERROR: {text}"
+    return text[:limit]
+
+
+def shrink_json(body: Any, limit: int) -> Any:
+    """`body` with its longest lists halved, longest first, until its JSON fits in `limit`
+    characters. Each shortened list ends with a note of how many items it left out, so the model
+    knows the answer is partial and can ask for less (ids, a search, a smaller page)."""
+    body = json.loads(json.dumps(body))            # a copy the browser's result never sees
+    for _ in range(40):
+        if len(json.dumps(body, ensure_ascii=False)) <= limit:
+            break
+        lists = _lists(body)
+        if not lists:
+            break
+        _, longest = max(lists, key=lambda sl: sl[0])
+        note = longest[-1] if isinstance(longest[-1], str) and longest[-1].startswith("... ") \
+            else None
+        items = longest[:-1] if note else longest
+        hidden = int(note.split()[1]) if note else 0
+        keep = max(1, len(items) // 2)
+        hidden += len(items) - keep
+        longest[:] = [*items[:keep], SHRUNK_NOTE.format(hidden)]
+    return body
+
+
+SHRUNK_NOTE = "... {} more not shown: ask for fewer (ids, a search, a smaller limit)"
+
+
+def _lists(node: Any) -> list[tuple[int, list[Any]]]:
+    """Every list in `node` with more than one item, with the size of its JSON."""
+    if isinstance(node, list):
+        found = [(len(json.dumps(node, ensure_ascii=False)), node)] if len(node) > 1 else []
+        return found + [x for item in node for x in _lists(item)]
+    if isinstance(node, dict):
+        return [x for value in node.values() for x in _lists(value)]
+    return []
+
+
+@dataclass
+class Conversation:
+    id: str
+    model: str
+    target: str
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    tried: set[str] = field(default_factory=set)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    # Offer only these tools (the model bench's smaller tool sets); None offers every tool.
+    tools: frozenset[str] | None = None
+    # "progressive" (observers enable tools as they see the need) or "all".
+    disclosure_mode: str = "progressive"
+    disclosure: Disclosure | None = None
+    user_texts: list[str] = field(default_factory=list)       # what the observers read
+    tool_log: list[tuple[str, Any]] = field(default_factory=list)   # (tool, structured result)
+    observer_calls: int = 0                                     # observer-model calls so far
+
+
+class Agent:
+    def __init__(self, settings: Settings, targets: Targets, chat: ChatClient) -> None:
+        self.settings = settings
+        self.targets = targets
+        self.chat = chat
+        self.conversations: OrderedDict[str, Conversation] = OrderedDict()
+        self.policy = load_policy(settings.disclosure_policy)
+
+    def conversation(self, conversation_id: str | None, model: str, target: str,
+                     disclosure: str | None = None) -> Conversation:
+        parse_model(model)
+        if target not in AGENT_TARGETS:
+            raise LLMError(f"the assistant can use {', '.join(AGENT_TARGETS)}, not {target!r}")
+        mode = disclosure or self.settings.assistant_disclosure
+        if mode not in ("progressive", "all"):
+            raise LLMError(f"disclosure must be progressive or all, not {mode!r}")
+        existing = self.conversations.get(conversation_id or "")
+        if existing is not None:
+            existing.model, existing.target, existing.disclosure_mode = model, target, mode
+            self.conversations.move_to_end(existing.id)
+            return existing
+        conv = Conversation(id=uuid.uuid4().hex[:12], model=model, target=target,
+                            disclosure_mode=mode)
+        self.conversations[conv.id] = conv
+        while len(self.conversations) > MAX_CONVERSATIONS:
+            self.conversations.popitem(last=False)
+        return conv
+
+    async def run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
+        if conv.lock.locked():
+            yield {"type": "error", "message": "this conversation is already answering"}
+            return
+        async with conv.lock:
+            async for event in self._run(conv, user_text):
+                yield event
+
+    async def _run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
+        started = time.perf_counter()
+        conv.messages.append({"role": "user", "content": user_text})
+        conv.user_texts.append(user_text)
+        steps = 0
+        try:
+            target = await self.targets.resolve(conv.target)
+            async with open_session(target) as session:
+                listed = await session.list_tools()
+                tools = [t.model_dump(mode="json", by_alias=True, exclude_none=True)
+                         for t in listed.tools if conv.tools is None or t.name in conv.tools]
+                d = conv.disclosure
+                if (d is None or d.mode != conv.disclosure_mode
+                        or [t["name"] for t in d.catalog] != [t["name"] for t in tools]):
+                    d = conv.disclosure = Disclosure.start(
+                        self.policy, tools, conv.disclosure_mode,
+                        {"recipe-shopper": load_skill(self.settings.recipe_shopper_skill)})
+                yield {"type": "start", "conversation_id": conv.id, "model": conv.model,
+                       "target": conv.target, "tools": list(d.offered),
+                       "available": len(tools), "disclosure": d.mode}
+                async for event in self._observe(conv, "turn"):
+                    yield event
+                # Progressive: the skill joins the conversation when an observer enables it.
+                system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
+                          else system_prompt(self.settings)}
+                for steps in range(1, self.settings.agent_max_steps + 1):
+                    functions = openai_tools(d.offered_tools()) + (
+                        [DISCOVER_FUNCTION] if d.discoverable else [])
+                    while True:
+                        # A model call can take minutes on a local CPU model: say what is awaited.
+                        yield {"type": "thinking", "step": steps, "model": conv.model}
+                        try:
+                            async for item in self._call_model(conv, system, functions, steps):
+                                if isinstance(item, ChatTurn):
+                                    turn = item
+                                else:
+                                    yield item
+                            break
+                        except (QuotaExhausted, ModelUnavailable) as exc:
+                            fallback = self._fallback(conv)
+                            if fallback is None:
+                                raise
+                            yield {"type": "notice", "text": f"{exc} Switching to {fallback}."}
+                            conv.tried.add(conv.model)
+                            conv.model = fallback
+                    conv.input_tokens += turn.input_tokens
+                    conv.output_tokens += turn.output_tokens
+                    yield {"type": "llm_call", "step": steps, "model": conv.model,
+                           "tool_calls": len(turn.tool_calls), **turn.metrics}
+                    conv.messages.append(turn.message)
+                    if turn.text:
+                        yield {"type": "assistant", "text": turn.text, "step": steps}
+                    if not turn.tool_calls:
+                        yield self._done(conv, steps, "answered", started)
+                        return
+                    for call in turn.tool_calls:
+                        yield {"type": "tool_call", "id": call["id"], "name": call["name"],
+                               "arguments": call["arguments"], "step": steps}
+                        async for event in self._tool(conv, session, call, steps):
+                            yield event
+                yield self._done(conv, steps, "step budget reached", started)
+        except (LLMError, McpTargetError) as exc:
+            yield {"type": "error", "message": str(exc)}
+            yield self._done(conv, steps, "error", started)
+
+    async def _tool(self, conv: Conversation, session: Any, call: dict[str, Any],
+                    step: int) -> AsyncIterator[dict[str, Any]]:
+        """One tool call: discover_tools answered by the hub, a tool that is not offered refused
+        (a scope violation, never sent to the server), anything else run on the MCP session."""
+        d = conv.disclosure
+        assert d is not None
+        name, added, scope = call["name"], [], None
+        if name == DISCOVER and d.discoverable:
+            query = str(call["arguments"].get("query", ""))
+            text, added = d.discover(query)
+            result = {"name": name, "is_error": False, "structured": None, "text": text,
+                      "ms": 0.0, "truncated": False}
+        elif not d.is_offered(name):
+            scope = "not disclosed" if any(t["name"] == name for t in d.catalog) else "not allowed"
+            hint = " Ask for it with discover_tools." if d.discoverable and scope == "not disclosed" else ""
+            result = {"name": name, "is_error": True, "structured": None, "ms": 0.0,
+                      "truncated": False,
+                      "text": f"tool {name} is not available in this conversation.{hint}"}
+        else:
+            try:
+                result = await call_tool(session, name, call["arguments"])
+            except Exception as exc:  # noqa: BLE001 - the model sees the failure
+                result = {"name": name, "is_error": True, "structured": None,
+                          "text": f"{type(exc).__name__}: {exc}", "ms": 0, "truncated": False}
+        yield {"type": "tool_result", "id": call["id"], **result, "step": step}
+        limit = (self.settings.local_result_chars if conv.model.startswith("ollama:")
+                 else RESULT_CHARS_FOR_MODEL)
+        conv.messages.append({"role": "tool", "tool_call_id": call["id"],
+                              "content": result_for_model(result, limit)})
+        if scope:
+            yield {"type": "notice", "text": f"scope violation: {name} ({scope})"}
+        elif added:
+            yield {"type": "tools_offered", "added": added, "removed": [],
+                   "reason": f"discover_tools:{query}"}
+        elif name != DISCOVER:
+            conv.tool_log.append((canonical(name), result.get("structured")))
+            async for event in self._observe(conv, "tool_result"):
+                yield event
+
+    async def _observe(self, conv: Conversation, trigger: str) -> AsyncIterator[dict[str, Any]]:
+        """The observers' reports for ``trigger``. LLM conditions are judged in one call to the
+        observer model (announced first: the browser shows the observers reading); an enabled
+        goal or skill joins the conversation as a message after the cached prefix, so the
+        model's prompt cache holds. ``all`` runs no observers."""
+        d = conv.disclosure
+        assert d is not None
+        if d.mode == "all":
+            return
+        view = self._view(conv)
+        due = d.due_llm(trigger)
+        judge: Judge | None = None
+        if due and self.settings.observer_model \
+                and conv.observer_calls < self.settings.observer_max_calls:
+            yield {"type": "observing", "trigger": trigger, "model": self.settings.observer_model,
+                   "observers": sorted({c.observer.name for c in due})}
+            judge = self._judge(conv)
+        events = await d.observe(trigger, view, judge)
+        failed = next((ev for key, (value, ev) in getattr(judge, "last", {}).items()
+                       if ev.startswith("observer model failed")), None)
+        if failed:
+            yield {"type": "notice", "text": f"Observers could not judge this turn: {failed}"}
+        for event in events:
+            if event["type"] == "goal_enabled":
+                where = event["reason"].removeprefix("observer:")
+                body = (f"follow the {event['skill']} procedure:\n\n{event['text']}"
+                        if event.get("skill") else event["text"])
+                conv.messages.append({"role": "user", "content": f"{GOAL_PREFIX} ({where}): {body}"})
+                if event.get("skill"):       # the browser gets the name, not 2,000 tokens
+                    event["text"] = f"the {event['skill']} procedure"
+            yield event
+
+    def _judge(self, conv: Conversation) -> Judge:
+        """The observer model, judging every llm condition due in one JSON-schema call. A
+        failure makes them unknown (nothing fires): observers never block the answer."""
+        async def judge(conditions: list[Condition], view: View
+                        ) -> dict[str, tuple[bool | None, str]]:
+            conv.observer_calls += 1
+            messages = [{"role": "system", "content": JUDGE_SYSTEM},
+                        {"role": "user", "content": judge_prompt(conditions, view)}]
+            try:
+                turn = await self.chat.complete(self.settings.observer_model, messages, [],
+                                                json_schema=REPORT_SCHEMA)
+                out = parse_reports(turn.text, conditions)
+            except LLMError as exc:
+                out = {c.key: (None, f"observer model failed: {exc}") for c in conditions}
+            judge.last = out  # type: ignore[attr-defined]
+            return out
+
+        return judge
+
+    @staticmethod
+    def _view(conv: Conversation) -> View:
+        """What the observers see: the shopper's messages, the tools called and their last
+        results, and a numbered transcript (text, tool calls, results cut short) for the LLMs."""
+        transcript: list[str] = []
+        names: dict[str, str] = {}
+        for message in conv.messages:
+            role, content = message.get("role"), str(message.get("content") or "")
+            if role == "user" and not content.startswith(GOAL_PREFIX):
+                transcript.append(f"[{len(transcript) + 1}] shopper: {content[:1500]}")
+            elif role == "assistant":
+                if content:
+                    transcript.append(f"[{len(transcript) + 1}] assistant: {content[:1500]}")
+                for call in message.get("tool_calls") or []:
+                    fn = call.get("function") or {}
+                    names[str(call.get("id"))] = str(fn.get("name"))
+                    transcript.append(f"[{len(transcript) + 1}] assistant calls {fn.get('name')}"
+                                      f"({str(fn.get('arguments'))[:300]})")
+            elif role == "tool":
+                transcript.append(f"[{len(transcript) + 1}] "
+                                  f"{names.get(str(message.get('tool_call_id')), 'tool')} "
+                                  f"returned: {content[:300]}")
+        return View(user_messages=list(conv.user_texts), tool_calls=[n for n, _ in conv.tool_log],
+                    results={n: r for n, r in conv.tool_log if isinstance(r, dict)},
+                    transcript=transcript)
+
+    async def _call_model(self, conv: Conversation, system: dict[str, Any],
+                          functions: list[dict[str, Any]], step: int
+                          ) -> AsyncIterator[dict[str, Any] | ChatTurn]:
+        """The model call, yielding its progress events while it runs and its turn at the end. If
+        the listener goes away (the browser closed the stream), the call is cancelled."""
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        def on_progress(update: dict[str, Any]) -> None:
+            queue.put_nowait({"type": "progress", "step": step, "model": conv.model, **update})
+
+        call = asyncio.ensure_future(self.chat.complete(
+            conv.model, [system, *conv.messages], functions, on_progress=on_progress))
+        try:
+            while not call.done() or not queue.empty():
+                if queue.empty():
+                    waiter = asyncio.ensure_future(queue.get())
+                    await asyncio.wait({call, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                    if not waiter.done():
+                        waiter.cancel()
+                        continue
+                    yield waiter.result()
+                else:
+                    yield queue.get_nowait()
+            yield call.result()
+        finally:
+            if not call.done():
+                call.cancel()
+
+    def _fallback(self, conv: Conversation) -> str | None:
+        """The next model to try when ``conv.model`` is out of quota or overloaded: the configured
+        fallbacks, in order, skipping the current one and any already tried. A local model is
+        never swapped for a cloud one behind the shopper's back."""
+        if parse_model(conv.model)[0] != "gemini":
+            return None
+        for spec in self.settings.agent_fallbacks:
+            if spec != conv.model and spec not in conv.tried:
+                return spec
+        return None
+
+    @staticmethod
+    def _done(conv: Conversation, steps: int, stop: str, started: float) -> dict[str, Any]:
+        return {"type": "done", "steps": steps, "stop": stop,
+                "seconds": round(time.perf_counter() - started, 1),
+                "input_tokens": conv.input_tokens, "output_tokens": conv.output_tokens}
