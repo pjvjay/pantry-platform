@@ -278,3 +278,15 @@ def test_discover_tools_counts_as_offered_when_the_toolset_is_progressive() -> N
     assert check_known_tools(run).passed
     run = Run.from_events("m", "case", 1, [{**events[0], "discoverable": False}, *events[1:]])
     assert not check_known_tools(run).passed
+
+
+def test_excluding_the_united_states_by_its_alias_counts() -> None:
+    case = next(c for c in CASES if c.id == "tomato-penne-no-us")
+    for name in ("United States", "US", "U.S.A.", "usa"):
+        events = [{"type": "start", "tools": ["plan_recipe"]},
+                  {"type": "tool_call", "id": "c", "name": "plan_recipe",
+                   "arguments": {"slug": "tomato_penne", "exclude_origin": [name]}},
+                  {"type": "tool_result", "id": "c", "name": "plan_recipe", "is_error": False,
+                   "structured": {"summary": {}}}]
+        checks = {c.name: c.passed for c in case.grade(Run.from_events("m", case.id, 1, events))}
+        assert checks["excludes the United States"], name

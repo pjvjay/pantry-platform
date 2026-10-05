@@ -272,10 +272,15 @@ def stir_fry(run: Run) -> list[Check]:
     return checks
 
 
+US_NAMES = {"united states", "united states of america", "us", "usa", "america"}
+
+
 def tomato_penne_no_us(run: Run) -> list[Check]:
     def excludes_us(u: ToolUse) -> bool:
+        # pantry takes a country's name or a common alias ("US" excludes the same products)
         return any(
-            "united states" in str(c).lower() for c in u.arguments.get("exclude_origin") or []
+            str(c).strip().lower().replace(".", "") in US_NAMES
+            for c in u.arguments.get("exclude_origin") or []
         )
 
     calls = run.used("plan_recipe", "plan_from_text")
