@@ -63,6 +63,11 @@ FOR_BROWSER = {"llm_calls", "burr_run", "pipeline"}
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
 # plan tools that choose stores only with a location: the hub fills the shopper's when it is left out
 PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text"}
+# what the plan tools' country lists take (a 3B model sent preference ["local", "organic"])
+COUNTRY_ARGS = {
+    "exclude_origin": 'country names to leave out, e.g. ["United States"]',
+    "preference": 'country names to favour, e.g. ["Canada"]; nothing else',
+}
 
 PREAMBLE = """\
 You are a grocery-planning assistant for shoppers in Vancouver, BC, connected to the pantry MCP
@@ -460,7 +465,9 @@ class Agent:
             schema = t.get("inputSchema") or {}
             if canonical(t["name"]) in PLAN_LOCATION_TOOLS and "properties" in schema:
                 schema = {**schema,
-                          "properties": {k: v for k, v in schema["properties"].items()
+                          "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
+                                             if k in COUNTRY_ARGS and isinstance(v, dict) else v)
+                                         for k, v in schema["properties"].items()
                                          if k not in hidden},
                           **({"required": [r for r in schema["required"] if r not in hidden]}
                              if "required" in schema else {})}
