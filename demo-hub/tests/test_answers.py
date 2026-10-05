@@ -144,8 +144,11 @@ def test_the_hub_adds_the_shoppers_location_to_a_plan_call_without_one() -> None
         "slug": "s", "lat": 49.2827, "lon": -123.1207, "max_km": 20}        # a distance stands
     plan = {"name": "pantry-plan-recipe", "inputSchema": {"type": "object", "required": ["slug"],
             "properties": {"slug": {}, "lat": {}, "lon": {}, "max_km": {}}}}
-    [shown] = agent._plan_tools([plan])
+    [shown] = agent._plan_tools([plan], "gemini:g")
     assert set(shown["inputSchema"]["properties"]) == {"slug", "max_km"}     # no lat/lon to send
+    [local] = agent._plan_tools([plan], "ollama:m")
+    assert set(local["inputSchema"]["properties"]) == {"slug"}               # nor a distance
+    assert agent._with_location("plan_recipe", {"slug": "s", "max_km": 0})["max_km"] == 5.0
     assert agent._with_location("pantry-find-product", {"query": "x"}) == {"query": "x"}
     off = Agent(Settings(observer_model="", shopper_location=None), FakeTargets(), ScriptedChat())
     assert off._with_location("plan_recipe", {"slug": "s"}) == {"slug": "s"}

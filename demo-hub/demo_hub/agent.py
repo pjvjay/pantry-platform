@@ -72,8 +72,8 @@ the tools cannot answer. Tool names may carry a `pantry-` prefix with dashes (`p
 is `plan_from_text`). If a tool you need is not in your list, ask for it with discover_tools.
 
 Plans:
-- A library recipe (list_recipes): call plan_recipe with its slug. The shopper's location
-  (downtown Vancouver) is added for you; pass max_km only when the shopper names a distance.
+- A library recipe: call plan_recipe with its slug from list_recipes (tomato_penne, not
+  tomato-penne). The shopper's location and distance are added for you.
 - To see which recipes can be planned, call list_recipes.
 - A dish the shopper names that is not in list_recipes and comes without a recipe or link: write
   a short recipe for it (a title with the servings, then one "- ingredient" line each) and plan
@@ -318,7 +318,7 @@ class Agent:
         system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
                   else system_prompt(self.settings)}
         functions = ([DISCOVER_FUNCTION] if d.discoverable else []) + openai_tools(
-            self._plan_tools(d.offered_tools()), lean=self._lean(model))
+            self._plan_tools(d.offered_tools(), model), lean=self._lean(model))
         return await self.chat.warm(model, [system], functions)
 
     async def run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
@@ -360,7 +360,7 @@ class Agent:
                 for steps in range(1, self.settings.agent_max_steps + 1):
                     # discover_tools first and the rest in the order offered: a tool an observer
                     # adds goes last, so a local model's cached prompt holds up to it
-                    offered = self._plan_tools(d.offered_tools())
+                    offered = self._plan_tools(d.offered_tools(), conv.model)
                     if self._stable_tools(conv):
                         offered, later = self._split_offered(conv, offered)
                         if later:
@@ -443,23 +443,26 @@ class Agent:
         loc = self.settings.shopper_location
         if not loc or canonical(name) not in PLAN_LOCATION_TOOLS:
             return arguments
-        return {**arguments, "lat": loc[0], "lon": loc[1],
-                "max_km": arguments.get("max_km") if arguments.get("max_km") is not None
-                else loc[2]}
+        km = arguments.get("max_km")
+        valid = isinstance(km, (int, float)) and 0.5 <= km <= 100     # H-Tiny sent max_km 0
+        return {**arguments, "lat": loc[0], "lon": loc[1], "max_km": km if valid else loc[2]}
 
-    def _plan_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _plan_tools(self, tools: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
         """The tools with lat/lon taken out of the plan tools' parameters when the hub supplies
-        the shopper's location (pantry's stores are all in Vancouver)."""
+        the shopper's location (pantry's stores are all in Vancouver); for a local model also
+        max_km (the shopper's distance stands) and verbose (the full plan is for the browser):
+        two arguments a small model got wrong (max_km 0, verbose true)."""
         if not self.settings.shopper_location:
             return tools
+        hidden = {"lat", "lon"} | ({"max_km", "verbose"} if self._lean(model) else set())
         out = []
         for t in tools:
             schema = t.get("inputSchema") or {}
             if canonical(t["name"]) in PLAN_LOCATION_TOOLS and "properties" in schema:
                 schema = {**schema,
                           "properties": {k: v for k, v in schema["properties"].items()
-                                         if k not in ("lat", "lon")},
-                          **({"required": [r for r in schema["required"] if r not in ("lat", "lon")]}
+                                         if k not in hidden},
+                          **({"required": [r for r in schema["required"] if r not in hidden]}
                              if "required" in schema else {})}
                 t = {**t, "inputSchema": schema}
             out.append(t)
