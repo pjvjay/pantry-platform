@@ -183,8 +183,11 @@ def test_the_store_keeps_traces_and_browser_measures_and_metrics_roll_them_up(tm
     store.save(trace)
     store.add_browser({"kind": "chat", "trace_id": trace["id"], "ttfb_ms": 40, "first_event_ms": 55,
                        "lag_p95_ms": 8, "render_p95_ms": 12, "total_ms": 160_500})
-    store.add_browser({"kind": "page", "ttfb_ms": 20, "lcp_ms": 900, "inp_ms": 120, "cls": 0.02,
-                       "long_tasks": 3, "cls_sources": [{"node": "div.header-chips", "value": 0.02}]})
+    store.add_browser({"kind": "page", "load_id": "a", "ttfb_ms": 20, "lcp_ms": 900, "inp_ms": 0,
+                       "cls": 0.0, "long_tasks": 0})          # the first report of a load ...
+    store.add_browser({"kind": "page", "load_id": "a", "ttfb_ms": 20, "lcp_ms": 900, "inp_ms": 120,
+                       "cls": 0.02, "long_tasks": 3,           # ... superseded by its last
+                       "cls_sources": [{"node": "div.header-chips", "value": 0.02}]})
     store.add_browser({"kind": "api", "entries": [{"path": "/hub/traces", "ms": 12, "server_ms": 3,
                                                    "status": 200}]})
     again = TraceStore(tmp_path)                                  # reloads from disk
@@ -205,6 +208,7 @@ def test_the_store_keeps_traces_and_browser_measures_and_metrics_roll_them_up(tm
     assert m["observers"] == [{"condition": "menu_clerk.dish_to_cook", "fired": 1}]
     assert m["browser"]["ttfb_p50_ms"] == 40 and m["browser"]["lcp_p50_ms"] == 900
     assert m["browser"]["cls_sources"] == [{"node": "div.header-chips", "shift": 0.02}]
+    assert m["browser"]["page_loads"] == 1 and m["browser"]["inp_p95_ms"] == 120
     assert m["browser"]["api"][0]["server_p50_ms"] == 3
     assert m["hub_http"][0]["errors"] == 1
     elsewhere = TraceStore(tmp_path)                              # another process: the bench

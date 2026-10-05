@@ -542,7 +542,11 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
         "model_chars_p50": _pct(t["model_chars"], 50)} for name, t in sorted(tools.items())]
     browser = browser or []
     chats = [b for b in browser if b.get("kind") == "chat"]
-    pages = [b for b in browser if b.get("kind") == "page"]
+    # a page load reports again as its numbers change: its last report stands for it
+    latest: dict[str, dict[str, Any]] = {}
+    for i, b in enumerate(x for x in browser if x.get("kind") == "page"):
+        latest[str(b.get("load_id") or f"#{i}")] = b
+    pages = list(latest.values())
     apis = [e for b in browser if b.get("kind") == "api" for e in b.get("entries") or []]
     by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for e in apis:
