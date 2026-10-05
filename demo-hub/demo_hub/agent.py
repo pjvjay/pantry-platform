@@ -299,8 +299,11 @@ class Agent:
                             conv.model = fallback
                     conv.input_tokens += turn.input_tokens
                     conv.output_tokens += turn.output_tokens
+                    # tokens from the provider's usage (Gemini), or Ollama's own counts in metrics
                     yield {"type": "llm_call", "step": steps, "model": conv.model,
-                           "tool_calls": len(turn.tool_calls), **turn.metrics,
+                           "tool_calls": len(turn.tool_calls),
+                           "prompt_tokens": turn.input_tokens,
+                           "output_tokens": turn.output_tokens, **turn.metrics,
                            **({"reasoning": turn.reasoning[:REASONING_CHARS]}
                               if turn.reasoning else {})}
                     conv.messages.append(turn.message)

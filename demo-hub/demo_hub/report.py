@@ -69,6 +69,10 @@ def run_numbers(run: dict[str, Any], store: TraceStore) -> dict[str, Any]:
     prompt = [s["attrs"].get("prompt_tokens") or 0 for s in steps]
     new = [s["attrs"].get("new_tokens_est") for s in steps]
     out = [s["attrs"].get("output_tokens") or 0 for s in steps]
+    if not any(prompt) and trace.get("input_tokens"):
+        # steps recorded without token counts (Gemini before the agent sent them): the turn's
+        # totals, which the provider's usage reported
+        prompt, out = [int(trace["input_tokens"])], [int(trace.get("output_tokens") or 0)]
     cost = sum(call_cost_usd(run["model"], p, o) or 0 for p, o in zip(prompt, out, strict=True)) \
         if call_cost_usd(run["model"], 1, 1) is not None else None
     return {
