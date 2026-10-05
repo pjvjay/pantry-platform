@@ -5,9 +5,10 @@
 Each RUN_DIR is a bench output (``runs.jsonl`` and ``meta.json``, e.g. from
 ``scripts/report-bench.sh``); every run that kept a trace is looked up in the trace store
 (``--traces``, default ``~/.pantry-demo/traces``) for its per-step numbers: tokens read (cached
-and new) and written, read and write rates, time to first token, the gateway's overhead per
-tool call and pantry's own steps. Costs are what the tokens would cost at Google's paid list
-prices (``pricing.py``); local models cost $0 per call, and Gemini's free tier bills nothing.
+and new) and written, read and write rates, time to first token, time queued for the model
+server, the gateway's overhead per tool call and pantry's own steps. Costs are what the tokens
+would cost at Google's paid list prices (``pricing.py``); local models cost $0 per call, and
+Gemini's free tier bills nothing.
 Writes Markdown tables to stdout or ``--out``.
 """
 
@@ -21,12 +22,17 @@ from pathlib import Path
 from typing import Any
 
 from demo_hub.pricing import PRICES, PRICES_SOURCE, call_cost_usd
-from demo_hub.telemetry import TraceStore
+from demo_hub.telemetry import TraceStore, step_rates
 
 
 def _median(xs: list[float]) -> float | None:
     xs = [x for x in xs if isinstance(x, (int, float))]
     return statistics.median(xs) if xs else None
+
+
+def _mean(xs: list[float]) -> float | None:
+    xs = [x for x in xs if isinstance(x, (int, float))]
+    return statistics.fmean(xs) if xs else None
 
 
 def _s(ms: float | None) -> str:
@@ -86,6 +92,10 @@ def run_numbers(run: dict[str, Any], store: TraceStore) -> dict[str, Any]:
         "read_tok_s": _median([s["attrs"].get("read_tok_s") for s in steps]),
         "write_tok_s": _median([s["attrs"].get("write_tok_s") for s in steps]),
         "ttft_ms": _median([s["attrs"].get("first_token_ms") for s in steps]),
+        # waiting for the model server behind another request (traces before queued_ms was
+        # recorded have what it is computed from)
+        "queued_ms": sum(step_rates(s["attrs"]).get("queued_ms") or 0 for s in steps)
+        if any(s["attrs"].get("prompt_s") for s in steps) else None,
         "step_ms": _median([s.get("duration_ms") for s in steps]),
         "cost": cost,
         "confidence": (trace.get("evals") or {}).get("answer_confidence", run.get("answer_confidence")),
@@ -104,16 +114,17 @@ def tables(runs: list[dict[str, Any]], store: TraceStore) -> str:
     for r in runs:
         by_config[r["config"]].append((r, run_numbers(r, store)))
     lines = ["### Per configuration", "",
-             ("| Configuration | Runs | Passed (bench) | Answer confidence | Median turn | "
-              "Steps | Step-1 prompt | Prompt tokens / turn | New (uncached) / turn | "
+             ("| Configuration | Runs | Passed (bench) | Answer confidence (mean) | Median turn | "
+              "Queued / turn | Steps | Step-1 prompt | Prompt tokens / turn | New (uncached) / turn | "
               "Output / turn | Read tok/s | Write tok/s | First token | Cost / turn (paid list) |"),
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for config, items in by_config.items():
         nums = [n for _, n in items]
         lines.append(
             f"| `{config}` | {len(items)} | {sum(r['passed'] for r, _ in items)}/{len(items)} | "
-            f"{_n(_median([n['confidence'] for n in nums]), 2)} | "
+            f"{_n(_mean([n['confidence'] for n in nums]), 2)} | "
             f"{_s(_median([n['wall_ms'] for n in nums]))} | "
+            f"{_s(_median([n['queued_ms'] for n in nums]))} | "
             f"{_n(_median([n['steps'] for n in nums]))} | "
             f"{_n(_median([n['first_prompt'] for n in nums]))} | "
             f"{_n(_median([n['prompt_total'] for n in nums]))} | "
@@ -124,12 +135,13 @@ def tables(runs: list[dict[str, Any]], store: TraceStore) -> str:
             f"{_s(_median([n['ttft_ms'] for n in nums]))} | "
             f"{_usd(_median([n['cost'] for n in nums]))} |")
     lines += ["", "### Per case", "",
-              ("| Case | Configuration | Passed | Confidence | Turn | Steps | Step-1 prompt | "
-               "Tools called |"), "|---|---|---|---|---|---|---|---|"]
+              ("| Case | Configuration | Passed | Confidence | Turn | Queued | Steps | "
+               "Step-1 prompt | Tools called |"), "|---|---|---|---|---|---|---|---|---|"]
     for r in sorted(runs, key=lambda r: (r["case"], r["config"])):
         n = run_numbers(r, store)
         lines.append(f"| {r['case']} | `{r['config']}` | {'✓' if r['passed'] else '✗'} | "
-                     f"{_n(n['confidence'], 2)} | {_s(n['wall_ms'])} | {n['steps']} | "
+                     f"{_n(n['confidence'], 2)} | {_s(n['wall_ms'])} | {_s(n['queued_ms'])} | "
+                     f"{n['steps']} | "
                      f"{_n(n['first_prompt'])} | {', '.join(n['tools']) or '–'} |")
     tool_ms: dict[str, list[float]] = defaultdict(list)
     overhead: dict[str, list[float]] = defaultdict(list)

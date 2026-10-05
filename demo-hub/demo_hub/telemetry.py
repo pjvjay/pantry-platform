@@ -149,7 +149,7 @@ class TraceRecorder:
         elif kind == "llm_call" and self._step is not None:
             metrics = {k: v for k, v in event.items() if k not in ("type", "step", "model")}
             self._step.attrs.update(metrics)
-            self._step.attrs.update(_rates(metrics))
+            self._step.attrs.update(step_rates(metrics))
             self._step.attrs["cost_usd"] = call_cost_usd(
                 str(event.get("model")), int(metrics.get("prompt_tokens") or 0),
                 int(metrics.get("output_tokens") or 0))
@@ -242,7 +242,7 @@ class TraceRecorder:
         }
 
 
-def _rates(m: dict[str, Any]) -> dict[str, Any]:
+def step_rates(m: dict[str, Any]) -> dict[str, Any]:
     """Read and write rates, and the share of the prompt that came from the model's cache."""
     out: dict[str, Any] = {}
     prompt, new = m.get("prompt_tokens"), m.get("new_tokens_est")
@@ -252,6 +252,11 @@ def _rates(m: dict[str, Any]) -> dict[str, Any]:
         out["write_tok_s"] = round(float(m["output_tokens"]) / float(m["gen_s"]), 2)
     if prompt and new is not None:
         out["cached_share"] = round(max(0.0, 1 - float(new) / float(prompt)), 3)
+    if m.get("wall_s") and (m.get("prompt_s") or m.get("gen_s")):
+        # the rest of the call's wall time: waiting for the model server, behind another request
+        # (Ollama runs one at a time), rather than reading or writing
+        busy = sum(float(m.get(k) or 0) for k in ("prompt_s", "gen_s", "load_s"))
+        out["queued_ms"] = round(max(0.0, float(m["wall_s"]) - busy) * 1000, 1)
     return out
 
 
@@ -505,6 +510,7 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
                 m["read_tok_s"].append(a.get("read_tok_s"))
                 m["write_tok_s"].append(a.get("write_tok_s"))
                 m["cached_share"].append(a.get("cached_share"))
+                m["queued_ms"].append(a.get("queued_ms"))
                 m["prompt_tokens"].append(a.get("prompt_tokens"))
             elif s["kind"] == "tool":
                 tl = tools[canonical(a.get("tool", ""))]
@@ -526,7 +532,7 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
             "turn_p50_ms": _pct(m["turn_ms"], 50), "turn_p95_ms": _pct(m["turn_ms"], 95),
             "steps_per_turn": _median(m["steps"]),
             "step_p50_ms": _pct(m["step_ms"], 50), "step_p95_ms": _pct(m["step_ms"], 95),
-            "ttft_p50_ms": _pct(m["ttft_ms"], 50),
+            "ttft_p50_ms": _pct(m["ttft_ms"], 50), "queued_p95_ms": _pct(m["queued_ms"], 95),
             "read_tok_s": _median(m["read_tok_s"]), "write_tok_s": _median(m["write_tok_s"]),
             "cached_share": _median(m["cached_share"]),
             "prompt_tokens_p50": _pct(m["prompt_tokens"], 50),

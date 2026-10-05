@@ -91,6 +91,7 @@ def test_a_turn_becomes_a_span_tree_with_every_layer() -> None:
     step = trace["spans"][1]
     a = step["attrs"]
     assert a["read_tok_s"] == 20.0 and a["write_tok_s"] == 3.0 and a["cached_share"] == 0.9
+    assert a["queued_ms"] == 1000.0      # 26 s wall, 25 s reading and writing
     assert a["reasoning"] == "I should plan it." and "first_token_ms" in a
     assert a["cost_usd"] == 0.0                                  # a local model costs nothing
     tool = trace["spans"][2]
