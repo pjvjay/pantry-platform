@@ -122,7 +122,9 @@ def test_a_tool_call_then_an_answer(session: FakeSession) -> None:
     second = chat.requests[1]["messages"]
     assert [m["role"] for m in second] == ["system", "user", "assistant", "tool"]
     assert second[3]["tool_call_id"] == "c1" and "1.97" in second[3]["content"]
-    assert chat.requests[0]["tools"][0]["function"]["name"] == "pantry-find-product"
+    # discover_tools first, then the tools in the order they were offered
+    assert [f["function"]["name"] for f in chat.requests[0]["tools"]][:2] == [
+        "discover_tools", "pantry-find-product"]
     # The conversation keeps its history for the next turn.
     assert [m["role"] for m in conv.messages] == ["user", "assistant", "tool", "assistant"]
 

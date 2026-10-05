@@ -98,6 +98,8 @@ class Run:
             kind = e.get("type")
             if kind == "start":
                 run.tools_offered = [canonical_tool(t) for t in e.get("tools") or []]
+                if e.get("discoverable"):          # progressive: discover_tools is offered too
+                    run.tools_offered.append("discover_tools")
             elif kind in ("observation", "tools_offered"):
                 # progressive disclosure: an observer (or discover_tools) changed the toolset
                 added = [canonical_tool(t) for t in e.get("added") or []]
@@ -772,6 +774,10 @@ async def main(argv: list[str] | None = None) -> Path:
                         help="pantry: the MCP server directly; gateway-recipes: through ContextForge")
     parser.add_argument("--no-traces", action="store_true",
                         help="do not keep each run as an Assistant trace")
+    parser.add_argument("--warm", action="store_true",
+                        help="before each local run, have the model read the instructions and "
+                        "first tools (as the Assistant does while the shopper types); the time "
+                        "it takes is recorded apart from the run's")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--report-only", action="store_true")
     args = parser.parse_args(argv)
@@ -805,6 +811,7 @@ async def main(argv: list[str] | None = None) -> Path:
             "models": args.model,
             "disclosure": args.disclosure,
             "target": args.target,
+            "warm": args.warm,
             "model_info": {},
             "demo_mode": None,
         }
@@ -837,11 +844,15 @@ async def main(argv: list[str] | None = None) -> Path:
                 for model in args.model:
                     if (model, case.id, rep) in done:
                         continue
+                    warm = None
+                    if args.warm and model.startswith("ollama:"):
+                        warm = await agents[model].warm(parse_variant(model)[0], args.target,
+                                                        args.disclosure)
                     started = time.perf_counter()
                     run = await run_case(agents[model], model, case, rep, tools, args.disclosure,
                                          args.target, store, stores)
                     checks = grade(run, case)
-                    rec = record(run, checks)
+                    rec = record(run, checks) | ({"warm": warm} if warm else {})
                     with runs_path.open("a", encoding="utf-8") as fh:
                         fh.write(json.dumps(rec) + "\n")
                     records.append(rec)
@@ -855,7 +866,8 @@ async def main(argv: list[str] | None = None) -> Path:
                     print(
                         f"{datetime.now(UTC).astimezone():%H:%M:%S} rep {rep} {case.id:20s} {model:24s} "
                         f"{'PASS' if rec['passed'] else 'fail'} {time.perf_counter() - started:6.0f}s "
-                        f"tools={[u['name'] for u in rec['tool_uses']]}",
+                        f"tools={[u['name'] for u in rec['tool_uses']]}"
+                        + (f" warm={warm['wall_s']:.0f}s/{warm['prompt_tokens']}tok" if warm else ""),
                         flush=True,
                     )
     write_outputs(out, records, meta, reported(args.model, records))

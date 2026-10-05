@@ -268,3 +268,25 @@ def test_root_redirects_and_the_spa_is_served(upstream: Any, tmp_path: Path) -> 
     assert "immutable" in client.get("/pantry/assets/index-abc123.js").headers["cache-control"]
     # The API proxy is matched before the SPA mount.
     assert client.get("/pantry/api/health").json() == {"status": "ok"}
+
+
+def test_a_run_comes_back_from_every_source_and_warming_is_shared(
+        monkeypatch: pytest.MonkeyPatch, upstream: Any, tmp_path: Path) -> None:
+    client = make_client(Settings(**{**SETTINGS.__dict__, "traces_dir": str(tmp_path / "traces")}))
+    client.app.state.traces.save({  # type: ignore[attr-defined]
+        "id": "tr-run", "started_at": "2026-10-05T08:00:00+00:00", "spans": []})
+    run = client.get("/hub/runs/tr-run").json()
+    assert run["trace"]["id"] == "tr-run" and run["burr"] == [] and run["gateway"] == []
+    assert set(run["links"]) == {"burr_ui", "contextforge"}
+    assert client.get("/hub/runs/tr-missing").status_code == 404
+
+    calls: list[tuple[str, str, Any]] = []
+
+    async def fake_warm(model: str, target: str, disclosure: Any = None) -> dict[str, Any]:
+        calls.append((model, target, disclosure))
+        return {"model": model, "prompt_tokens": 1500}
+
+    monkeypatch.setattr(client.app.state.agent, "warm", fake_warm)  # type: ignore[attr-defined]
+    r = client.post("/hub/agent/warm", json={"model": "ollama:granite4.2:8b"})
+    assert r.json() == {"model": "ollama:granite4.2:8b", "prompt_tokens": 1500}
+    assert calls == [("ollama:granite4.2:8b", "gateway-recipes", None)]

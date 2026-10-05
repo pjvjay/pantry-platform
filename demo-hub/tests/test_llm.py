@@ -395,3 +395,22 @@ def test_a_json_schema_asks_each_provider_for_a_json_reply() -> None:
                         Settings(ollama_url="http://ollama.test"))
     asyncio.run(chat.complete("ollama:g", [], [], json_schema=schema))
     assert json.loads(sent[-1].content)["format"] == schema
+
+
+def test_warming_reads_the_prompt_with_the_same_context_and_writes_one_token() -> None:
+    chat, seen = ollama(lambda r: httpx.Response(200, json={
+        "message": {"role": "assistant", "content": "x"}, "done": True, "prompt_eval_count": 1500,
+        "prompt_eval_duration": 75_000_000_000, "load_duration": 2_000_000_000}),
+        Settings(ollama_url="http://ollama.test"))
+    system = [{"role": "system", "content": "be brief"}]
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+    result = asyncio.run(chat.warm("ollama:command-r7b", system, tools))
+    body = json.loads(seen[1].content)
+    # the num_ctx the real calls use (another would reload the model), no stream, one token
+    assert body["options"] == {"num_ctx": 8192, "num_predict": 1} and body["stream"] is False
+    assert body["tools"] == tools and body["messages"] == system
+    assert result | {"wall_s": 0} == {"model": "ollama:command-r7b", "wall_s": 0,
+                                      "prompt_tokens": 1500, "prompt_s": 75.0, "load_s": 2.0}
+    # the next call's estimate knows the warmed prefix is cached
+    assert chat.timings is not None and chat.timings.last_prompt("command-r7b")
+    assert "skipped" in asyncio.run(chat.warm("gemini:g", system, tools))

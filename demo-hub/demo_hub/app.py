@@ -42,6 +42,7 @@ from demo_hub.evals import evaluate
 from demo_hub.images import ImageCache, ImageError
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
 from demo_hub.mcp_targets import McpTargetError, Targets, open_session
+from demo_hub.runs import run_view
 from demo_hub.settings import Settings
 from demo_hub.sims import PRESETS, SimsClient, SimsError
 from demo_hub.telemetry import (
@@ -93,6 +94,12 @@ class ChatBody(BaseModel):
     model: str | None = None
     target: str = "gateway-recipes"
     disclosure: str | None = None       # "progressive" or "all"; the hub's default when omitted
+
+
+class WarmBody(BaseModel):
+    model: str | None = None
+    target: str = "gateway-recipes"
+    disclosure: str | None = None
 
 
 class SimRunBody(BaseModel):
@@ -258,6 +265,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "skill_loaded": bool(settings.recipe_shopper_skill
                                      and Path(settings.recipe_shopper_skill).expanduser().is_file())}
 
+    warming: dict[tuple[str, str, str], asyncio.Task[dict[str, Any]]] = {}
+
+    @app.post("/hub/agent/warm")
+    async def agent_warm(body: WarmBody) -> dict[str, Any]:
+        """A local model reads the Assistant's instructions and first tools now, while the shopper
+        types, so the first step reads only the question. Answers when the model has read them
+        (minutes on a CPU); asking again while it reads waits for the same read."""
+        model = body.model or settings.default_agent_model
+        key = (model, body.target, body.disclosure or settings.assistant_disclosure)
+        task = warming.get(key)
+        if task is None or task.done():
+            task = warming[key] = asyncio.ensure_future(
+                agent.warm(model, body.target, body.disclosure))
+        try:
+            return await asyncio.shield(task)
+        except (LLMError, McpTargetError) as exc:
+            raise HTTPException(502, str(exc)) from exc
+
     @app.post("/hub/agent/chat")
     async def agent_chat(body: ChatBody) -> StreamingResponse:
         try:
@@ -309,6 +334,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if trace is None:
             raise HTTPException(404, f"no trace {trace_id}")
         return trace
+
+    @app.get("/hub/runs/{trace_id}")
+    async def run_detail(trace_id: str) -> dict[str, Any]:
+        """One run as every system saw it: the hub's trace, Burr's steps for each plan call and
+        ContextForge's trace for each tool call, on one clock (runs.py)."""
+        trace = store.get(trace_id)
+        if trace is None:
+            raise HTTPException(404, f"no trace {trace_id}")
+        return await run_view(trace, settings)
 
     @app.get("/hub/metrics")
     async def metrics(limit: int = 200) -> dict[str, Any]:

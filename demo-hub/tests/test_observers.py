@@ -286,8 +286,10 @@ def test_a_conversation_starts_small_and_observers_grow_it(mcp: Any) -> None:
     assert "pantry-plan-recipe" in first and "pantry-get-recipe" in first
     assert not {"pantry-plan-from-text", "pantry-get-product-origins",
                 "pantry-rank-products-by-origin"} & set(first)
-    assert "pantry-plan-week" not in first and first[-1] == DISCOVER
+    assert "pantry-plan-week" not in first and first[0] == DISCOVER
     assert "pantry-get-product" in chat.requests[1]["tools"]        # shelf_clerk after find_product
+    # tools added later go last, so the prompt the model cached holds up to them
+    assert chat.requests[1]["tools"][:len(first)] == first
     # A tool that is not offered is refused without reaching the server ...
     assert [n for n, _ in mcp] == ["pantry-find-product"]
     notice = next(e for e in events if e["type"] == "notice")
@@ -409,3 +411,23 @@ def test_plan_from_text_joins_only_when_the_library_cannot_serve_the_dish() -> N
 def test_origin_questions_get_the_one_tool_they_need(message: str, added: set[str]) -> None:
     origin_tools = {"get_product_origins", "rank_products_by_origin"}
     assert offered_after(message) & origin_tools == added
+
+
+def test_with_stable_tools_a_local_model_keeps_its_tools_block(mcp: Any) -> None:
+    chat = ScriptedChat(
+        turn(calls=[{"id": "c1", "name": "pantry-find-product", "arguments": {"query": "penne"}}]),
+        turn(calls=[{"id": "c2", "name": "pantry-get-product", "arguments": {"product_id": 1}}]),
+        turn("Penne Rigate 500g is $1.97."))
+    agent = Agent(Settings(observer_model="", local_stable_tools=True), FakeTargets(), chat)  # type: ignore[arg-type]
+    events, conv = chat_run(agent, "cheapest penne?")
+    # the shelf clerk offers get_product after find_product: announced, the block unchanged
+    assert chat.requests[1]["tools"] == chat.requests[0]["tools"] == chat.requests[2]["tools"]
+    announcement = chat.requests[1]["messages"][-1]
+    assert announcement["role"] == "user" and announcement["content"].startswith(
+        "More tools are now available") and "pantry-get-product" in announcement["content"]
+    # it can call the announced tool, and the prompt only ever grew
+    assert [n for n, _ in mcp] == ["pantry-find-product", "pantry-get-product"]
+    first, second = chat.requests[1]["messages"], chat.requests[2]["messages"]
+    assert second[:len(first)] == first
+    assert any(e["type"] == "notice" and "pantry-get-product" in e["text"] for e in events)
+    assert "pantry-get-product" in conv.announced

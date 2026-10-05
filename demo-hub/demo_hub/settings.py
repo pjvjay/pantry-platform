@@ -26,6 +26,9 @@ class Settings:
     mcpsim_ui_url: str = "http://127.0.0.1:8765"
     ollama_url: str = "http://127.0.0.1:11434"
     burr_url: str = "http://127.0.0.1:7241"
+    # pantry's Burr tracker files (its .burr folder): the run view reads each plan call's steps
+    # from them ("" = not available).
+    burr_dir: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     gemini_api_key: str = field(default="", repr=False)
     # The hub's own bearer token for pantry's /mcp (a label in pantry's MCP_AUTH_TOKENS).
@@ -57,6 +60,14 @@ class Settings:
     # The most of one tool result a local (ollama:) model reads; longer JSON is shrunk. On a CPU
     # it reads ~15-20 tokens a second, so 4,000 characters (~1,000 tokens) cost about a minute.
     local_result_chars: int = 4000
+    # A plan or week result reaches a local model as short lines (answers.plan_for_model): about a
+    # fifth of its JSON's tokens. False sends the JSON, as other models get it.
+    local_compact_plans: bool = True
+    # Keep a local model's tools block as it was at the conversation's first step and announce
+    # tools offered later in a message (agent.announce_tools): the prompt only grows.
+    local_stable_tools: bool = False
+    # How long Ollama keeps the model, and with it the cached prompt, after a call.
+    ollama_keep_alive: str = "30m"
     # Every model call's timing, for the next call's estimate ("" keeps it in memory only).
     timings_path: str = ""
     # Assistant traces and browser measurements (JSON lines) and the image cache ("" = none).
@@ -73,6 +84,7 @@ class Settings:
             mcpsim_ui_url=env.get("MCPSIM_UI_URL", Settings.mcpsim_ui_url).rstrip("/"),
             ollama_url=env.get("OLLAMA_URL", Settings.ollama_url).rstrip("/"),
             burr_url=env.get("BURR_URL", Settings.burr_url).rstrip("/"),
+            burr_dir=env.get("DEMO_BURR_DIR", env.get("burr_path", Settings.burr_dir)),
             gemini_base_url=env.get("GEMINI_BASE_URL", Settings.gemini_base_url).rstrip("/"),
             gemini_api_key=env.get("GEMINI_API_KEY", ""),
             pantry_mcp_token=env.get("PANTRY_MCP_TOKEN")
@@ -94,6 +106,11 @@ class Settings:
             ollama_num_ctx=int(env.get("OLLAMA_NUM_CTX", str(Settings.ollama_num_ctx))),
             local_result_chars=int(env.get("DEMO_LOCAL_RESULT_CHARS",
                                            str(Settings.local_result_chars))),
+            local_compact_plans=env.get("DEMO_LOCAL_COMPACT_PLANS", "1").lower()
+            not in ("0", "false", "no"),
+            local_stable_tools=env.get("DEMO_LOCAL_STABLE_TOOLS", "0").lower()
+            in ("1", "true", "yes"),
+            ollama_keep_alive=env.get("DEMO_OLLAMA_KEEP_ALIVE", Settings.ollama_keep_alive),
             ollama_temperature=float(env["OLLAMA_TEMPERATURE"]) if env.get("OLLAMA_TEMPERATURE")
             else None,
             ollama_think=_flag(env.get("OLLAMA_THINK", "")),
