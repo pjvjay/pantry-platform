@@ -186,6 +186,8 @@ def lean_schema(node: Any) -> Any:
 
 
 TOOLS_PREFIX = "More tools are now available; call them like the others"
+REPEATED_CALL = ("You already called {name} with these arguments in this turn; its result is "
+                 "above. Answer the shopper from it, or call a different tool.")
 EMPTY_REPLY_NUDGE = ("Your last reply was empty or could not be read as a tool call. Call one tool "
                      "with valid JSON arguments, or answer the shopper.")
 
@@ -279,6 +281,7 @@ class Conversation:
     # later step; tools offered after it are announced in a message instead
     fixed_tools: list[str] | None = None
     announced: set[str] = field(default_factory=set)
+    turn_calls: set[tuple[str, str]] = field(default_factory=set)   # (tool, arguments) this turn
 
 
 class Agent:
@@ -363,6 +366,7 @@ class Agent:
                           else system_prompt(self.settings)}
                 first_result = len(conv.tool_log)        # this turn's results start here
                 nudged = False
+                conv.turn_calls.clear()
                 for steps in range(1, self.settings.agent_max_steps + 1):
                     # discover_tools first and the rest in the order offered: a tool an observer
                     # adds goes last, so a local model's cached prompt holds up to it
@@ -506,7 +510,15 @@ class Agent:
         d = conv.disclosure
         assert d is not None
         name, added, scope = call["name"], [], None
-        if name == DISCOVER and d.discoverable:
+        key = (name, json.dumps(call["arguments"], sort_keys=True))
+        repeated = key in conv.turn_calls
+        conv.turn_calls.add(key)
+        if repeated:
+            # the same call again in this turn (the 8B sent one plan_recipe eight times): not run
+            # again; the model is pointed at the result it already has
+            result = {"name": name, "is_error": False, "structured": None, "ms": 0.0,
+                      "truncated": False, "text": REPEATED_CALL.format(name=name)}
+        elif name == DISCOVER and d.discoverable:
             query = str(call["arguments"].get("query", ""))
             text, added = d.discover(query)
             result = {"name": name, "is_error": False, "structured": None, "text": text,
@@ -533,7 +545,10 @@ class Agent:
         yield {"type": "tool_result", "id": call["id"], **result, "step": step,
                "model_chars": len(content)}
         conv.messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
-        if scope:
+        if repeated:
+            yield {"type": "notice", "text": f"repeated call: {name} with the same arguments was "
+                   "not run again"}
+        elif scope:
             yield {"type": "notice", "text": f"scope violation: {name} ({scope})"}
         elif added:
             yield {"type": "tools_offered", "added": added, "removed": [],

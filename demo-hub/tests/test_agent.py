@@ -341,3 +341,13 @@ def test_an_empty_reply_gets_one_nudge(session: FakeSession) -> None:
     chat = ScriptedChat(empty, empty)
     events, _ = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "penne?")
     assert events[-1]["stop"] == "answered" and len(chat.requests) == 2
+
+
+def test_a_repeated_call_is_not_run_again(session: FakeSession) -> None:
+    call = {"id": "c1", "name": "pantry-find-product", "arguments": {"query": "penne"}}
+    chat = ScriptedChat(turn(calls=[call]), turn(calls=[{**call, "id": "c2"}]), turn("Done."))
+    events, _ = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "penne?")
+    assert session.calls == [("pantry-find-product", {"query": "penne"})]      # once
+    second = [e for e in events if e["type"] == "tool_result"][1]
+    assert second["text"].startswith("You already called pantry-find-product")
+    assert any(e["type"] == "notice" and e["text"].startswith("repeated call") for e in events)
