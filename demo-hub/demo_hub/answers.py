@@ -1,4 +1,4 @@
-"""A plan's answer, built by code rather than typed by the model.
+"""A plan's answer (and the recipe library's list), built by code rather than typed by the model.
 
 ``plan_tables`` renders the shopping table a plan's answer ends with, straight from the tool's
 result: every product, store and price is exact, and a slow local model no longer spends minutes
@@ -104,16 +104,33 @@ def week_table(s: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def is_recipe_list(structured: Any) -> bool:
+    items = structured.get("result") if isinstance(structured, dict) else None
+    return isinstance(items, list) and bool(items) and all(
+        isinstance(i, dict) and "slug" in i and "name" in i for i in items)
+
+
+def recipe_table(structured: dict[str, Any]) -> str:
+    rows = [f"| {r.get('name')} | {r.get('servings', '–')} | {r.get('ingredient_count', '–')} |"
+            for r in structured["result"]]
+    return "\n".join(["### Recipes I can plan", "", "| Recipe | Serves | Ingredients |",
+                      "|---|---|---|", *rows])
+
+
 def plan_tables(results: list[Any]) -> list[str]:
-    """The tables for this turn's plan results, the latest plan of each recipe (or week) once."""
+    """The tables for this turn's results: the latest plan of each recipe (or week) once; the
+    recipe library's list only when the turn planned nothing (a listing was a step on the way)."""
     latest: dict[str, str] = {}
+    listing = None
     for structured in results:
         if is_plan(structured):
             s = _summary(structured) or {}
             latest[f"plan:{s.get('recipe_slug') or s.get('recipe_name')}"] = plan_table(s)
         elif is_week(structured):
             latest["week"] = week_table(_summary(structured) or {})
-    return list(latest.values())
+        elif is_recipe_list(structured):
+            listing = recipe_table(structured)
+    return list(latest.values()) or ([listing] if listing else [])
 
 
 def strip_tables(text: str) -> str:

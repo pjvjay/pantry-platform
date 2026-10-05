@@ -161,3 +161,12 @@ def test_shopper_location_parses_from_the_environment() -> None:
     from demo_hub.settings import _location
     assert _location("49.2827,-123.1207,5") == (49.2827, -123.1207, 5.0)
     assert _location("49.3,-123.1") == (49.3, -123.1, 5.0) and _location("") is None
+
+
+def test_the_recipe_list_is_drawn_only_when_the_turn_planned_nothing() -> None:
+    listed = {"result": [{"slug": "tomato_penne", "name": "Tomato Penne", "servings": 2,
+                          "ingredient_count": 5}]}
+    [table] = plan_tables([listed])
+    assert "| Tomato Penne | 2 | 5 |" in table
+    assert plan_tables([listed, PLAN])[0].startswith("### Tomato Penne")   # the plan, not the list
+    assert len(plan_tables([listed, PLAN])) == 1

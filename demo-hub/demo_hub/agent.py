@@ -91,8 +91,9 @@ Plans:
   basket's product_ids.
 
 After a plan or a week plan, answer in two or three sentences: the trip's total and its store(s),
-the verified origin share when origin was asked about, and anything not found. The shopper sees
-the plan's table under your answer, added automatically: do not write a table or list the lines.
+the verified origin share when origin was asked about, and anything not found. After
+list_recipes alone, answer in one sentence. The shopper sees the plan's table, or the recipe
+list, under your answer, added automatically: do not write a table or list the lines or recipes.
 For other questions (a product's price, where it comes from), call the matching tool and report
 its result briefly.
 
