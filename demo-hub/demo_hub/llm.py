@@ -38,6 +38,8 @@ MODEL_CHOICES: tuple[dict[str, str], ...] = (
      "label": "IBM Granite 4.2 8B, thinking off (local Ollama: slow without a GPU)"},
     {"id": "ollama:granite4.2:8b",
      "label": "IBM Granite 4.2 8B, thinking on (local Ollama: slower still)"},
+    {"id": "ollama:granite4.2:3b#think=false",
+     "label": "IBM Granite 4.2 3B, thinking off (local: faster, less reliable; docs/local-speed.md)"},
     {"id": "ollama:command-r7b", "label": "Cohere command-r7b (local Ollama: slow without a GPU)"},
 )
 MAX_ATTEMPTS = 4
