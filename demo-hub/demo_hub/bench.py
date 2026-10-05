@@ -418,7 +418,9 @@ async def run_case(
     # through ContextForge the same tools are named pantry-<tool-with-dashes>
     conv.tools = tools if tools is None or target == "pantry" else frozenset(
         "pantry-" + t.replace("_", "-") for t in tools)
-    recorder = TraceRecorder(conversation_id=conv.id, model=conv.model, target=target,
+    # the trace names the full spec (e.g. "#think=false"): the agent's model has the variant
+    # applied through its settings, not in its name
+    recorder = TraceRecorder(conversation_id=conv.id, model=spec, target=target,
                              message=case.message, disclosure=disclosure)
     events = []
     async for e in agent.run(conv, case.message):

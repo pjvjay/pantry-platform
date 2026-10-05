@@ -258,10 +258,11 @@ def test_a_bench_run_is_kept_as_a_tagged_trace_with_its_online_evals(tmp_path: P
 
     store = TraceStore(tmp_path)
     case = next(c for c in bench.CASES if c.id == "out-of-scope")
-    run = asyncio.run(bench.run_case(FakeAgent(), "ollama:m", case, 2, None, "progressive",
+    run = asyncio.run(bench.run_case(FakeAgent(), "ollama:m#think=false", case, 2, None, "progressive",
                                      "pantry", store, ["Pantry Mart Downtown"]))
     trace = store.get(run.trace_id)
     assert trace is not None and (trace["source"], trace["case"], trace["rep"]) == \
         ("bench", "out-of-scope", 2)
     assert trace["evals"]["checks"] and run.answer_confidence == trace["evals"]["answer_confidence"]
+    assert trace["model"] == "ollama:m#think=false"          # the full spec, variant included
     assert bench.record(run, [])["trace_id"] == run.trace_id
