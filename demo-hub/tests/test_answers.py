@@ -170,3 +170,13 @@ def test_the_recipe_list_is_drawn_only_when_the_turn_planned_nothing() -> None:
     assert "| Tomato Penne | 2 | 5 |" in table
     assert plan_tables([listed, PLAN])[0].startswith("### Tomato Penne")   # the plan, not the list
     assert len(plan_tables([listed, PLAN])) == 1
+
+
+def test_out_of_steps_after_a_plan_the_shopper_still_gets_it(session: FakeSession) -> None:  # noqa: F811
+    session.results["pantry-find-product"] = PLAN
+    call = turn(calls=[{"id": "c", "name": "pantry-find-product", "arguments": {"query": "x"}}])
+    chat = ScriptedChat(call, call, call)
+    events, _ = run(Agent(Settings(observer_model="", agent_max_steps=3), FakeTargets(), chat), "go")
+    answer = next(e for e in events if e["type"] == "assistant")["text"]
+    assert answer.startswith("The model did not finish its summary") and "| Penne |" in answer
+    assert events[-1]["stop"] == "step budget reached"

@@ -433,6 +433,12 @@ class Agent:
                                **({"filled_by_hub": filled} if filled else {})}
                         async for event in self._tool(conv, session, call, steps):
                             yield event
+                # out of steps after the work was done (a 3B model planned, then kept calling
+                # tools): the shopper still gets the plan, drawn from its result
+                tables = plan_tables([r for _, r in conv.tool_log[first_result:]])
+                if tables:
+                    yield {"type": "assistant", "step": steps, "text": with_tables(
+                        "The model did not finish its summary; here is the plan it made.", tables)}
                 yield self._done(conv, steps, "step budget reached", started)
         except (LLMError, McpTargetError) as exc:
             yield {"type": "error", "message": str(exc)}
