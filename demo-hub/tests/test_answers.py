@@ -139,8 +139,13 @@ def test_the_hub_adds_the_shoppers_location_to_a_plan_call_without_one() -> None
     agent = Agent(Settings(observer_model=""), FakeTargets(), ScriptedChat())
     assert agent._with_location("pantry-plan-recipe", {"slug": "tomato_penne"}) == {
         "slug": "tomato_penne", "lat": 49.2827, "lon": -123.1207, "max_km": 5.0}
-    given = {"slug": "s", "lat": 49.0, "lon": -123.0}
-    assert agent._with_location("pantry-plan-recipe", given) == given        # the shopper's own
+    made_up = {"slug": "s", "lat": -74.08, "lon": -84.22, "max_km": 20}
+    assert agent._with_location("pantry-plan-recipe", made_up) == {
+        "slug": "s", "lat": 49.2827, "lon": -123.1207, "max_km": 20}        # a distance stands
+    plan = {"name": "pantry-plan-recipe", "inputSchema": {"type": "object", "required": ["slug"],
+            "properties": {"slug": {}, "lat": {}, "lon": {}, "max_km": {}}}}
+    [shown] = agent._plan_tools([plan])
+    assert set(shown["inputSchema"]["properties"]) == {"slug", "max_km"}     # no lat/lon to send
     assert agent._with_location("pantry-find-product", {"query": "x"}) == {"query": "x"}
     off = Agent(Settings(observer_model="", shopper_location=None), FakeTargets(), ScriptedChat())
     assert off._with_location("plan_recipe", {"slug": "s"}) == {"slug": "s"}

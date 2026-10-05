@@ -73,15 +73,13 @@ is `plan_from_text`). If a tool you need is not in your list, ask for it with di
 
 Plans:
 - A library recipe (list_recipes): call plan_recipe with its slug. The shopper's location
-  (downtown Vancouver, 5 km) is added for you; pass lat, lon and max_km only when the shopper
-  names another place or distance.
+  (downtown Vancouver) is added for you; pass max_km only when the shopper names a distance.
 - To see which recipes can be planned, call list_recipes.
 - A dish the shopper names that is not in list_recipes and comes without a recipe or link: write
   a short recipe for it (a title with the servings, then one "- ingredient" line each) and plan
   it with plan_from_text, allow_partial true.
 - A recipe link or a pasted recipe: follow the recipe-shopper procedure.
-- If a plan call fails or times out, call it again with the same arguments; never drop a
-  location the shopper gave to get an answer.
+- If a plan call fails or times out, call it again with the same arguments.
 - A line's trip_store and trip_price are where the recommended trip buys it; its store and price
   are only its cheapest offer in range. With no trip, the plan chose no stores: say so.
 - Origin: report the plan's own origin_status and coverage; call get_product_origins only with the
@@ -320,7 +318,7 @@ class Agent:
         system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
                   else system_prompt(self.settings)}
         functions = ([DISCOVER_FUNCTION] if d.discoverable else []) + openai_tools(
-            d.offered_tools(), lean=self._lean(model))
+            self._plan_tools(d.offered_tools()), lean=self._lean(model))
         return await self.chat.warm(model, [system], functions)
 
     async def run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
@@ -362,7 +360,7 @@ class Agent:
                 for steps in range(1, self.settings.agent_max_steps + 1):
                     # discover_tools first and the rest in the order offered: a tool an observer
                     # adds goes last, so a local model's cached prompt holds up to it
-                    offered = d.offered_tools()
+                    offered = self._plan_tools(d.offered_tools())
                     if self._stable_tools(conv):
                         offered, later = self._split_offered(conv, offered)
                         if later:
@@ -438,17 +436,34 @@ class Agent:
         return self.settings.local_lean_tools and model.startswith("ollama:")
 
     def _with_location(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """A plan call without a location gets the shopper's (DEMO_SHOPPER_LOCATION): without one
-        pantry chooses no stores, and a model that drops it (or must type it) costs an answer or
-        about 30 tokens of writing."""
+        """A plan call gets the shopper's location (DEMO_SHOPPER_LOCATION) from the hub: the
+        models never see lat/lon (``_plan_tools``), so none drops it (pantry would choose no
+        stores), types it (about 30 tokens) or makes one up (a 3B model sent -74, -84). The
+        model's max_km stands; without one, the shopper's."""
         loc = self.settings.shopper_location
-        if not loc or canonical(name) not in PLAN_LOCATION_TOOLS or (
-                arguments.get("lat") is not None and arguments.get("lon") is not None):
+        if not loc or canonical(name) not in PLAN_LOCATION_TOOLS:
             return arguments
-        filled = {"lat": loc[0], "lon": loc[1]}
-        if arguments.get("max_km") is None:
-            filled["max_km"] = loc[2]
-        return {**arguments, **filled}
+        return {**arguments, "lat": loc[0], "lon": loc[1],
+                "max_km": arguments.get("max_km") if arguments.get("max_km") is not None
+                else loc[2]}
+
+    def _plan_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The tools with lat/lon taken out of the plan tools' parameters when the hub supplies
+        the shopper's location (pantry's stores are all in Vancouver)."""
+        if not self.settings.shopper_location:
+            return tools
+        out = []
+        for t in tools:
+            schema = t.get("inputSchema") or {}
+            if canonical(t["name"]) in PLAN_LOCATION_TOOLS and "properties" in schema:
+                schema = {**schema,
+                          "properties": {k: v for k, v in schema["properties"].items()
+                                         if k not in ("lat", "lon")},
+                          **({"required": [r for r in schema["required"] if r not in ("lat", "lon")]}
+                             if "required" in schema else {})}
+                t = {**t, "inputSchema": schema}
+            out.append(t)
+        return out
 
     def _stable_tools(self, conv: Conversation) -> bool:
         return (self.settings.local_stable_tools and conv.model.startswith("ollama:")
