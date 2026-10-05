@@ -134,9 +134,10 @@ def test_ollama_uses_the_native_api_with_a_capped_context_and_no_key() -> None:
     assert str(request.url) == "http://ollama.test/api/chat"
     assert "authorization" not in request.headers
     body = json.loads(request.content)
-    # The model's own 8,192 caps the hub's 16,384; no tools, sampling or thinking unless asked.
+    # The model's own 8,192 caps the hub's 16,384; no tools, sampling or thinking unless asked;
+    # a reply is cut at DEMO_LOCAL_MAX_TOKENS.
     assert body == {"model": "command-r7b", "messages": [], "stream": True,
-                    "options": {"num_ctx": 8192}, "keep_alive": "30m"}
+                    "options": {"num_ctx": 8192, "num_predict": 600}, "keep_alive": "30m"}
     assert (turn.text, turn.tool_calls, turn.finish_reason) == ("hi", [], "stop")
     assert turn.metrics | {"wall_s": 0} == {
         "prompt_tokens": 2000, "output_tokens": 40, "prompt_s": 80.0, "gen_s": 10.0,
@@ -157,7 +158,8 @@ def test_ollama_history_tools_and_options_in_the_native_shape() -> None:
     turn = asyncio.run(chat.complete("ollama:granite4.2:8b", history, tools))
     body = json.loads(seen[1].content)
     assert body["model"] == "granite4.2:8b" and body["tools"] == tools and body["think"] is False
-    assert body["options"] == {"num_ctx": 16384, "temperature": 0.0}   # /api/show failed: no cap
+    # /api/show failed: no context cap; thinking off, so the reply is capped
+    assert body["options"] == {"num_ctx": 16384, "temperature": 0.0, "num_predict": 600}
     assert body["messages"] == [
         {"role": "system", "content": "sys"}, {"role": "user", "content": "penne?"},
         {"role": "assistant", "content": "", "tool_calls": [

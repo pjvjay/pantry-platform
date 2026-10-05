@@ -441,3 +441,15 @@ def test_asking_what_the_library_holds_is_not_asking_to_cook() -> None:
     cooking = View(user_messages=["Plan a stir-fry for three dinners"], tool_calls=["list_recipes"],
                    results=listing.results, transcript=[])
     assert wants_a_dish(cooking)[0] is True and dish_not_in_library(cooking)[0] is True
+
+
+def test_a_new_dish_after_a_library_one_is_not_in_the_library() -> None:
+    from demo_hub.assistant_policy import dish_not_in_library
+    listed = {"list_recipes": {"result": [{"name": "Tomato Penne"}]}}
+    follow_up = View(user_messages=["Plan tomato penne with nothing from the United States",
+                                    "Can you create a similar recipe with fish?"],
+                     tool_calls=["list_recipes"], results=listed, transcript=[])
+    assert dish_not_in_library(follow_up)[0] is True        # the newest message names no recipe
+    same = View(user_messages=["Plan tomato penne"], tool_calls=["list_recipes"],
+                results=listed, transcript=[])
+    assert dish_not_in_library(same)[0] is False

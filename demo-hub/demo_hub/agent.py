@@ -61,7 +61,9 @@ REASONING_CHARS = 8_000            # a step's reasoning sent to the browser and 
 # Plan-summary fields for the browser's trace views, never sent to the model.
 FOR_BROWSER = {"llm_calls", "burr_run", "pipeline"}
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
-# plan tools that choose stores only with a location: the hub fills the shopper's when it is left out
+# tools that take the shopper's location: the hub always sends it (models dropped it, typed it
+# and made it up: lat -74, lon -84; lon +123.11), and the distance for the two plan tools
+LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_week", "find_product", "get_product"}
 PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text"}
 # what the plan tools' country lists take (a 3B model sent preference ["local", "organic"])
 COUNTRY_ARGS = {
@@ -423,6 +425,9 @@ class Agent:
                         yield {"type": "notice", "text": "the model's reply was empty or not a "
                                "readable tool call; asked it once more"}
                         continue
+                    if turn.finish_reason == "length" and not turn.tool_calls:
+                        yield {"type": "notice", "text": f"the model's reply was cut at "
+                               f"{turn.output_tokens} tokens (DEMO_LOCAL_MAX_TOKENS)"}
                     if text:
                         yield {"type": "assistant", "text": text, "step": steps}
                     if not turn.tool_calls:
@@ -457,11 +462,15 @@ class Agent:
         stores), types it (about 30 tokens) or makes one up (a 3B model sent -74, -84). The
         model's max_km stands; without one, the shopper's."""
         loc = self.settings.shopper_location
-        if not loc or canonical(name) not in PLAN_LOCATION_TOOLS:
+        tool = canonical(name)
+        if not loc or tool not in LOCATION_TOOLS:
             return arguments
-        km = arguments.get("max_km")
-        valid = isinstance(km, (int, float)) and 0.5 <= km <= 100     # H-Tiny sent max_km 0
-        return {**arguments, "lat": loc[0], "lon": loc[1], "max_km": km if valid else loc[2]}
+        out = {**arguments, "lat": loc[0], "lon": loc[1]}
+        if tool in PLAN_LOCATION_TOOLS:
+            km = arguments.get("max_km")
+            valid = isinstance(km, (int, float)) and 0.5 <= km <= 100     # H-Tiny sent max_km 0
+            out["max_km"] = km if valid else loc[2]
+        return out
 
     def _plan_tools(self, tools: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
         """The tools with lat/lon taken out of the plan tools' parameters when the hub supplies
@@ -470,11 +479,14 @@ class Agent:
         two arguments a small model got wrong (max_km 0, verbose true)."""
         if not self.settings.shopper_location:
             return tools
-        hidden = {"lat", "lon"} | ({"max_km", "verbose"} if self._lean(model) else set())
+        lean = self._lean(model)
         out = []
         for t in tools:
             schema = t.get("inputSchema") or {}
-            if canonical(t["name"]) in PLAN_LOCATION_TOOLS and "properties" in schema:
+            tool = canonical(t["name"])
+            hidden = {"lat", "lon"} | ({"max_km", "verbose"}
+                                       if lean and tool in PLAN_LOCATION_TOOLS else set())
+            if tool in LOCATION_TOOLS and "properties" in schema:
                 schema = {**schema,
                           "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
                                              if k in COUNTRY_ARGS and isinstance(v, dict) else v)

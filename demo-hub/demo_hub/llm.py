@@ -238,6 +238,10 @@ class ChatClient:
         think = override.get("think", self.settings.ollama_think)
         if think is not None:
             body["think"] = think
+        if not think and self.settings.local_max_tokens and not json_schema:
+            # a runaway reply (the 8B wrote 856 tokens, 5 minutes, into a recipe's method) is
+            # cut; with thinking on the reasoning counts too, so it is left alone
+            options["num_predict"] = self.settings.local_max_tokens
         if json_schema:
             body["format"] = json_schema
         return f"{self.settings.ollama_url}/api/chat", {}, self.settings.ollama_timeout_s, body

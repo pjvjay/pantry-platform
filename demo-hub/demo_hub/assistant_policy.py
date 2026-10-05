@@ -47,14 +47,15 @@ def wants_a_dish(view: View) -> CheckResult:
 
 
 def dish_not_in_library(view: View) -> CheckResult:
-    """After list_recipes: true when the shopper wants to cook and no library recipe is named
-    in their messages (every word of its name), so the dish must be written and planned as text."""
+    """Once list_recipes has answered (in this turn or an earlier one): true when the shopper's
+    newest message wants to cook and names no library recipe (every word of its name), so the
+    dish must be written and planned as text. Only the newest message counts: after "plan tomato
+    penne", "a similar recipe with fish" is a new dish, not the library's Tomato Penne."""
     listed = view.results.get("list_recipes")
     if listed is None:
         return None, "list_recipes has not answered yet"
-    asked = " ".join(view.user_messages)
-    if not re.search(COOKING, asked, re.IGNORECASE) or (
-            view.user_messages and LISTING.search(view.user_messages[-1])):
+    asked = view.user_messages[-1] if view.user_messages else ""
+    if not re.search(COOKING, asked, re.IGNORECASE) or LISTING.search(asked):
         return False, "the shopper is not asking to cook anything"
     words = set(_WORD.findall(asked.lower()))
     recipes: Any = listed.get("result", listed) if isinstance(listed, dict) else listed
@@ -104,7 +105,7 @@ menu_clerk.when("the agent listed the recipe library", check=tool_called("list_r
                 on="tool_result", id="library_listed") \
     .enable_tools("get_recipe", "plan_recipe")
 menu_clerk.when("the shopper wants to cook something the recipe library does not have",
-                check=dish_not_in_library, on="tool_result", id="not_in_library") \
+                check=dish_not_in_library, on=["turn", "tool_result"], id="not_in_library") \
     .enable_tools("plan_from_text")
 menu_clerk.when("a library lookup found no recipe", check=library_miss, on="tool_result",
                 id="library_miss") \

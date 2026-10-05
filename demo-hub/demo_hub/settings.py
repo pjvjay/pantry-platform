@@ -69,6 +69,9 @@ class Settings:
     # A local model's tool definitions without indentation, schema titles and null wrappers,
     # and descriptions to their first paragraphs (agent.openai_tools).
     local_lean_tools: bool = True
+    # The most a local model writes in one step with thinking off (Ollama's num_predict); 0 is
+    # no limit. Answers with the code's tables are 60-200 tokens, a tool call 20-300.
+    local_max_tokens: int = 600
     # The shopper's location the hub adds to a plan call that leaves it out: lat, lon, km
     # (DEMO_SHOPPER_LOCATION="49.2827,-123.1207,5"; "" adds none).
     shopper_location: tuple[float, float, float] | None = (49.2827, -123.1207, 5.0)
@@ -118,6 +121,7 @@ class Settings:
             in ("1", "true", "yes"),
             local_lean_tools=env.get("DEMO_LOCAL_LEAN_TOOLS", "1").lower()
             not in ("0", "false", "no"),
+            local_max_tokens=int(env.get("DEMO_LOCAL_MAX_TOKENS", str(Settings.local_max_tokens))),
             shopper_location=_location(env.get("DEMO_SHOPPER_LOCATION", "49.2827,-123.1207,5")),
             ollama_keep_alive=env.get("DEMO_OLLAMA_KEEP_ALIVE", Settings.ollama_keep_alive),
             ollama_temperature=float(env["OLLAMA_TEMPERATURE"]) if env.get("OLLAMA_TEMPERATURE")
