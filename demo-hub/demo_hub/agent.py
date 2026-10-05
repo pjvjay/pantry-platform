@@ -182,6 +182,8 @@ def lean_schema(node: Any) -> Any:
 
 
 TOOLS_PREFIX = "More tools are now available; call them like the others"
+EMPTY_REPLY_NUDGE = ("Your last reply was empty or could not be read as a tool call. Call one tool "
+                     "with valid JSON arguments, or answer the shopper.")
 
 
 def announce_tools(tools: list[dict[str, Any]], lean: bool = False) -> str:
@@ -356,6 +358,7 @@ class Agent:
                 system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
                           else system_prompt(self.settings)}
                 first_result = len(conv.tool_log)        # this turn's results start here
+                nudged = False
                 for steps in range(1, self.settings.agent_max_steps + 1):
                     # discover_tools first and the rest in the order offered: a tool an observer
                     # adds goes last, so a local model's cached prompt holds up to it
@@ -403,6 +406,15 @@ class Agent:
                         # model's few sentences; the model's own message stays short in history
                         text = with_tables(text, plan_tables(
                             [r for _, r in conv.tool_log[first_result:]]))
+                    if not turn.tool_calls and not text.strip() and turn.output_tokens \
+                            and not nudged:
+                        # the model wrote something that is neither text nor a readable tool
+                        # call (a small model's malformed call): ask once, then go on
+                        nudged = True
+                        conv.messages.append({"role": "user", "content": EMPTY_REPLY_NUDGE})
+                        yield {"type": "notice", "text": "the model's reply was empty or not a "
+                               "readable tool call; asked it once more"}
+                        continue
                     if text:
                         yield {"type": "assistant", "text": text, "step": steps}
                     if not turn.tool_calls:
@@ -558,7 +570,8 @@ class Agent:
         names: dict[str, str] = {}
         for message in conv.messages:
             role, content = message.get("role"), str(message.get("content") or "")
-            if role == "user" and not content.startswith((GOAL_PREFIX, TOOLS_PREFIX)):
+            if role == "user" and not content.startswith((GOAL_PREFIX, TOOLS_PREFIX,
+                                                          EMPTY_REPLY_NUDGE)):
                 transcript.append(f"[{len(transcript) + 1}] shopper: {content[:1500]}")
             elif role == "assistant":
                 if content:

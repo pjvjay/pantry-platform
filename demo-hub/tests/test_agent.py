@@ -327,3 +327,17 @@ def test_an_overloaded_gemini_model_falls_back_but_a_local_one_does_not(session:
     chat = ScriptedChat(ModelUnavailable("ollama m: HTTP 500"))
     events, conv = run(Agent(settings, FakeTargets(), chat), "hi", model="ollama:m")
     assert conv.model == "ollama:m" and events[-1]["stop"] == "error"
+
+
+def test_an_empty_reply_gets_one_nudge(session: FakeSession) -> None:
+    empty = turn("")
+    empty.output_tokens = 50                       # it wrote something nobody could read
+    chat = ScriptedChat(empty, turn("Penne is $1.97."))
+    events, _ = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "penne?")
+    assert any(e["type"] == "notice" and "asked it once more" in e["text"] for e in events)
+    assert chat.requests[1]["messages"][-1]["content"].startswith("Your last reply was empty")
+    assert next(e for e in events if e["type"] == "assistant")["text"] == "Penne is $1.97."
+    # a second empty reply is the answer: no loop
+    chat = ScriptedChat(empty, empty)
+    events, _ = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "penne?")
+    assert events[-1]["stop"] == "answered" and len(chat.requests) == 2

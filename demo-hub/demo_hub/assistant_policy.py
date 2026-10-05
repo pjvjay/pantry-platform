@@ -28,6 +28,22 @@ from demo_hub.observers import (
 COOKING = (r"\b(make|cook|plan|recipe|meals?|dinners?|lunch|breakfast|ingredients?"
            r"|shopping list)\b")
 _WORD = re.compile(r"[a-z]+")
+# Asking what the library holds is not asking to cook: "which recipes can you plan?" names no
+# dish, so no plan tools join (they cost reading time, and joining mid-turn breaks the cache).
+LISTING = re.compile(r"\b(which|what) (recipes|dishes|meals)\b|\blist (the |your |all )?recipes\b"
+                     r"|\bwhat can you (plan|make|cook)\b|\brecipes? (do|can) you\b", re.IGNORECASE)
+
+
+def wants_a_dish(view: View) -> CheckResult:
+    """The shopper's newest message is about making or planning food, and not just asking which
+    recipes there are."""
+    text = view.user_messages[-1] if view.user_messages else ""
+    if not text:
+        return None, "no message yet"
+    if LISTING.search(text):
+        return False, "asking what the library holds"
+    m = re.search(COOKING, text, re.IGNORECASE)
+    return (True, f"said {m.group(0)!r}") if m else (False, "nothing about cooking")
 
 
 def dish_not_in_library(view: View) -> CheckResult:
@@ -37,7 +53,8 @@ def dish_not_in_library(view: View) -> CheckResult:
     if listed is None:
         return None, "list_recipes has not answered yet"
     asked = " ".join(view.user_messages)
-    if not re.search(COOKING, asked, re.IGNORECASE):
+    if not re.search(COOKING, asked, re.IGNORECASE) or (
+            view.user_messages and LISTING.search(view.user_messages[-1])):
         return False, "the shopper is not asking to cook anything"
     words = set(_WORD.findall(asked.lower()))
     recipes: Any = listed.get("result", listed) if isinstance(listed, dict) else listed
@@ -81,7 +98,7 @@ recipe_reader.when(
 menu_clerk = Observer("menu_clerk", "Listens for a dish the shopper wants to cook or shop for.",
                       on=["turn", "tool_result"])
 menu_clerk.when("the shopper wants to make, cook or plan a dish or some meals",
-                check=user_says(COOKING), on="turn", id="dish_to_cook") \
+                check=wants_a_dish, on="turn", id="dish_to_cook") \
     .enable_tools("get_recipe", "plan_recipe")
 menu_clerk.when("the agent listed the recipe library", check=tool_called("list_recipes"),
                 on="tool_result", id="library_listed") \

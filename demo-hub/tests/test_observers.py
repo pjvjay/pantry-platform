@@ -431,3 +431,13 @@ def test_with_stable_tools_a_local_model_keeps_its_tools_block(mcp: Any) -> None
     assert second[:len(first)] == first
     assert any(e["type"] == "notice" and "pantry-get-product" in e["text"] for e in events)
     assert "pantry-get-product" in conv.announced
+
+
+def test_asking_what_the_library_holds_is_not_asking_to_cook() -> None:
+    from demo_hub.assistant_policy import dish_not_in_library, wants_a_dish
+    listing = View(user_messages=["Which recipes can you plan for me?"], tool_calls=["list_recipes"],
+                   results={"list_recipes": {"result": [{"name": "Tomato Penne"}]}}, transcript=[])
+    assert wants_a_dish(listing)[0] is False and dish_not_in_library(listing)[0] is False
+    cooking = View(user_messages=["Plan a stir-fry for three dinners"], tool_calls=["list_recipes"],
+                   results=listing.results, transcript=[])
+    assert wants_a_dish(cooking)[0] is True and dish_not_in_library(cooking)[0] is True
