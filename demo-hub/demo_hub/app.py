@@ -9,7 +9,9 @@
 * ``/hub/demo/reset``     reseed pantry's database and reload the demo origin evidence
 
 Secrets (the pantry bearer token, the ContextForge JWT, the Gemini key) stay in this process;
-the browser only ever talks to the hub.
+the browser only ever talks to the hub. ``guard.py`` checks every request first: the hub's own
+Host on every route, and the console's header and JSON on every non-GET ``/hub/*`` and
+``/pantry/api/*`` request (docs/hub-security.md).
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from pydantic import BaseModel, Field
 from demo_hub import mcp_targets, pricing
 from demo_hub.agent import AGENT_TARGETS, Agent
 from demo_hub.evals import evaluate
+from demo_hub.guard import Guard
 from demo_hub.images import ImageCache, ImageError
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
 from demo_hub.mcp_targets import McpTargetError, Targets, open_session
@@ -123,6 +126,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     stores_cache: dict[str, Any] = {"at": 0.0, "names": []}
     app.state.settings, app.state.agent, app.state.targets = settings, agent, targets
     app.state.traces, app.state.images, app.state.http_stats = store, images, http_stats
+
+    # Before the timing middleware below, so the timing wraps it: a refused request is counted.
+    app.add_middleware(Guard, port=settings.hub_port, extra_hosts=settings.allowed_hosts)
 
     @app.middleware("http")
     async def timing(request: Request, call_next: Any) -> Response:
@@ -500,8 +506,9 @@ async def _resolve_public(targets: Targets, target_id: str) -> dict[str, Any]:
 def main() -> None:  # pragma: no cover - the console entry point
     import uvicorn
 
-    uvicorn.run(create_app(), host=os.environ.get("HUB_HOST", "127.0.0.1"),
-                port=int(os.environ.get("HUB_PORT", "8090")))
+    settings = Settings.from_env()
+    uvicorn.run(create_app(settings), host=os.environ.get("HUB_HOST", "127.0.0.1"),
+                port=settings.hub_port)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -38,6 +38,12 @@ browser ── :8090 demo hub ─┬─ /pantry/          the built pantry-front
 The hub holds every secret (the pantry bearer token labelled `demo-hub`, the ContextForge JWT,
 the Gemini key); the browser only talks to the hub.
 
+The hub answers only to its own loopback address (and `HUB_ALLOWED_HOSTS`, by default Vite's
+`localhost:5173`). Every request that changes something under `/hub/` or `/pantry/api/` must send
+`X-Pantry-Console: 1` and JSON, which a page on another site cannot do. The console does this
+for you; a script adds `-H 'X-Pantry-Console: 1' -H 'Content-Type: application/json'`. See
+[docs/hub-security.md](docs/hub-security.md).
+
 `scripts/up.sh` starts, or reuses when already healthy:
 
 | Service | Port | From |
@@ -262,7 +268,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 168 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 186 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
