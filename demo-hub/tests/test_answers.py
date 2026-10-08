@@ -176,10 +176,10 @@ def test_lean_tools_drop_indentation_titles_and_null_wrappers() -> None:
 
 def test_the_hub_adds_the_shoppers_location_to_a_plan_call_without_one() -> None:
     agent = Agent(Settings(observer_model=""), FakeTargets(), ScriptedChat())
-    assert agent._with_location("pantry-plan-recipe", {"slug": "tomato_penne"}) == {
+    assert agent._with_hub_args("pantry-plan-recipe", {"slug": "tomato_penne"}) == {
         "slug": "tomato_penne", "lat": 49.2827, "lon": -123.1207, "max_km": 5.0}
     made_up = {"slug": "s", "lat": -74.08, "lon": -84.22, "max_km": 20}
-    assert agent._with_location("pantry-plan-recipe", made_up) == {
+    assert agent._with_hub_args("pantry-plan-recipe", made_up) == {
         "slug": "s", "lat": 49.2827, "lon": -123.1207, "max_km": 20}        # a distance stands
     plan = {"name": "pantry-plan-recipe", "inputSchema": {"type": "object", "required": ["slug"],
             "properties": {"slug": {}, "lat": {}, "lon": {}, "max_km": {}}}}
@@ -190,13 +190,13 @@ def test_the_hub_adds_the_shoppers_location_to_a_plan_call_without_one() -> None
     plan["inputSchema"]["properties"]["preference"] = {"type": "array"}
     [described] = agent._plan_tools([plan], "ollama:m")
     assert "country names" in described["inputSchema"]["properties"]["preference"]["description"]
-    assert agent._with_location("plan_recipe", {"slug": "s", "max_km": 0})["max_km"] == 5.0
+    assert agent._with_hub_args("plan_recipe", {"slug": "s", "max_km": 0})["max_km"] == 5.0
     # a product search gets the location too (the 8B sent lon +123.11), but no distance
-    assert agent._with_location("pantry-find-product", {"query": "x", "lon": 123.11}) == {
+    assert agent._with_hub_args("pantry-find-product", {"query": "x", "lon": 123.11}) == {
         "query": "x", "lat": 49.2827, "lon": -123.1207}
-    assert agent._with_location("pantry-list-recipes", {}) == {}
+    assert agent._with_hub_args("pantry-list-recipes", {}) == {}
     off = Agent(Settings(observer_model="", shopper_location=None), FakeTargets(), ScriptedChat())
-    assert off._with_location("plan_recipe", {"slug": "s"}) == {"slug": "s"}
+    assert off._with_hub_args("plan_recipe", {"slug": "s"}) == {"slug": "s"}
 
 
 def test_shopper_location_parses_from_the_environment() -> None:

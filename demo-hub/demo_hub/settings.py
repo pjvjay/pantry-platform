@@ -82,6 +82,9 @@ class Settings:
     # Assistant traces and browser measurements (JSON lines) and the image cache ("" = none).
     traces_dir: str = ""
     images_dir: str = ""
+    # Cart alternatives (DEMO_CART_ALTERNATIVES): plans are made with their basis, so the
+    # Assistant's cart offers Options per line and a swap re-prices it (docs/cart-alternatives.md).
+    cart_alternatives: bool = True
     # The hub's port and the other Host values it answers to (guard.py): HUB_PORT, and
     # HUB_ALLOWED_HOSTS, comma-separated host:port (Vite's dev proxy keeps the browser's Host).
     hub_port: int = 8090
@@ -135,6 +138,8 @@ class Settings:
             timings_path=env.get("LLM_TIMINGS_PATH", "~/.pantry-demo/llm-timings.jsonl"),
             traces_dir=env.get("DEMO_TRACES_DIR", "~/.pantry-demo/traces"),
             images_dir=env.get("DEMO_IMAGES_DIR", "~/.pantry-demo/images"),
+            cart_alternatives=env.get("DEMO_CART_ALTERNATIVES", "1").lower()
+            not in ("0", "false", "no"),
             hub_port=int(env.get("HUB_PORT", str(Settings.hub_port))),
             allowed_hosts=tuple(h.strip() for h in env.get(
                 "HUB_ALLOWED_HOSTS", ",".join(Settings.allowed_hosts)).split(",") if h.strip()),

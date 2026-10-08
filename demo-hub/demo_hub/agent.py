@@ -41,6 +41,7 @@ from demo_hub.disclosure import (
     canonical,
     judge_prompt,
     parse_reports,
+    visible_tools,
 )
 from demo_hub.llm import (
     ChatClient,
@@ -58,13 +59,22 @@ MAX_CONVERSATIONS = 50
 GOAL_PREFIX = "Goal enabled by observation"
 RESULT_CHARS_FOR_MODEL = 16_000
 REASONING_CHARS = 8_000            # a step's reasoning sent to the browser and kept in its trace
-# Plan-summary fields for the browser's trace views, never sent to the model.
-FOR_BROWSER = {"llm_calls", "burr_run", "pipeline"}
+# What of a plan result the model reads (C10 in the plan). FOR_BROWSER: summary fields for the
+# browser's trace views, never sent to the model. SERVER_ONLY: kept by the hub alone (in
+# tool_log), never sent to the model nor the browser: the plan's basis, which the cart's
+# Options dialog and a swap are built from, and which no client is trusted to send back.
+# FOR_MODEL_NESTED: paths inside the summary for the browser only ("*" is every item of a list).
+FOR_BROWSER = frozenset({"llm_calls", "burr_run", "pipeline"})
+SERVER_ONLY = frozenset({"basis"})
+FOR_MODEL_NESTED = frozenset({("nutrition", "lines"), ("days", "*", "nutrition", "lines")})
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
 # tools that take the shopper's location: the hub always sends it (models dropped it, typed it
 # and made it up: lat -74, lon -84; lon +123.11), and the distance for the two plan tools
 LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_week", "find_product", "get_product"}
 PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text"}
+# plan tools that return the plan's basis when asked (basis=true): the hub always asks, when the
+# target's schema takes it, and the model never sees the argument
+BASIS_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines"}
 # what the plan tools' country lists take (a 3B model sent preference ["local", "organic"])
 COUNTRY_ARGS = {
     "exclude_origin": 'country names to leave out, e.g. ["United States"]',
@@ -105,6 +115,13 @@ its result briefly.
 You cannot run scripts or open a shell. Read a recipe page with the fetch tool (markdown,
 max_length 20000; call again with start_index if it is cut before the ingredient list).
 """
+
+
+def takes_basis(tool: dict[str, Any]) -> bool:
+    """A plan tool (BASIS_TOOLS) whose listed schema has the `basis` flag."""
+    properties = (tool.get("inputSchema") or {}).get("properties")
+    return canonical(tool["name"]) in BASIS_TOOLS and isinstance(properties, dict) \
+        and "basis" in properties
 
 
 def load_skill(path: str) -> str:
@@ -207,17 +224,61 @@ def announce_tools(tools: list[dict[str, Any]], lean: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _without_path(node: Any, path: tuple[str, ...]) -> Any:
+    """``node`` without the value at ``path`` ("*" walks every item of a list); a copy only
+    where something is taken out, and unchanged where the path is absent."""
+    if not path:
+        return node
+    head, rest = path[0], path[1:]
+    if head == "*":
+        return [_without_path(x, rest) for x in node] if isinstance(node, list) else node
+    if not isinstance(node, dict) or head not in node:
+        return node
+    if not rest:
+        return {k: v for k, v in node.items() if k != head}
+    return {**node, head: _without_path(node[head], rest)}
+
+
+def without(structured: Any, keys: frozenset[str] | set[str],
+            nested: frozenset[tuple[str, ...]] = frozenset()) -> Any:
+    """A plan or week result with ``keys`` taken out of its summary and its full plan, and the
+    ``nested`` paths out of its summary. Anything else comes back as it is."""
+    if not isinstance(structured, dict):
+        return structured
+    out = structured
+    for part in ("summary", "full"):
+        body = out.get(part)
+        if isinstance(body, dict) and keys & body.keys():
+            out = {**out, part: {k: v for k, v in body.items() if k not in keys}}
+    summary = out.get("summary")
+    if isinstance(summary, dict):
+        for path in nested:
+            summary = _without_path(summary, path)
+        if summary is not out["summary"]:
+            out = {**out, "summary": summary}
+    return out
+
+
+def model_copy(structured: Any) -> Any:
+    """What the model reads of a result: no basis, nothing for the browser's views alone."""
+    return without(structured, SERVER_ONLY | FOR_BROWSER, FOR_MODEL_NESTED)
+
+
+def for_browser(result: dict[str, Any]) -> dict[str, Any]:
+    """A tool result as the browser (and the turn's trace) gets it: everything but the basis."""
+    body = result.get("structured")
+    stripped = without(body, SERVER_ONLY)
+    return result if stripped is body else {**result, "structured": stripped}
+
+
 def result_for_model(result: dict[str, Any], limit: int = RESULT_CHARS_FOR_MODEL) -> str:
     """The tool result as the model reads it: the structured content as JSON (or the text), at
     most `limit` characters. A plan summary's `llm_calls` and `burr_run` (where pantry's LLM time
-    went and its Burr trace, for the browser) are left out: the model has no use for them and pays
-    for every token. JSON over
+    went and its Burr trace, for the browser) and its basis (the hub's, for the cart) are left
+    out (``model_copy``): the model has no use for them and pays for every token. JSON over
     the limit is shrunk by shortening its longest lists, so it stays valid and says what was left
     out; only what still does not fit is cut."""
-    body = result.get("structured")
-    summary = body.get("summary") if isinstance(body, dict) else None
-    if isinstance(summary, dict) and FOR_BROWSER & summary.keys():
-        body = {**body, "summary": {k: v for k, v in summary.items() if k not in FOR_BROWSER}}
+    body = model_copy(result.get("structured"))
     if body is not None:
         text = json.dumps(body, ensure_ascii=False)
         if len(text) > limit:
@@ -287,6 +348,10 @@ class Conversation:
     fixed_tools: list[str] | None = None
     announced: set[str] = field(default_factory=set)
     turn_calls: set[tuple[str, str]] = field(default_factory=set)   # (tool, arguments) this turn
+    # the target's tools whose schema takes `basis` (BASIS_TOOLS), as listed this turn: only
+    # those are sent basis=true, so a gateway with an older schema is never sent an unknown
+    # argument (its plans then carry no basis, and the cart offers no Options)
+    basis_tools: set[str] = field(default_factory=set)
 
 
 class Agent:
@@ -326,7 +391,8 @@ class Agent:
         resolved = await self.targets.resolve(target)
         async with open_session(resolved) as session:
             listed = await session.list_tools()
-        tools = [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in listed.tools]
+        tools = visible_tools(self.policy, [t.model_dump(mode="json", by_alias=True,
+                                                         exclude_none=True) for t in listed.tools])
         d = Disclosure.start(self.policy, tools, mode,
                              {"recipe-shopper": load_skill(self.settings.recipe_shopper_skill)})
         system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
@@ -354,6 +420,8 @@ class Agent:
                 listed = await session.list_tools()
                 tools = [t.model_dump(mode="json", by_alias=True, exclude_none=True)
                          for t in listed.tools if conv.tools is None or t.name in conv.tools]
+                tools = visible_tools(self.policy, tools)
+                conv.basis_tools = {t["name"] for t in tools if takes_basis(t)}
                 d = conv.disclosure
                 if (d is None or d.mode != conv.disclosure_mode
                         or [t["name"] for t in d.catalog] != [t["name"] for t in tools]):
@@ -420,7 +488,7 @@ class Agent:
                         # model's few sentences; the model's own message stays short in history.
                         # The browser draws the plans themselves (`plans`) under `reply`.
                         results = [r for _, r in conv.tool_log[first_result:]]
-                        cards = plan_cards(results, drop=FOR_BROWSER)
+                        cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY)
                         text = with_tables(text, plan_tables(results))
                     if not turn.tool_calls and not text.strip() and turn.output_tokens \
                             and not nudged:
@@ -442,7 +510,8 @@ class Agent:
                         yield self._done(conv, steps, "answered", started)
                         return
                     for call in turn.tool_calls:
-                        sent = self._with_location(call["name"], call["arguments"])
+                        sent = self._with_hub_args(call["name"], call["arguments"],
+                                                   call["name"] in conv.basis_tools)
                         filled = sorted(k for k in sent if k not in call["arguments"])
                         call = {**call, "arguments": sent}
                         yield {"type": "tool_call", "id": call["id"], "name": call["name"],
@@ -456,7 +525,7 @@ class Agent:
                 tables = plan_tables(results)
                 if tables:
                     reply = "The model did not finish its summary; here is the plan it made."
-                    cards = plan_cards(results, drop=FOR_BROWSER)
+                    cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY)
                     yield {"type": "assistant", "step": steps, "text": with_tables(reply, tables),
                            **({"reply": reply, "plans": cards} if cards else {})}
                 yield self._done(conv, steps, "step budget reached", started)
@@ -467,17 +536,30 @@ class Agent:
     def _lean(self, model: str) -> bool:
         return self.settings.local_lean_tools and model.startswith("ollama:")
 
-    def _with_location(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """A location-taking tool (LOCATION_TOOLS) gets the shopper's location
+    def _with_hub_args(self, name: str, arguments: dict[str, Any],
+                       takes_basis: bool = False) -> dict[str, Any]:
+        """The arguments the hub fills in, whatever the model sent.
+
+        A location-taking tool (LOCATION_TOOLS) gets the shopper's location
         (DEMO_SHOPPER_LOCATION) from the hub: the models never see lat/lon (``_plan_tools``), so
         none drops it (pantry would choose no stores), types it (about 30 tokens) or makes one up
         (a 3B model sent -74, -84; the 8B sent lon +123.11). A plan's valid max_km stands;
-        without one, or outside 0.5-100 km, the shopper's."""
-        loc = self.settings.shopper_location
+        without one, or outside 0.5-100 km, the shopper's.
+
+        A plan tool whose schema takes it (``takes_basis``) gets basis=true while cart
+        alternatives are on (DEMO_CART_ALTERNATIVES): the plan's basis comes back for the hub to
+        keep, so the cart can rank and re-price a line without the model. The model never sees
+        the argument, and one it sends anyway is not passed on."""
         tool = canonical(name)
+        out = dict(arguments)
+        if tool in BASIS_TOOLS:
+            out.pop("basis", None)
+            if takes_basis and self.settings.cart_alternatives:
+                out["basis"] = True
+        loc = self.settings.shopper_location
         if not loc or tool not in LOCATION_TOOLS:
-            return arguments
-        out = {**arguments, "lat": loc[0], "lon": loc[1]}
+            return out
+        out.update(lat=loc[0], lon=loc[1])
         if tool in PLAN_LOCATION_TOOLS:
             km = arguments.get("max_km")
             valid = isinstance(km, (int, float)) and 0.5 <= km <= 100     # H-Tiny sent max_km 0
@@ -485,26 +567,30 @@ class Agent:
         return out
 
     def _plan_tools(self, tools: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
-        """The tools with lat/lon taken out of every location-taking tool's parameters when the
-        hub supplies the shopper's location (pantry's stores are all in Vancouver); for a local
-        model also the plan tools' max_km (the shopper's distance stands) and verbose (the full
-        plan is for the browser): two arguments a small model got wrong (max_km 0, verbose
-        true). The country lists say what they take."""
-        if not self.settings.shopper_location:
-            return tools
+        """The tools as the model sees them. A plan tool never shows `basis` (the hub sets it).
+        When the hub supplies the shopper's location (pantry's stores are all in Vancouver),
+        lat/lon are taken out of every location-taking tool's parameters, and for a local model
+        also the plan tools' max_km (the shopper's distance stands) and verbose (the full plan
+        is for the browser): two arguments a small model got wrong (max_km 0, verbose true).
+        The country lists say what they take."""
+        located = bool(self.settings.shopper_location)
         lean = self._lean(model)
         out = []
         for t in tools:
             schema = t.get("inputSchema") or {}
             tool = canonical(t["name"])
-            hidden = {"lat", "lon"} | ({"max_km", "verbose"}
-                                       if lean and tool in PLAN_LOCATION_TOOLS else set())
-            if tool in LOCATION_TOOLS and "properties" in schema:
+            hidden = {"basis"} if tool in BASIS_TOOLS else set()
+            locating = located and tool in LOCATION_TOOLS
+            if locating:
+                hidden |= {"lat", "lon"} | ({"max_km", "verbose"}
+                                            if lean and tool in PLAN_LOCATION_TOOLS else set())
+            properties = schema.get("properties")
+            if isinstance(properties, dict) and (locating or hidden & properties.keys()):
                 schema = {**schema,
                           "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
-                                             if k in COUNTRY_ARGS and isinstance(v, dict) else v)
-                                         for k, v in schema["properties"].items()
-                                         if k not in hidden},
+                                             if locating and k in COUNTRY_ARGS
+                                             and isinstance(v, dict) else v)
+                                         for k, v in properties.items() if k not in hidden},
                           **({"required": [r for r in schema["required"] if r not in hidden]}
                              if "required" in schema else {})}
                 t = {**t, "inputSchema": schema}
@@ -566,8 +652,9 @@ class Agent:
                    if local and self.settings.local_compact_plans and not result.get("is_error")
                    else None)
         content = compact or result_for_model(result, limit)
-        # model_chars: how much of the result the model reads (shrunk or cut to its limit)
-        yield {"type": "tool_result", "id": call["id"], **result, "step": step,
+        # model_chars: how much of the result the model reads (shrunk or cut to its limit). The
+        # browser and the trace get the result without its basis, which only tool_log keeps.
+        yield {"type": "tool_result", "id": call["id"], **for_browser(result), "step": step,
                "model_chars": len(content)}
         conv.messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
         if repeated:

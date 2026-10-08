@@ -197,4 +197,7 @@ POLICY = Policy(
     initial=["list_recipes", "find_product"],
     observers=[link_reader, recipe_reader, menu_clerk, origin_desk, week_planner, shelf_clerk,
                ops_desk, origin_listener, label_desk, diet_watch, tone_watch, compliance_officer],
+    # The cart's follow-ups to a plan: the hub calls them for the shopper's Options dialog and
+    # "Use this", on the plan's basis, which the model never holds.
+    hidden=["rank_alternatives", "reprice_plan"],
 )
