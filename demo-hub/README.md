@@ -55,8 +55,8 @@ to apply new ones.
 ## Demo data
 
 `scripts/reset-demo-data.sh` (also the Provenance tab's **Reset demo data** button) reseeds the
-161-product catalog and 7 recipes, then loads `data/demo-labels.json` (32 label readings) and
-`data/demo-origins.json` (5 database records): 34 products resolved, garlic conflicting (a label
+165-product catalog and 7 recipes, then loads `data/demo-labels.json` (36 label readings) and
+`data/demo-origins.json` (5 database records): 38 products resolved, garlic conflicting (a label
 says Mexico, a record says China), an importer-only soy sauce label that correctly does not count
 as an origin, and enough US-origin items that excluding the United States changes baskets. It
 also empties the review queue.
