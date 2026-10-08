@@ -1,0 +1,217 @@
+{
+  "_comment": "pjvjay/pantry-api #27 and its neighbours as the GitHub REST API returned them on 2026-10-08 (titles, bases, heads, merge times; no PR carried a label). The 19 commit subjects are the land branch's real ones: none is 'Merge pull request #N' and none ends in '(#N)'.",
+  "pulls": {
+    "20": {
+      "number": 20,
+      "title": "MCP server, Option 2: product lookup, authenticated write path, token-lean results, resources and prompts",
+      "state": "closed",
+      "merged_at": "2026-10-05T07:38:28Z",
+      "base": {
+        "ref": "main",
+        "repo": {
+          "default_branch": "main"
+        }
+      },
+      "head": {
+        "ref": "feat/mcp-option2"
+      },
+      "labels": []
+    },
+    "24": {
+      "number": 24,
+      "title": "Recipe links: partial plans, the 160-product catalog and the recipe-shopper Agent Skill",
+      "state": "closed",
+      "merged_at": "2026-10-05T07:38:48Z",
+      "base": {
+        "ref": "feat/mcp-option2",
+        "repo": {
+          "default_branch": "main"
+        }
+      },
+      "head": {
+        "ref": "feat/recipe-links"
+      },
+      "labels": []
+    },
+    "26": {
+      "number": 26,
+      "title": "Gemini models, runtime settings, store-aware library plans and LLM call tracing",
+      "state": "closed",
+      "merged_at": "2026-10-05T07:39:15Z",
+      "base": {
+        "ref": "feat/recipe-links",
+        "repo": {
+          "default_branch": "main"
+        }
+      },
+      "head": {
+        "ref": "feat/gemini-llm"
+      },
+      "labels": []
+    },
+    "27": {
+      "number": 27,
+      "title": "Land #24 and #26 on main: recipe links, Gemini models and store-aware plans",
+      "state": "open",
+      "merged_at": null,
+      "base": {
+        "ref": "main",
+        "repo": {
+          "default_branch": "main"
+        }
+      },
+      "head": {
+        "ref": "land/recipe-links-gemini"
+      },
+      "labels": []
+    },
+    "28": {
+      "number": 28,
+      "title": "Plan observability: per-step timings, LLM calls on the plan, the store list",
+      "state": "open",
+      "merged_at": null,
+      "base": {
+        "ref": "land/recipe-links-gemini",
+        "repo": {
+          "default_branch": "main"
+        }
+      },
+      "head": {
+        "ref": "feat/observability"
+      },
+      "labels": []
+    },
+    "29": {
+      "number": 29,
+      "title": "Origin exclusions name the swaps and plan the rest; onion bags; a reality check",
+      "state": "open",
+      "merged_at": null,
+      "base": {
+        "ref": "feat/observability",
+        "repo": {
+          "default_branch": "main"
+        }
+      },
+      "head": {
+        "ref": "feat/origin-alternatives"
+      },
+      "labels": []
+    }
+  },
+  "commits_27": [
+    {
+      "sha": "8cca9d09a839af9f45838b8e5f115680147f0192",
+      "commit": {
+        "message": "Add find_product/get_product MCP tools with planner-parity retrieval"
+      }
+    },
+    {
+      "sha": "91aec1d72874eef4063723d90f2acf259616e9f5",
+      "commit": {
+        "message": "Add bearer auth on /mcp and the origin-submission write path"
+      }
+    },
+    {
+      "sha": "53f1f37a4788540effca3f964d768b5db5580492",
+      "commit": {
+        "message": "Return token-lean plan summaries and page the catalog tools"
+      }
+    },
+    {
+      "sha": "32581b526bae9e8601c273e3eecc97e2027f4762",
+      "commit": {
+        "message": "Add MCP resources, prompts and rewrite the README's MCP section"
+      }
+    },
+    {
+      "sha": "e670f5fef145f38cdff7ca895135019ac5f29ccb",
+      "commit": {
+        "message": "Address the fourth review: survive a missing queue table, fail at startup, price the trip"
+      }
+    },
+    {
+      "sha": "ddb030766ba6cc001dcd1597548d59ca9b8f49af",
+      "commit": {
+        "message": "Keep the smallest pack admissible under the t2 size cap"
+      }
+    },
+    {
+      "sha": "afb2284231c7aa4b940ae0c4e40d3b972d996f4c",
+      "commit": {
+        "message": "Plan what is stocked: partial plans, max_km and a generic match level"
+      }
+    },
+    {
+      "sha": "becb7d5b1700dba703c69266d9f80db2016b680d",
+      "commit": {
+        "message": "MCP: plan_from_text takes max_km and allow_partial; lines carry their match"
+      }
+    },
+    {
+      "sha": "2ff04b1670810c3f9cae04d4bf807f12de4a7562",
+      "commit": {
+        "message": "Seeds: load pantry-db's 160-product catalog so real recipes can plan"
+      }
+    },
+    {
+      "sha": "59bbe2761df3b792792ff7b85e31365fd0875569",
+      "commit": {
+        "message": "Add the recipe-shopper Agent Skill: recipe link -> cheapest basket nearby"
+      }
+    },
+    {
+      "sha": "227063800d36744295d5e449969728fde6c030e8",
+      "commit": {
+        "message": "Retrieval: leaf/leaves, powder = ground, negated words, a size cap that prices"
+      }
+    },
+    {
+      "sha": "b1cbe19257f951c77ab442b1cdb2c059b27afac2",
+      "commit": {
+        "message": "Plans: one purchase per product, water never bought, every line accounted"
+      }
+    },
+    {
+      "sha": "796b97b9a237ac2be35052a750de0576363b6201",
+      "commit": {
+        "message": "Demo mode: parse recipe-card lines and pick the product a word is about"
+      }
+    },
+    {
+      "sha": "56221e3d7ce2007a0bff2a1bfb3a77fb0b27aea4",
+      "commit": {
+        "message": "Ingest: a catalog name resolves to itself"
+      }
+    },
+    {
+      "sha": "7339f687524c2e1004123d2a2aee2a959f0bacb2",
+      "commit": {
+        "message": "recipe-shopper: http(s)-only redirects, a whole-fetch deadline, SKILL.md"
+      }
+    },
+    {
+      "sha": "d2949ae58fb0cd1aff0aad37e4b9db5d25dddb58",
+      "commit": {
+        "message": "Tests: pin every basket-quality case and review reproduction"
+      }
+    },
+    {
+      "sha": "3366b72995c17240c401ce5ea4e4884b10ceb391",
+      "commit": {
+        "message": "Gemini models, runtime settings, store-aware library plans, LLM call tracing"
+      }
+    },
+    {
+      "sha": "a274f67ed228af931657ca2084487432526c7acb",
+      "commit": {
+        "message": "Merge main (#20 squash-merged) into the recipe-links and Gemini work"
+      }
+    },
+    {
+      "sha": "abe043ab5dd5b7db9483d317ddd68d65cdb3f250",
+      "commit": {
+        "message": "Brand statistics are floats on Postgres too"
+      }
+    }
+  ]
+}
