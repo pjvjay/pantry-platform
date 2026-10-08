@@ -12,6 +12,8 @@
 #   3. docker compose still parses with the pinned set
 #   4. demo-hub's tests pass (hub-tests)
 #   5. pantry-api and pantry-db carry the same seed JSON (shared-seed)
+#   6. pantry-db's migrations and pantry-api's models build the same
+#      schema (schema-parity)
 #
 # Required by the ruleset on main.
 # ============================================================
@@ -104,3 +106,69 @@ jobs:
             fi
           done
           exit $fail
+
+  schema-parity:
+    # Production's schema comes from pantry-db's migrations; pantry-api's
+    # tests build theirs from its SQLAlchemy models with create_all. This
+    # builds both from the pinned submodules on production's Postgres major
+    # and diffs them. scripts/schema_parity_allow.json lists the accepted
+    # differences, each with its reason; any other difference fails. How to
+    # read a failure: README, "Reading a schema-parity failure".
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # Production's major (CNPG ghcr.io/cloudnative-pg/postgresql:17.5,
+        # pantry-gitops infra/postgres-cluster.yaml).
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: pantry
+          POSTGRES_PASSWORD: pantry
+          POSTGRES_DB: pantry
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pantry"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGPASSWORD: pantry
+      PG_URL: postgresql+psycopg://pantry:pantry@127.0.0.1:5432
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pantry-api/pyproject.toml
+      - run: pip install ./pantry-api
+
+      - name: Two empty databases, mig and orm
+        run: psql -h 127.0.0.1 -U pantry -d pantry -v ON_ERROR_STOP=1 -c "CREATE DATABASE mig" -c "CREATE DATABASE orm"
+
+      - name: mig — pantry-db's migrate image, as compose and the PreSync hook run it
+        run: |
+          docker build -q -t pantry-db-migrate ./pantry-db
+          docker run --rm --network host \
+            -e DB_HOST=127.0.0.1 -e DB_PORT=5432 -e DB_USER=pantry -e DB_PASSWORD=pantry \
+            -e DB_NAME=mig pantry-db-migrate
+          # A migration that never ran shows up below as tables "only in orm",
+          # which reads like model drift. Prove every file in the checkout was
+          # applied, so a failure below is about the schema.
+          want=$(ls pantry-db/migrations/*.sql | wc -l)
+          got=$(psql -h 127.0.0.1 -U pantry -d mig -tAc "select count(*) from schema_migrations")
+          echo "migrations applied: $got of $want"
+          test "$got" -eq "$want"
+
+      - name: orm — pantry-api's models through create_all
+        run: |
+          python - <<'EOF'
+          import os
+          import sqlalchemy as sa
+          from pantry_planner.db import Base
+          Base.metadata.create_all(sa.create_engine(os.environ["PG_URL"] + "/orm"))
+          print(f"create_all built {len(Base.metadata.tables)} tables")
+          EOF
+
+      - name: The two schemas agree, apart from the allowlist
+        run: python scripts/schema_parity.py --mig "$PG_URL/mig" --orm "$PG_URL/orm"
