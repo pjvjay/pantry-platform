@@ -4,6 +4,8 @@ One Assistant turn is one trace: a tree of spans built from the agent's own even
 (``TraceRecorder.on``), so the agent loop carries no tracing code:
 
     turn                                   the shopper's message to the answer
+    ├─ import                              a link the hub read before the model (recipe_import):
+    │                                      method, host, lines, time, cost; the URL without query
     ├─ observers                           an LLM judge's call (code observers are events)
     ├─ step N · <model>                    one model call: tokens read (cached / new) and written,
     │                                      time to first token, read and write rates, load time,
@@ -20,6 +22,8 @@ One Assistant turn is one trace: a tree of spans built from the agent's own even
 The answer's evals (evals.py) and confidence are kept on the trace. Traces are stored as JSON
 lines (``TraceStore``); ``compute_metrics`` rolls the recent ones up per model, tool, observer,
 eval check, pantry step and browser measure, with the hub's own HTTP timings (``HttpStats``).
+An import from the console's import sheet (``/hub/recipes/import*``) is a trace of its own,
+``source: "import"``, with one import span (``import_trace``).
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from typing import Any
 import httpx
 
 from demo_hub.pricing import call_cost_usd
+from demo_hub.recipe_import.fetch import without_query
 
 PREVIEW_CHARS = 2_000          # a tool result's preview kept in its span
 GATEWAY_MATCH_S = 3.0          # a gateway trace this close to a tool call's start is that call
@@ -54,8 +59,8 @@ def canonical(name: str) -> str:
 class Span:
     id: str
     parent: str | None
-    kind: str          # turn | observers | model | tool | gateway | gateway.tool | pantry.step
-    name: str          # | pantry.llm | browser
+    kind: str          # turn | import | observers | model | tool | gateway | gateway.tool
+    name: str          # | pantry.step | pantry.llm | browser
     start_ms: float
     end_ms: float | None = None
     status: str = "ok"
@@ -162,6 +167,14 @@ class TraceRecorder:
             self._tools[str(event.get("id"))] = span
         elif kind == "tool_result":
             self._tool_result(event)
+        elif kind == "recipe_import":
+            ms = float(event.get("ms") or 0)
+            span = self._open("import", "import", self._root,
+                              start_ms=max(0.0, round(self.now_ms() - ms, 1)),
+                              **import_attrs(str(event.get("url") or ""), event.get("result"),
+                                             (event.get("error") or None)),
+                              via=event.get("via") or "chat", doc_key=event.get("doc_key"))
+            self._close(span, "error" if event.get("status") == "failed" else "ok")
         elif kind == "cart_change":
             # a swap the shopper made in the cart since the last turn, which the model reads
             # as a [cart] note: on the turn, without the re-priced plan itself
@@ -245,6 +258,44 @@ class TraceRecorder:
             "tools": [s.attrs.get("tool") for s in self.spans if s.kind == "tool"],
             "evals": self.evals, "browser": self.browser, "spans": spans,
         }
+
+
+def import_attrs(url: str, result: dict[str, Any] | None,
+                 error: dict[str, Any] | None = None) -> dict[str, Any]:
+    """An import span's attributes: the URL without its query (a query can carry a token), its
+    host, the method, the line count, what it needs next, and a video's tokens and cost."""
+    doc = (result or {}).get("doc") or {}
+    usage = (result or {}).get("usage") or {}
+    clean = without_query(url)
+    attrs: dict[str, Any] = {
+        "url": clean, "host": httpx.URL(clean).host if clean else "",
+        "method": (result or {}).get("method"), "lines": len(doc.get("lines") or []),
+        "needs": (result or {}).get("needs")}
+    if usage:
+        attrs.update(llm_cost_usd=usage.get("llm_cost_usd"), model=usage.get("model"),
+                     prompt_tokens=usage.get("prompt_tokens"),
+                     output_tokens=usage.get("output_tokens"),
+                     total_tokens=usage.get("total_tokens"), pricing=usage.get("pricing"))
+    if error:
+        attrs["error"] = {k: error.get(k) for k in ("status", "code", "message") if k in error}
+    return attrs
+
+
+def import_trace(kind: str, url: str, ms: float, *, result: dict[str, Any] | None = None,
+                 error: dict[str, Any] | None = None) -> dict[str, Any]:
+    """An import from the console's sheet as a trace of its own (source "import"): no
+    conversation and no model, one import span."""
+    started = datetime.now(UTC) - timedelta(milliseconds=ms)
+    attrs = {**import_attrs(url, result, error), "via": f"console:{kind}"}
+    span = {"id": "s1", "parent": None, "kind": "import", "name": f"import ({kind})",
+            "start_ms": 0.0, "end_ms": round(ms, 1), "duration_ms": round(ms, 1),
+            "status": "error" if error else "ok", "attrs": attrs, "events": []}
+    return {"id": f"tr-{uuid.uuid4().hex[:12]}", "started_at": started.isoformat(),
+            "source": "import", "model": None, "target": None, "message": attrs["url"],
+            "status": "error" if error else "imported", "wall_ms": round(ms, 1), "steps": 0,
+            "input_tokens": None, "output_tokens": None,
+            "cost_usd": float(attrs.get("llm_cost_usd") or 0), "tools": [], "evals": None,
+            "browser": None, "spans": [span]}
 
 
 def step_rates(m: dict[str, Any]) -> dict[str, Any]:
@@ -492,9 +543,21 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
     pantry_steps: dict[str, list[float]] = defaultdict(list)
     observers: dict[str, int] = defaultdict(int)
     cart = {"changes": 0, "undone": 0, "turns": 0}     # swaps the model was told about
+    imports: dict[str, list[Any]] = defaultdict(list)
     checks: dict[str, list[bool]] = defaultdict(list)
     confidence: list[float] = []
     for t in traces:
+        for s in t.get("spans") or []:
+            if s.get("kind") == "import":
+                a = s.get("attrs") or {}
+                imports["ms"].append(s.get("duration_ms"))
+                imports["method"].append(a.get("method") or (
+                    (a.get("error") or {}).get("code") and "failed") or "none")
+                imports["via"].append(str(a.get("via") or "chat"))
+                imports["tokens"].append(a.get("total_tokens") or 0)
+                imports["cost"].append(a.get("llm_cost_usd") or 0)
+        if t.get("source") == "import":         # no model, no turn: only its import span
+            continue
         m = models[str(t.get("model"))]
         m["turn_ms"].append(t.get("wall_ms"))
         m["steps"].append(t.get("steps"))
@@ -583,6 +646,16 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
         # the cart's swaps as the turns that told the model; the alternatives and swap routes'
         # own timings and errors are in hub_http
         "cart": cart,
+        # links and videos read, in chat and from the console's import sheet; a video's tokens
+        # and cost at the configured (preview) price
+        "imports": {
+            "count": len(imports["ms"]),
+            "by_method": {k: imports["method"].count(k) for k in sorted(set(imports["method"]))},
+            "from_console": sum(1 for v in imports["via"] if v.startswith("console")),
+            "p50_ms": _pct(imports["ms"], 50), "p95_ms": _pct(imports["ms"], 95),
+            "video_tokens": sum(int(x) for x in imports["tokens"]),
+            "video_cost_usd": round(sum(float(x) for x in imports["cost"]), 6),
+        },
         "browser": {
             "chat_turns": len(chats),
             "ttfb_p50_ms": _pct([c.get("ttfb_ms") for c in chats], 50),

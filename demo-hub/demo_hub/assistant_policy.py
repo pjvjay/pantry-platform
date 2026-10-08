@@ -19,6 +19,7 @@ from demo_hub.observers import (
     Policy,
     View,
     gte,
+    normalize,
     tool_called,
     tool_result,
     user_says,
@@ -81,11 +82,39 @@ def library_miss(view: View) -> CheckResult:
     return (True, f"{missed[0]} returned no result") if missed else \
         (False, "the library lookups answered")
 
+
+_LINK = user_says(r"https?://\S+")
+
+
+def recipe_imported(view: View) -> CheckResult:
+    """The hub read the shopper's link (or took the recipe the shopper reviewed) into lines this
+    turn, before the model: it is planned with plan_from_lines by its doc_key."""
+    imported = view.hub.get("import") or {}
+    if imported.get("ok") and imported.get("lines"):
+        return True, f"{imported.get('doc_key')}: {imported['lines']} reviewed line(s)"
+    return False, "no recipe imported this turn"
+
+
+def link_to_read(view: View) -> CheckResult:
+    """The newest message has a web link the hub did not read itself: the model reads it with
+    fetch as before. A link the hub read, or a YouTube link (never fetched), is not one."""
+    value, evidence = normalize(_LINK(view))
+    if not value:
+        return value, evidence
+    imported = view.hub.get("import")
+    if imported is None or (not imported.get("ok") and imported.get("fallback")):
+        return True, evidence
+    return False, "the hub read the link itself"
+
+
 # --- code observers: a pattern or a tool result decides -------------------------------------------
 
 link_reader = Observer("link_reader", "Watches the shopper's messages for a recipe page to read.")
-link_reader.when("the shopper's message contains a web link", check=user_says(r"https?://\S+"),
-                 id="recipe_link") \
+link_reader.when("the hub read the shopper's recipe into lines this turn", check=recipe_imported,
+                 id="recipe_imported") \
+    .enable_tools("plan_from_lines")
+link_reader.when("the shopper's message contains a web link the hub did not read",
+                 check=link_to_read, id="recipe_link") \
     .enable_tools("fetch*", "plan_from_text") \
     .enable_skill("recipe-shopper")
 
