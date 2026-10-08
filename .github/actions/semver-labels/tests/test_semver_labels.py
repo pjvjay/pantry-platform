@@ -714,6 +714,16 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(sl.matches_any("release-set.json", cfg.shipped_paths))
         self.assertFalse(sl.matches_any("RELEASING.md", cfg.shipped_paths))
 
+    def test_the_pr_templates_lands_line_carries_nothing_until_filled_in(self) -> None:
+        path = HERE.parents[3] / ".github" / "pull_request_template.md"
+        if not path.exists():
+            self.skipTest("not inside pantry-platform")
+        template = path.read_text(encoding="utf-8")
+        self.assertIn("\nLands: ", template)
+        self.assertEqual(sl.lands_numbers(template), [])
+        filled = template.replace("Lands: <!--", "Lands: #24, #26 <!--")
+        self.assertEqual(sl.lands_numbers(filled), [24, 26])
+
     def test_bad_configs_are_usage_errors(self) -> None:
         tmp = Path(tempfile.mkdtemp())
         for raw in [{}, {"component": "x", "baseline": "0.1", "shipped_paths": ["a"]},
