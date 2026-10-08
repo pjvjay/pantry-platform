@@ -742,10 +742,10 @@ def plan_release(git: Git, gh: Any, config: Config, *, ref: str = "HEAD",
         if level_override not in LEVELS:
             raise UsageError(f"level must be one of {', '.join(LEVELS)}, not {level_override!r}")
         level = level_override
-        plan["level_source"] = f"dispatch{_by(override_by)} (labels said {plan_level(plan)})"
+        plan["level_source"] = f"dispatch{_by(override_by)}; labels said {plan_level(plan)}"
         plan["breaking"] = plan["breaking"] or level == "major"
     if rank(floor) > rank(level):
-        plan["level_source"] = f"floor from the component versions ({floor}; labels said {level})"
+        plan["level_source"] = f"the component versions' floor; labels said {level}"
         level = floor
         plan["breaking"] = plan["breaking"] or floor == "major"
     plan["level"] = level
@@ -820,7 +820,7 @@ def notes(plan: dict[str, Any], *, repo: str, run_url: str = "", image: str | No
             out.append("Below 1.0.0, release:major bumps the minor "
                        "(the 0.x policy in RELEASING.md).")
         if forced:
-            out.append(f"- Major by {plan['level_source']}")
+            out.append(f"- Level major from {plan['level_source']}")
         for pr in items:
             cite = f"#{pr['number']}, " if pr.get("number") else ""
             out.append(f"- {pr['title']} ({cite}{pr['sha'][:7]})")

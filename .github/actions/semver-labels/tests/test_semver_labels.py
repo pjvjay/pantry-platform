@@ -502,7 +502,7 @@ class PlanTests(unittest.TestCase):
         self.merge(11, "Fix", ["pantry_planner/a.py"], "release:patch")
         plan = self.plan(level_override="minor", override_by="@pjvjay in run 42")
         self.assertEqual(plan["version"], "0.4.0")
-        self.assertEqual(plan["level_source"], "dispatch by @pjvjay in run 42 (labels said patch)")
+        self.assertEqual(plan["level_source"], "dispatch by @pjvjay in run 42; labels said patch")
 
     def test_a_major_below_1_bumps_the_minor_and_is_breaking(self) -> None:
         self.repo.commit("Start", "pantry_planner/a.py")
@@ -544,7 +544,7 @@ class PlanTests(unittest.TestCase):
         self.merge(14, "Fix", ["pantry_planner/a.py"], "release:patch")
         plan = self.plan(floor="minor")
         self.assertEqual((plan["version"], plan["level"]), ("0.3.0", "minor"))
-        self.assertIn("floor from the component versions", plan["level_source"])
+        self.assertEqual(plan["level_source"], "the component versions' floor; labels said patch")
 
 
 # --- notes ---------------------------------------------------------------------------------------
@@ -583,11 +583,11 @@ class NotesTests(unittest.TestCase):
         self.assertIn("0.x policy", text)
 
     def test_a_dispatched_major_still_gets_the_breaking_heading(self) -> None:
-        plan = self.plan(level_source="dispatch by @pjvjay (labels said patch)",
+        plan = self.plan(level_source="dispatch by @pjvjay; labels said patch",
                          prs=self.plan()["prs"][1:])
         text = sl.notes(plan, repo="pjvjay/pantry-api")
         self.assertIn("### Breaking\nBelow 1.0.0", text)
-        self.assertIn("- Major by dispatch by @pjvjay", text)
+        self.assertIn("- Level major from dispatch by @pjvjay; labels said patch", text)
 
     def test_a_skip_has_no_notes(self) -> None:
         with self.assertRaises(sl.UsageError):
