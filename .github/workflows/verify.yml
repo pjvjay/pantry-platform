@@ -15,7 +15,15 @@
 #   6. pantry-db's migrations and pantry-api's models build the same
 #      schema (schema-parity)
 #
-# Required by the ruleset on main.
+# Only verify-pins is a required check in the ruleset on main. The other
+# three report on the pull request but do not block a merge until the
+# ruleset lists them too.
+#
+# Runs on pull requests into main, so 5 and 6 check the PINNED submodules:
+# a pantry-db migration or a pantry-api model change is checked here when a
+# pull request moves its pin, not when it merges in its own repo. A pull
+# request stacked on another branch runs nothing until it targets main;
+# workflow_dispatch runs it by hand on any branch.
 # ============================================================
 
 name: verify

@@ -134,10 +134,11 @@ git submodule update --remote --merge   # pull every repo to latest main
 git commit -am "pin: <what changed>"    # record the new known-good set
 ```
 
-## Checks on every pull request
+## Checks on pull requests into main
 
 [`.github/workflows/verify.yml`](.github/workflows/verify.yml) runs four jobs
-on the pinned set:
+on the pinned set for every pull request into `main` (and, from the Actions
+tab, by hand on any branch):
 
 | Job | What it checks |
 |---|---|
@@ -145,6 +146,17 @@ on the pinned set:
 | `hub-tests` | demo-hub's tests pass on Python 3.12, with no network and no keys. |
 | `shared-seed` | `seeds/products.json` and `seeds/recipes.json` are byte-identical in pantry-api and pantry-db. pantry-api's tests seed from its copy; production's `seed.sql` is rendered from pantry-db's. |
 | `schema-parity` | pantry-db's migrations and pantry-api's SQLAlchemy models build the same schema on Postgres 17. |
+
+Only `verify-pins` is a required check in the ruleset on `main`; the other
+three report on the pull request but do not block a merge until the ruleset
+lists them too.
+
+The jobs check the pinned submodules, so a pantry-db migration or a
+pantry-api model change gets its `shared-seed` and `schema-parity` check
+here, when a pull request moves its pin, not when it merges in its own repo.
+Run the parity check locally (below) before merging such a change there, or
+the drift turns up in the next pin bump. A pull request stacked on another
+branch runs no checks until it targets `main`.
 
 ### Reading a schema-parity failure
 
