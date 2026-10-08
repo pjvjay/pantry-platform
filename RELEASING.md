@@ -44,7 +44,7 @@ by the next release, never by rewriting one.
 | Piece | State |
 |---|---|
 | The semver-labels action, `labels.json`, `scripts/labels.py` | In pantry-platform (`.github/actions/semver-labels`, `scripts/`) |
-| The release-label check | `labels.yml` in pantry-platform; each app repo gets the same job, pinned to this action, on its `feat/release-versioning` branch (planned). **Advisory**: it warns and is not a required check |
+| The release-label check | `labels.yml` in pantry-platform; each app repo's `feat/release-versioning` branch has the same job, pinned to this action, plus `action-pin`, which fails until that pin is a commit on pantry-platform `main` ([Bootstrap](#bootstrap-v010), step 4). **Advisory**: release-label warns and is not a required check |
 | The labels themselves | **Not created yet.** `python3 scripts/labels.py` prints the commands; the owner runs `--apply` |
 | App `build.yml` (plan, test, build, release, deploy) | Each app repo's `feat/release-versioning` branch; until it merges, builds deploy `dev-<sha>` as before |
 | v0.1.0 tags | **Not created.** See [Bootstrap](#bootstrap-v010); needs the owner's go-ahead |
@@ -66,7 +66,8 @@ Below 1.0.0 the [0.x policy](#the-0x-policy) changes the major row.
 What ships is listed in each repo's `.github/versioning.json` as `shipped_paths` (for pantry-api,
 the code, `pyproject.toml`, the seeds and the Dockerfile; tests and workflows do not ship). A PR
 labelled `release:none` must not touch them, and a PR that touches them must not be
-`release:none`.
+`release:none`. If one is merged anyway, the release counts it as `release:patch` and its notes
+say so; R2 warns about it on the PR.
 
 **What counts as major, per component:**
 
@@ -161,13 +162,31 @@ Until then a merge deploys `dev-<sha>` exactly as before.
 5. **deploy**: `bump_image_tag.py` sets `X.Y.Z` in pantry-gitops `apps/kustomization.yaml` and
    pushes "Deploy <image> X.Y.Z (pjvjay/<repo>@<short>)", retrying on a race. Argo CD rolls it out.
 
-The order is always git tag, then image tag, then Release, then deploy. Merges labelled
-`release:none` skip build and deploy. Runs share the concurrency group `release-<repo>` and are
-never cancelled: GitHub keeps one pending run and replaces older pending ones, which loses
-nothing because the plan covers every commit since the last tag.
+The order is always git tag, then image tag, then Release, then deploy. A merge that changes no
+shipped path releases nothing. A merge labelled `release:none` that does change shipped paths is
+still released, counted as patch (see [Labels](#labels)).
 
-`build.yml` also takes `workflow_dispatch` inputs: `level` (override the labels; recorded with
-who ran it), `dry_run`, `promote_version` and `promote_major`.
+Only `main` releases: a dispatch from another branch stops at plan unless it is a dry run. The
+deploy never moves pantry-gitops to an older release than the one it runs unless the dispatch
+input `rollback` is ticked ([Rollback](#rollback)). A `dev-<sha>` pin from before versioning is
+not a version, so any release replaces it.
+
+**Concurrency.** Runs that can release share the group `release-<repo>` and are never cancelled
+halfway. GitHub keeps one pending run per group and cancels the older pending run when a newer
+one joins:
+
+- a pending push run replaced by a newer push run, or by a dispatch with `level`, loses nothing:
+  the newer run plans `main`'s head, which covers every commit since the last tag;
+- a dry run releases nothing, so it queues in a group of its own, `release-<repo>-dry-run`, and
+  never replaces a release;
+- a `promote_version` dispatch does replace a pending push run. The merges that run would have
+  released then wait for the next release; to release them sooner, dispatch with
+  `level: labels` and `dry_run` unticked.
+
+**Dispatch inputs** (Actions, build-and-deploy, Run workflow): `level` (override the labels;
+recorded with who ran it), `dry_run`, `promote_version`, `promote_major` and `rollback`.
+**`dry_run` is ticked by default**, so a dispatch only plans until you untick it. Every
+instruction in this file that dispatches to tag, publish or deploy means `dry_run` unticked.
 
 ## The train
 
@@ -184,7 +203,7 @@ latest GitHub Release, the commit its tag points at and the digest GHCR serves f
 
 - a component has no release yet;
 - a version is released but pantry-gitops `main` does not deploy it (wait for the deploy job, or
-  dispatch `promote_version`);
+  dispatch `promote_version` with `dry_run` unticked);
 - the digest GHCR serves differs from the one the Release recorded, or from the one pantry-gitops
   pins;
 - the image's `org.opencontainers.image.revision` label names another commit (images without the
@@ -265,8 +284,11 @@ Tags never move. To roll back:
 - **Quickest:** `git revert` the deploy commit in pantry-gitops. Argo CD rolls the previous version
   back out. The next train refuses until gitops deploys a released set again, which is what you
   want.
-- **By version:** dispatch the component's `build.yml` with `promote_version: X.Y.Z` (an existing
-  tag). It republishes that release if needed and deploys it, without a rebuild.
+- **By version:** dispatch the component's `build.yml` from `main` with `promote_version: X.Y.Z`
+  (an existing tag), `rollback` ticked and `dry_run` unticked. It republishes that release if
+  needed and deploys it, without a rebuild. Without `rollback`, the deploy job refuses to move
+  pantry-gitops to an older version than it runs; the steps before it change nothing for a
+  release that already exists.
 - **Then fix forward:** merge the fix with a label; it becomes the next version.
 
 For the platform, revert the train's commit in a PR. That restores the previous
@@ -284,13 +306,22 @@ Every step is safe to run twice:
 - the gitops bump is idempotent and retries on a push race;
 - a rerun of an older commit that a newer tag already contains stops with "covered by vX".
 
-A run replaced while pending is not lost: the next run's plan includes its commits. If a release
-succeeded but its deploy failed, rerun the job or dispatch `promote_version`.
+A push run replaced while pending is not lost: the next run's plan includes its commits. A
+promote is the exception ([What happens on merge](#what-happens-on-merge), Concurrency). If a
+release succeeded but its deploy failed, rerun the job, or dispatch `promote_version` with
+`dry_run` unticked.
 
 ## Bootstrap: v0.1.0
 
 > **Needs the owner's go-ahead (decision D6).** Nothing in this section has been run. Publishing
 > tags and labels changes the repositories; run each step yourself, or approve each one.
+
+v0.1.0 is a baseline: a tag on the commit each app runs today, with no Release and no image tag
+of its own. The `build.yml` rework is itself a shipped change (Dockerfile, code, package files),
+so the push that merges it releases the next version, v0.2.0 with `release:minor`, and deploys
+it. That is each component's first versioned image. **Do not dispatch `promote_version: 0.1.0`
+afterwards**: 0.1.0 is the pre-versioning image, so promoting it would roll production back from
+0.2.0. The deploy job refuses that unless `rollback` is ticked.
 
 1. Re-read the live `main` of each app repo and pantry-gitops' `apps/kustomization.yaml`: local
    refs may be stale. When this was written (2026-10-08) the deployed set was:
@@ -305,12 +336,35 @@ succeeded but its deploy failed, rerun the job or dispatch `promote_version`.
    `python3 scripts/labels.py --apply`.
 3. Tag each deployed commit, for example:
    `gh api repos/pjvjay/pantry-api/git/refs -f ref=refs/tags/v0.1.0 -f sha=fa76277e1a08fcec78f452daf94ec817cf384bb3`.
-4. Once each repo's `build.yml` rework has merged, dispatch it with `promote_version: 0.1.0`. It
-   retags the deployed `dev-<sha>` digest as `0.1.0`, publishes the Release and deploys `0.1.0`,
-   which is the same image: a rollout with no change.
-5. These images were built before version injection, so they report "unknown" until each
-   component's next release.
-6. Run `python3 scripts/train.py`, then `--open-pr`. Merging the first train creates platform
+   Do this before step 5. If a rework merges first, its plan finds no tag and releases the
+   baseline 0.1.0 on the rework's own commit instead. Nothing breaks, but the deployed commit then
+   gets no tag (this step fails: the tag exists).
+4. Merge the semver-labels PR in pantry-platform, then re-pin each app repo's
+   `feat/release-versioning` branch. Every
+   `pjvjay/pantry-platform/.github/actions/semver-labels@<sha>` in `.github/workflows/` (five per
+   repo) must name a commit on pantry-platform `main` that contains the action: the squash commit.
+   The branches pin `e1599b055b95...`, which is not on `main` (it is on the platform branch, not
+   pushed when this was written). Until the re-pin, each app PR's `action-pin` check fails, and
+   **that blocks the merge**: with a pin that does not resolve, `build.yml`'s plan stops, and with
+   the `dev-<sha>` deploy gone nothing deploys. (If the platform PR is merged with a merge commit
+   instead, `e1599b0` becomes part of `main`'s history and the check passes without a re-pin.)
+   In each app repo:
+
+   ```bash
+   SHA=<40-hex commit on pantry-platform main>
+   gh api "repos/pjvjay/pantry-platform/compare/main...$SHA" --jq .status   # identical or behind
+   sed -i '' "s/semver-labels@[0-9a-f]\{40\}/semver-labels@$SHA/" .github/workflows/*.yml   # macOS sed
+   ```
+
+5. Merge each app repo's rework PR, labelled `release:minor`, once `action-pin` passes. Its push
+   runs the new `build.yml`, which plans v0.2.0 from v0.1.0, builds it, tags it, publishes the
+   latest Release and deploys 0.2.0. Until then the running images were built before version
+   injection and report "unknown".
+6. Before the first train, make pantry-api's seeds match pantry-db's. The train's strict `seeds`
+   check needs both repos' `seeds/products.json` and `seeds/recipes.json` byte-identical. On
+   2026-10-08 the two mains' `products.json` differed (`recipes.json` matched), so a pantry-api PR
+   (`release:patch`) that copies pantry-db's seed files must release first.
+7. Run `python3 scripts/train.py`, then `--open-pr`. Merging the first train creates platform
    v0.1.0.
 
 The open stacks need nothing more than a label each before they land, plus `Lands: #24, #26` on
@@ -323,7 +377,7 @@ No new credential is needed.
 | Credential | Used by | Scope |
 |---|---|---|
 | `GITHUB_TOKEN` | every workflow | Per job: read-only for the label check; `contents: write` and `packages: write` only in the release jobs |
-| `GITOPS_PAT` | app `build.yml` deploy step | A fine-grained PAT with contents write on pjvjay/pantry-gitops only. **Its expiry date is not recorded here**: check it at github.com/settings/personal-access-tokens. When it expires, deploys fail at the push; rotate the secret in each app repo and dispatch `promote_version` for the stuck versions |
+| `GITOPS_PAT` | app `build.yml` deploy step | A fine-grained PAT with contents write on pjvjay/pantry-gitops only. **Its expiry date is not recorded here**: check it at github.com/settings/personal-access-tokens. When it expires, deploys fail at the push; rotate the secret in each app repo and dispatch `promote_version` (with `dry_run` unticked) for the stuck versions |
 | `HF_TOKEN` | `deploy-demo.yml` (optional) | Write to the Hugging Face Space; the job skips without it |
 | The owner's `gh` login | `train.py --open-pr`, `labels.py --apply`, the bootstrap | Run by the owner only |
 | none | GHCR reads by `train.py` and verify-pins | Anonymous pulls of the public images |
@@ -352,14 +406,19 @@ No new credential is needed.
 | R3 lists carried PRs with "no release label" | Older PRs from before labels | Label them if you want them to set a floor; otherwise nothing to do |
 | A land PR shows "carried: none found" | No `Lands:` line and no link through base branches | Add `Lands: #N, #M` to the body |
 | R4: "shipped_paths not in build.yml push.paths" | A shipped path would never trigger a build | Add it to `on.push.paths`, or drop it from `shipped_paths` |
+| action-pin: "semver-labels@... is not on pantry-platform main" | The pin names a commit off `main`: a PR branch, or one never pushed | Re-pin to a commit on pantry-platform `main` ([Bootstrap](#bootstrap-v010), step 4) |
+| A dispatch planned but tagged and deployed nothing | `dry_run` is ticked by default | Dispatch again with `dry_run` unticked |
+| plan: "releases run from main, not refs/heads/..." | A dispatch from another branch | Dispatch from `main`, or tick `dry_run` to only plan |
 | plan: "covered by vX" | A newer tag already contains this commit | Nothing; that release covers it |
-| plan: "nothing shipped since vX" | Only `release:none` changes | Nothing; dispatch with `level` to force a release |
+| plan: "nothing shipped since vX" | Only `release:none` changes | Nothing; dispatch with `level` (and `dry_run` unticked) to force a release |
+| Merges went unreleased after a promote | The promote replaced their pending push run | Dispatch with `level: labels` and `dry_run` unticked |
 | reserve-tag: "vX already points at ..., not ..." | Another commit owns that version | Never move the tag; merge a fix and let the next version ship |
+| deploy: "pantry-gitops runs X, newer than Y" | A promote of an older release | If you meant to roll back, dispatch again with `rollback` ticked; otherwise nothing was deployed |
 | Deploy push keeps failing | A gitops race beyond the retries, or an expired `GITOPS_PAT` | Rerun the job; rotate the PAT if needed |
-| train: "is released but pantry-gitops main deploys ..." | The deploy has not landed or failed | Wait, rerun the deploy, or dispatch `promote_version` |
+| train: "is released but pantry-gitops main deploys ..." | The deploy has not landed or failed | Wait, rerun the deploy, or dispatch `promote_version` with `dry_run` unticked |
 | train: "digest mismatch" | `X.Y.Z` was re-pushed after release, or gitops pins another digest | Investigate before pinning; never pin a mismatch |
 | train: "no release yet (bootstrap v0.1.0 first)" | No tags yet | [Bootstrap](#bootstrap-v010) |
-| verify-pins strict: `seeds: seeds/products.json differs` | pantry-api's copy of the seeds lags pantry-db's | Release pantry-api with the matching seeds first. On 2026-10-08 the two mains' `products.json` differed |
+| verify-pins strict: `seeds: seeds/products.json differs` | pantry-api's copy of the seeds lags pantry-db's | Release pantry-api with the matching seeds first ([Bootstrap](#bootstrap-v010), step 6). On 2026-10-08 the two mains' `products.json` differed |
 | verify-pins strict: `demo-dockerfile` | `demo/Dockerfile` edited by hand | Rerun `train.py --open-pr` or restore its `FROM` lines |
 | `/hub/status` release block is all null | No `release-set.json` yet, or unversioned images | Expected before the first train and the first releases |
 
@@ -380,6 +439,11 @@ python3 -m unittest discover -s scripts
   with:
     command: plan
 ```
+
+Each app repo's `labels.yml` also runs `action-pin` on every PR. It fails unless every reference
+names one full SHA that pantry-platform `main` contains (GitHub's compare API says `identical` or
+`behind`). So updating the action is a re-pin PR in each app repo, and a pin to a PR branch shows as a
+failing check.
 
 | Command | Inputs | Outputs |
 |---|---|---|
