@@ -518,6 +518,16 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(sl.UsageError):
             self.plan(promote_version=Version(0, 9, 4))
 
+    def test_a_shallow_clone_is_refused(self) -> None:
+        self.merge(15, "Fix", ["pantry_planner/a.py"], "release:patch")
+        self.merge(16, "Fix", ["pantry_planner/a.py"], "release:patch")
+        shallow = Path(tempfile.mkdtemp()) / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{self.repo.dir}",
+                        str(shallow)], check=True, capture_output=True)
+        with self.assertRaises(sl.UsageError) as caught:
+            sl.plan_release(sl.Git(shallow), self.gh, config())
+        self.assertIn("fetch-depth: 0", str(caught.exception))
+
     def test_a_floor_raises_the_level(self) -> None:
         self.repo.commit("Start", "pantry_planner/a.py")
         self.repo.tag("v0.2.0")

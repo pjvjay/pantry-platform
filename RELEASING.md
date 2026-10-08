@@ -389,8 +389,11 @@ python3 -m unittest discover -s scripts
 | `platform-level` | `release-set`, `previous-set` | `level` |
 | `reserve-tag` | `tag`, `sha`, `token` (contents write) | exit 1 when the tag exists on another commit |
 
-The same commands run locally: `python3 .github/actions/semver-labels/semver_labels.py --help`.
-Exit codes are 0 ok, 1 a rule broken or GitHub refused, 2 usage.
+`plan` and `check-pr`'s `predict-ref` read tags and first-parent history, so the job checks out
+with `actions/checkout` `fetch-depth: 0`; `plan` refuses a shallow clone rather than plan the
+baseline again. The same commands run locally:
+`python3 .github/actions/semver-labels/semver_labels.py --help`. Exit codes are 0 ok, 1 a rule
+broken or GitHub refused, 2 usage.
 
 **`.github/versioning.json`**, one per repo:
 

@@ -607,6 +607,9 @@ class Git:
     def rev_parse(self, ref: str) -> str:
         return self.run("rev-parse", f"{ref}^{{commit}}").strip()
 
+    def is_shallow(self) -> bool:
+        return self.run("rev-parse", "--is-shallow-repository").strip() == "true"
+
     def version_tags(self, *selector: str) -> list[tuple[Version, str]]:
         tags = []
         for name in self.run("tag", *selector, "--list", "v*").split():
@@ -662,6 +665,10 @@ def plan_release(git: Git, gh: Any, config: Config, *, ref: str = "HEAD",
     run replaces a pending one (the release concurrency group keeps only the newest), nothing is
     lost: the newer run's plan includes the older merge.
     """
+    # A shallow clone has no tags and no history, so every plan would be the baseline again and
+    # the tag reservation would fail on another commit. Refuse up front instead.
+    if git.is_shallow():
+        raise UsageError("plan needs the full history and tags (actions/checkout fetch-depth: 0)")
     head = git.rev_parse(ref)
     merged = git.version_tags("--merged", head)
     previous = merged[-1] if merged else None
