@@ -29,6 +29,8 @@ GUARDED: list[tuple[str, str, Any]] = [
     ("POST", "/hub/agent/warm", {}),
     ("POST", "/hub/agent/chat", {"message": "hi"}),
     ("DELETE", "/hub/agent/conversations/c1", None),
+    ("POST", "/hub/agent/conversations/c1/alternatives", {"ref": 0, "line_no": 1}),
+    ("POST", "/hub/agent/conversations/c1/swap", {"ref": 0, "line_no": 1, "product_id": None}),
     ("POST", "/hub/telemetry", {"kind": "page"}),
     ("POST", "/hub/sims/run", {"scenarios": ["a"]}),
     ("POST", "/hub/sims/jobs/j1/cancel", None),

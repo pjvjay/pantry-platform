@@ -30,7 +30,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from demo_hub.answers import plan_cards, plan_for_model, plan_tables, strip_tables, with_tables
+from demo_hub.answers import (
+    cart_note,
+    cart_stores,
+    cart_total,
+    is_plan,
+    plan_card,
+    plan_cards,
+    plan_for_model,
+    plan_tables,
+    recipe_key,
+    strip_tables,
+    with_tables,
+)
 from demo_hub.disclosure import (
     DISCOVER,
     DISCOVER_FUNCTION,
@@ -102,6 +114,9 @@ Plans:
   are only its cheapest offer in range. With no trip, the plan chose no stores: say so.
 - Origin: report the plan's own origin_status and coverage; call get_product_origins only with the
   basket's product_ids.
+- A message that starts with [cart] reports a product the shopper swapped in the cart themselves:
+  use its figures for that cart from then on. Do not plan the recipe again unless asked; if you
+  do, say that a new plan drops the shopper's swaps.
 
 After a plan or a week plan, answer in two or three sentences: the trip's total and its store(s),
 the verified origin share when origin was asked about, and anything left out. For an ingredient
@@ -325,6 +340,71 @@ def _lists(node: Any) -> list[tuple[int, list[Any]]]:
     return []
 
 
+# The cart's follow-ups (rank_alternatives, reprice_plan) always go to pantry directly: the
+# hub's own token, no gateway schema in the way, and the same database the plan used.
+CART_TARGET = "pantry"
+CART_GONE = ("This conversation is gone (the hub restarted or forgot it): ask again to "
+             "re-plan.")
+
+
+class CartError(RuntimeError):
+    """A cart route's refusal, with the HTTP status the route answers."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+@dataclass
+class PendingChange:
+    """A swap the model has not heard about yet. One per (recipe, purchase line): a later swap of
+    the same line replaces `now` and keeps `was`, the product the model last knew, and every
+    swap updates the cart's figures on all of its recipe's changes."""
+    recipe: str                     # answers.recipe_key of the cart
+    recipe_name: str
+    line_no: int                    # the purchase's own line
+    lines: list[int]                # every recipe line the purchase covers
+    ingredient: str
+    was: dict[str, Any]             # {id, name}: the product the model last knew
+    now: dict[str, Any]             # {id, name}: the product in the cart now
+    total_before: float | None      # the cart's total when the model last knew it
+    ref: int = 0                    # the cart's tool_log index now
+    total_after: float | None = None
+    stores_after: list[str] = field(default_factory=list)
+    undone: bool = False            # back to the planner's own pick
+    summary: dict[str, Any] = field(default_factory=dict)
+
+    def note(self) -> str:
+        return cart_note(recipe=self.recipe_name, line_no=self.line_no,
+                         ingredient=self.ingredient, was=str(self.was.get("name")),
+                         now=str(self.now.get("name")), before=self.total_before,
+                         after=self.total_after, stores=self.stores_after, undone=self.undone)
+
+    def event(self) -> dict[str, Any]:
+        """The cart_change event: what changed, the cart's figures before and after, the note
+        the model read, and the re-priced plan (``structured``, as a plan tool returns it) so
+        the turn's grounding evals know the new figures."""
+        return {"type": "cart_change", "ref": self.ref, "line_no": self.line_no,
+                "lines": list(self.lines), "recipe_name": self.recipe_name,
+                "ingredient": self.ingredient, "from": dict(self.was), "to": dict(self.now),
+                "total_before": self.total_before, "total_after": self.total_after,
+                "stores_after": list(self.stores_after), "undone": self.undone,
+                "note": self.note(), "structured": {"summary": self.summary, "full": None}}
+
+
+def _purchase(summary: dict[str, Any], line_no: int) -> dict[str, Any] | None:
+    """The cart line buying recipe line ``line_no`` (its own line or one of its also_lines)."""
+    for ln in summary.get("lines") or []:
+        if ln.get("line_no") == line_no or line_no in (ln.get("also_lines") or []):
+            return ln
+    return None
+
+
+def _product(ln: dict[str, Any] | None) -> dict[str, Any]:
+    return {"id": ln.get("product_id"), "name": ln.get("product")} if ln else \
+        {"id": None, "name": "nothing"}
+
+
 @dataclass
 class Conversation:
     id: str
@@ -352,6 +432,11 @@ class Conversation:
     # those are sent basis=true, so a gateway with an older schema is never sent an unknown
     # argument (its plans then carry no basis, and the cart offers no Options)
     basis_tools: set[str] = field(default_factory=set)
+    # The cart: the shopper's pins per plan (tool_log index -> line_no -> product_id), and the
+    # swaps the model has not been told about, (recipe, line) -> change, told before the
+    # shopper's next message.
+    pins: dict[int, dict[int, int]] = field(default_factory=dict)
+    pending: dict[tuple[str, int], PendingChange] = field(default_factory=dict)
 
 
 class Agent:
@@ -411,9 +496,17 @@ class Agent:
 
     async def _run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
         started = time.perf_counter()
-        conv.messages.append({"role": "user", "content": user_text})
+        # Swaps since the last turn reach the model as [cart] notes before the shopper's words
+        # (appended, so the conversation's earlier messages, and a model's cached prompt, stay
+        # as they were); the observers read only the shopper's words.
+        changes = list(conv.pending.values())
+        conv.pending.clear()
+        notes = "\n".join(c.note() for c in changes)
+        conv.messages.append({"role": "user",
+                              "content": f"{notes}\n\n{user_text}" if notes else user_text})
         conv.user_texts.append(user_text)
         steps = 0
+        told = False
         try:
             target = await self.targets.resolve(conv.target)
             async with open_session(target) as session:
@@ -432,6 +525,9 @@ class Agent:
                        "target": conv.target, "tools": list(d.offered),
                        "available": len(tools), "disclosure": d.mode,
                        "discoverable": d.discoverable}
+                told = True
+                for change in changes:
+                    yield change.event()
                 async for event in self._observe(conv, "turn"):
                     yield event
                 # Progressive: the skill joins the conversation when an observer enables it.
@@ -532,8 +628,147 @@ class Agent:
                            **({"reply": reply, "plans": cards} if cards else {})}
                 yield self._done(conv, steps, "step budget reached", started)
         except (LLMError, McpTargetError) as exc:
+            if not told:                # the turn failed before it started: still say so
+                for change in changes:
+                    yield change.event()
             yield {"type": "error", "message": str(exc)}
             yield self._done(conv, steps, "error", started)
+
+    # --- the cart: alternatives and swaps, no model involved ------------------------------------
+
+    def _cart(self, conversation_id: str) -> Conversation:
+        if not self.settings.cart_alternatives:
+            raise CartError("cart alternatives are off (DEMO_CART_ALTERNATIVES=0)", 404)
+        conv = self.conversations.get(conversation_id)
+        if conv is None:
+            raise CartError(CART_GONE, 404)
+        return conv
+
+    @staticmethod
+    def _plan_at(conv: Conversation, ref: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(summary, basis) of the plan at tool_log[ref]."""
+        if not 0 <= ref < len(conv.tool_log):
+            raise CartError(f"this conversation has no result {ref}", 404)
+        structured = conv.tool_log[ref][1]
+        if not is_plan(structured):
+            raise CartError(f"result {ref} is not a recipe plan", 422)
+        summary = structured["summary"]
+        basis = summary.get("basis")
+        if not isinstance(basis, dict):
+            raise CartError("this plan came back without its basis (an older gateway schema?), "
+                            "so its lines have no options; ask again to re-plan", 422)
+        return summary, basis
+
+    @staticmethod
+    def _newer(conv: Conversation, ref: int, summary: dict[str, Any]) -> bool:
+        """A later plan, or a later swap, of the same recipe: the cart at ref is not the
+        shopper's latest."""
+        key = recipe_key(summary)
+        return any(is_plan(r) and recipe_key(r["summary"]) == key
+                   for _, r in conv.tool_log[ref + 1:])
+
+    async def _pantry(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """One call to pantry's own MCP server; its ToolError text is the 422's detail."""
+        try:
+            target = await self.targets.resolve(CART_TARGET)
+            async with open_session(target) as session:
+                result = await call_tool(session, tool, arguments)
+        except McpTargetError as exc:
+            raise CartError(f"pantry is not reachable: {exc}", 502) from exc
+        if result.get("is_error"):
+            raise CartError(str(result.get("text") or f"{tool} failed"), 422)
+        structured = result.get("structured")
+        if not isinstance(structured, dict):
+            raise CartError(f"pantry's {tool} answered without data", 502)
+        return structured
+
+    @staticmethod
+    def _basis_with_pins(basis: dict[str, Any], pins: dict[int, int]) -> dict[str, Any]:
+        return {**basis, "pins": [{"line_no": n, "product_id": p} for n, p in sorted(pins.items())]}
+
+    async def alternatives(self, conversation_id: str, ref: int, line_no: int,
+                           limit: int = 12) -> dict[str, Any]:
+        """pantry's ranking of the products that could fill one line of the cart at ``ref``,
+        from the plan's basis and the shopper's pins there. Read-only: no lock, no change to the
+        conversation or its trace, no model call."""
+        conv = self._cart(conversation_id)
+        _, basis = self._plan_at(conv, ref)
+        return await self._pantry("rank_alternatives", {
+            "basis": self._basis_with_pins(basis, conv.pins.get(ref, {})),
+            "line_no": line_no, "limit": limit})
+
+    async def swap(self, conversation_id: str, ref: int, line_no: int,
+                   product_id: int | None) -> dict[str, Any]:
+        """The shopper chose ``product_id`` for a line of the cart at ``ref`` (None: back to the
+        planner's pick). pantry re-prices the plan with the shopper's pins (no LLM); the result
+        joins tool_log as the cart's new ref, and the change waits for the model's next turn
+        (``pending``). Returns {card, note}: the redrawn cart and the note the model will read.
+        """
+        conv = self._cart(conversation_id)
+        if conv.target == "gateway-sim":
+            raise CartError("cart changes need the pantry server; this conversation plans "
+                            "through the pantry-sim gateway", 409)
+        if conv.lock.locked():
+            raise CartError("The assistant is answering; choose again when it finishes.", 409)
+        summary, basis = self._plan_at(conv, ref)
+        if self._newer(conv, ref, summary):
+            raise CartError("This cart is older than the latest plan for this recipe.", 409)
+        purchase = _purchase(summary, line_no)
+        if purchase is None:
+            raise CartError(f"line {line_no} is not in this cart", 422)
+        lines = [int(purchase["line_no"]), *(int(n) for n in purchase.get("also_lines") or [])]
+        planner = {int(b["line_no"]): b.get("product_id") for b in basis.get("lines") or []}
+        async with conv.lock:
+            # a purchase covering several recipe lines is chosen for all of them
+            pins = dict(conv.pins.get(ref, {}))
+            for n in lines:
+                if product_id is None or product_id == planner.get(n):
+                    pins.pop(n, None)
+                else:
+                    pins[n] = product_id
+            # the whole pin set, on a basis without pins: an undone pin is simply left out
+            structured = await self._pantry("reprice_plan", {
+                "basis": self._basis_with_pins(basis, {}),
+                "pins": [{"line_no": n, "product_id": p} for n, p in sorted(pins.items())]})
+            if not is_plan(structured):
+                raise CartError("pantry's reprice_plan answered without a plan", 502)
+            conv.tool_log.append(("reprice_plan", structured))
+            new_ref = len(conv.tool_log) - 1
+            new = structured["summary"]
+            new_basis = new.get("basis") if isinstance(new.get("basis"), dict) else {}
+            conv.pins[new_ref] = {int(p["line_no"]): int(p["product_id"])
+                                  for p in new_basis.get("pins") or []}
+            change = self._queue(conv, summary, new, new_ref, purchase, lines)
+        card = plan_card("plan", new, new_ref, FOR_BROWSER | SERVER_ONLY)
+        return {"card": card, "note": change.note() if change else ""}
+
+    @staticmethod
+    def _queue(conv: Conversation, old: dict[str, Any], new: dict[str, Any], new_ref: int,
+               purchase: dict[str, Any], lines: list[int]) -> PendingChange | None:
+        """Record the swap for the model's next turn, coalesced per (recipe, line): the model
+        hears once, from what it last knew to what the cart is now. A line put back as the model
+        last knew it is not mentioned at all. Returns the change (None when nothing is left to
+        tell for this line)."""
+        recipe = recipe_key(old)
+        line_no = int(purchase["line_no"])
+        same_recipe = [c for (r, _), c in conv.pending.items() if r == recipe]
+        before = same_recipe[0].total_before if same_recipe else cart_total(old)
+        earlier = conv.pending.get((recipe, line_no))
+        now = _product(_purchase(new, line_no))
+        pinned = {int(p["line_no"]) for p in (new.get("basis") or {}).get("pins") or []}
+        change = PendingChange(
+            recipe=recipe, recipe_name=str(new.get("recipe_name") or recipe), line_no=line_no,
+            lines=lines, ingredient=str(purchase.get("ingredient") or ""),
+            was=earlier.was if earlier else _product(purchase), now=now, total_before=before,
+            undone=not pinned & set(lines))
+        conv.pending[(recipe, line_no)] = change
+        if change.was.get("id") == now.get("id"):
+            del conv.pending[(recipe, line_no)]
+        cleaned = {k: v for k, v in new.items() if k not in FOR_BROWSER | SERVER_ONLY}
+        for c in [*same_recipe, change]:       # the cart's figures are the latest swap's
+            c.ref, c.summary = new_ref, cleaned
+            c.total_after, c.stores_after = cart_total(new), cart_stores(new)
+        return conv.pending.get((recipe, line_no))
 
     def _lean(self, model: str) -> bool:
         return self.settings.local_lean_tools and model.startswith("ollama:")

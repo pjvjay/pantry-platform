@@ -4,7 +4,8 @@
 * ``/pantry/api/*``       pantry-api, proxied (REST, and its ``/mcp`` endpoint)
 * ``/hub/status``         every service's health, versions and links
 * ``/hub/mcp/*``          the MCP explorer: targets, catalog, call a tool, read, prompt
-* ``/hub/agent/*``        the Assistant: options, and a chat turn streamed as server-sent events
+* ``/hub/agent/*``        the Assistant: options, a chat turn streamed as server-sent events, and
+                          a conversation's cart: a line's alternatives and the shopper's swap
 * ``/hub/sims/*``         the mcp-sim runner: scenarios, runs, start and follow jobs
 * ``/hub/demo/reset``     reseed pantry's database and reload the demo origin evidence
 
@@ -24,7 +25,7 @@ import tempfile
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -39,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from demo_hub import mcp_targets, pricing
-from demo_hub.agent import AGENT_TARGETS, Agent
+from demo_hub.agent import AGENT_TARGETS, Agent, CartError
 from demo_hub.evals import evaluate
 from demo_hub.guard import Guard
 from demo_hub.images import ImageCache, ImageError
@@ -97,6 +98,22 @@ class ChatBody(BaseModel):
     model: str | None = None
     target: str = "gateway-recipes"
     disclosure: str | None = None       # "progressive" or "all"; the hub's default when omitted
+
+
+class AlternativesBody(BaseModel):
+    """A line of the cart at ``ref`` (a plan card's ref). The hub builds the ranking from the
+    plan's basis it holds; anything else in the body, a basis included, is ignored."""
+    ref: int = Field(ge=0)
+    line_no: int = Field(ge=1, le=60)
+    limit: int = Field(default=12, ge=1, le=25)
+
+
+class SwapBody(BaseModel):
+    """The shopper's choice for a line of the cart at ``ref``; ``product_id`` null puts the
+    planner's pick back."""
+    ref: int = Field(ge=0)
+    line_no: int = Field(ge=1, le=60)
+    product_id: Annotated[int, Field(ge=1)] | None
 
 
 class WarmBody(BaseModel):
@@ -400,6 +417,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             return _image(await images.remote(url))
         except ImageError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+
+    @app.post("/hub/agent/conversations/{conversation_id}/alternatives")
+    async def agent_alternatives(conversation_id: str, body: AlternativesBody) -> dict[str, Any]:
+        """The cart's Options for one line: pantry's rank_alternatives on the plan's basis. No
+        model call, no lock, nothing in the conversation changes."""
+        try:
+            return await agent.alternatives(conversation_id, body.ref, body.line_no, body.limit)
+        except CartError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+
+    @app.post("/hub/agent/conversations/{conversation_id}/swap")
+    async def agent_swap(conversation_id: str, body: SwapBody) -> dict[str, Any]:
+        """"Use this": pantry re-prices the plan with the shopper's choice (no model call). The
+        answer is the redrawn cart, {card, note}; the model hears of it on the next turn."""
+        try:
+            return await agent.swap(conversation_id, body.ref, body.line_no, body.product_id)
+        except CartError as exc:
             raise HTTPException(exc.status, str(exc)) from exc
 
     @app.delete("/hub/agent/conversations/{conversation_id}")

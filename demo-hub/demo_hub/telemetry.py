@@ -162,6 +162,11 @@ class TraceRecorder:
             self._tools[str(event.get("id"))] = span
         elif kind == "tool_result":
             self._tool_result(event)
+        elif kind == "cart_change":
+            # a swap the shopper made in the cart since the last turn, which the model reads
+            # as a [cart] note: on the turn, without the re-priced plan itself
+            self._event(self._root, "cart_change",
+                        **{k: v for k, v in event.items() if k not in ("type", "structured")})
         elif kind == "error":
             self._root.status = "error"
             self._root.attrs["error"] = str(event.get("message"))
@@ -486,6 +491,7 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
     tools: dict[str, dict[str, list[Any]]] = defaultdict(lambda: defaultdict(list))
     pantry_steps: dict[str, list[float]] = defaultdict(list)
     observers: dict[str, int] = defaultdict(int)
+    cart = {"changes": 0, "undone": 0, "turns": 0}     # swaps the model was told about
     checks: dict[str, list[bool]] = defaultdict(list)
     confidence: list[float] = []
     for t in traces:
@@ -502,6 +508,7 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
             m["confidence"].append(ev["answer_confidence"])
         for c in ev.get("checks") or []:
             checks[c["name"]].append(bool(c["passed"]))
+        told = 0
         for s in t.get("spans") or []:
             a = s.get("attrs") or {}
             if s["kind"] == "model":
@@ -524,6 +531,11 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
             for e in s.get("events") or []:
                 if e.get("name") == "observation" and e["attrs"].get("value"):
                     observers[f"{e['attrs'].get('observer')}.{e['attrs'].get('condition')}"] += 1
+                elif e.get("name") == "cart_change":
+                    told += 1
+                    cart["undone"] += bool(e["attrs"].get("undone"))
+        cart["changes"] += told
+        cart["turns"] += bool(told)
     out_models = []
     for name, m in models.items():
         out_models.append({
@@ -568,6 +580,9 @@ def compute_metrics(traces: list[dict[str, Any]], http: HttpStats | None = None,
                   for k, v in sorted(checks.items())],
         "pantry_steps": [{"step": k, "runs": len(v), "p50_ms": _pct(v, 50), "p95_ms": _pct(v, 95)}
                          for k, v in sorted(pantry_steps.items())],
+        # the cart's swaps as the turns that told the model; the alternatives and swap routes'
+        # own timings and errors are in hub_http
+        "cart": cart,
         "browser": {
             "chat_turns": len(chats),
             "ttfb_p50_ms": _pct([c.get("ttfb_ms") for c in chats], 50),
