@@ -48,9 +48,10 @@ def wants_a_dish(view: View) -> CheckResult:
 
 def dish_not_in_library(view: View) -> CheckResult:
     """Once list_recipes has answered (in this turn or an earlier one): true when the shopper's
-    newest message wants to cook and names no library recipe (every word of its name), so the
-    dish must be written and planned as text. Only the newest message counts: after "plan tomato
-    penne", "a similar recipe with fish" is a new dish, not the library's Tomato Penne."""
+    newest message wants to cook and names no library recipe (every word of its name, or of its
+    slug: "the chicken curry" is Simple Chicken Curry, chicken_curry), so the dish must be
+    written and planned as text. Only the newest message counts: after "plan tomato penne", "a
+    similar recipe with fish" is a new dish, not the library's Tomato Penne."""
     listed = view.results.get("list_recipes")
     if listed is None:
         return None, "list_recipes has not answered yet"
@@ -60,10 +61,13 @@ def dish_not_in_library(view: View) -> CheckResult:
     words = set(_WORD.findall(asked.lower()))
     recipes: Any = listed.get("result", listed) if isinstance(listed, dict) else listed
     for recipe in recipes if isinstance(recipes, list) else []:
-        name = str(recipe.get("name", "")) if isinstance(recipe, dict) else ""
-        if (name_words := set(_WORD.findall(name.lower())) - {"and", "with", "the"}) \
-                and name_words <= words:
-            return False, f"the library has {name!r}"
+        if not isinstance(recipe, dict):
+            continue
+        name = str(recipe.get("name", ""))
+        for said in (str(recipe.get("name", "")), str(recipe.get("slug", ""))):
+            if (named := set(_WORD.findall(said.lower())) - {"and", "with", "the"}) \
+                    and named <= words:
+                return False, f"the library has {name!r}"
     return True, f"none of the {len(recipes)} library recipes is named in the request"
 
 
