@@ -7,6 +7,12 @@ or three sentences; the hub appends the table.
 
 ``plan_for_model`` is what a local model reads instead of a plan's JSON: the same facts as short
 lines, about a fifth of the tokens (reading ran at 10-15 tokens/s on the demo laptop).
+
+``plan_cards`` gives the browser the same plans as data, to draw as carts. A plan card carries
+``ref``, the plan's place in the conversation's tool_log, when the hub holds its basis: the
+cart's Options dialog and a swap name the plan by it. A week card links to the Meal plan.
+``cart_note`` is the line the model reads, before the shopper's next message, about a swap the
+shopper made in the cart.
 """
 
 from __future__ import annotations
@@ -16,6 +22,11 @@ from typing import Any
 
 PLAN_TOOLS = {"plan_recipe", "plan_from_text"}
 WEEK_TOOLS = {"plan_week"}
+# A week card has no basis (each day's plan would make it large), so it offers no Options; the
+# Meal plan opens it as a draft whose every trip line has them.
+WEEK_LINKS = ({"label": "Open in Meal plan", "href": "#/mealplan?from=week"},)
+CART_PREFIX = "[cart]"
+CART_NOTE_CHARS = 300
 TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$")
 
 
@@ -138,38 +149,113 @@ def recipe_table(structured: dict[str, Any]) -> str:
                       "|---|---|---|", *rows])
 
 
-def _latest(results: list[Any]) -> tuple[list[tuple[str, dict[str, Any]]], Any]:
-    """This turn's plans to show, as (kind, summary): the latest plan of each recipe (or week)
-    once. And the recipe library's list, shown only when the turn planned nothing (a listing was
-    a step on the way)."""
-    latest: dict[str, tuple[str, dict[str, Any]]] = {}
+def _latest(results: list[Any]) -> tuple[list[tuple[str, dict[str, Any], int]], Any]:
+    """This turn's plans to show, as (kind, summary, index in ``results``): the latest plan of
+    each recipe (or week) once. And the recipe library's list, shown only when the turn planned
+    nothing (a listing was a step on the way)."""
+    latest: dict[str, tuple[str, dict[str, Any], int]] = {}
     listing = None
-    for structured in results:
+    for i, structured in enumerate(results):
         if is_plan(structured):
             s = _summary(structured) or {}
-            latest[f"plan:{s.get('recipe_slug') or s.get('recipe_name')}"] = ("plan", s)
+            latest[f"plan:{recipe_key(s)}"] = ("plan", s, i)
         elif is_week(structured):
-            latest["week"] = ("week", _summary(structured) or {})
+            latest["week"] = ("week", _summary(structured) or {}, i)
         elif is_recipe_list(structured):
             listing = structured
     return list(latest.values()), listing
+
+
+def recipe_key(summary: dict[str, Any]) -> str:
+    """Which recipe a plan is for: two plans with the same key are the same cart."""
+    return str(summary.get("recipe_slug") or summary.get("recipe_name") or "")
 
 
 def plan_tables(results: list[Any]) -> list[str]:
     """The tables for this turn's results (see _latest)."""
     plans, listing = _latest(results)
     if plans:
-        return [plan_table(s) if kind == "plan" else week_table(s) for kind, s in plans]
+        return [plan_table(s) if kind == "plan" else week_table(s) for kind, s, _ in plans]
     return [recipe_table(listing)] if listing else []
 
 
-def plan_cards(results: list[Any], drop: set[str] | frozenset[str] = frozenset()
-               ) -> list[dict[str, Any]]:
-    """The same plans as data, for the browser to draw as a cart: {kind, summary} each, without
-    the summary fields in `drop`; [] when the turn planned nothing."""
+def pinned_lines(summary: dict[str, Any]) -> list[int]:
+    """The lines whose product the shopper chose (the basis's pins)."""
+    basis = summary.get("basis")
+    pins = basis.get("pins") if isinstance(basis, dict) else None
+    return sorted({int(p["line_no"]) for p in pins or [] if isinstance(p, dict)})
+
+
+def plan_card(kind: str, summary: dict[str, Any], ref: int | None = None,
+              drop: set[str] | frozenset[str] = frozenset()) -> dict[str, Any]:
+    """One card: {kind, summary} without the fields in `drop`. A plan whose summary has its
+    basis also gets `ref` (when given) and `pinned_lines`; a week gets its links."""
+    card: dict[str, Any] = {"kind": kind,
+                            "summary": {k: v for k, v in summary.items() if k not in drop}}
+    if kind == "plan" and ref is not None and isinstance(summary.get("basis"), dict):
+        card.update(ref=ref, pinned_lines=pinned_lines(summary))
+    elif kind == "week":
+        card["links"] = [dict(link) for link in WEEK_LINKS]
+    return card
+
+
+def plan_cards(results: list[Any], drop: set[str] | frozenset[str] = frozenset(),
+               start: int | None = None) -> list[dict[str, Any]]:
+    """The same plans as data, for the browser to draw as a cart (see plan_card); [] when the
+    turn planned nothing. `start` is the tool_log index of ``results[0]``: a plan's ref is its
+    own index there."""
     plans, _ = _latest(results)
-    return [{"kind": kind, "summary": {k: v for k, v in s.items() if k not in drop}}
-            for kind, s in plans]
+    return [plan_card(kind, s, None if start is None else start + i, drop)
+            for kind, s, i in plans]
+
+
+def cart_total(summary: dict[str, Any]) -> float | None:
+    """What the cart costs: the recommended trip's total, or the lines' when there is no trip."""
+    trip = summary.get("trip")
+    value = trip.get("total_cost") if isinstance(trip, dict) else summary.get("total_cost")
+    return None if value is None else round(float(value), 2)
+
+
+def cart_stores(summary: dict[str, Any]) -> list[str]:
+    trip = summary.get("trip")
+    return [str(x) for x in (trip.get("stores") or [])] if isinstance(trip, dict) else []
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def cart_note(*, recipe: str, line_no: int, ingredient: str, was: str, now: str,
+              before: float | None, after: float | None, stores: list[str],
+              undone: bool = False) -> str:
+    """The model's line about a swap the shopper made in the cart, at most CART_NOTE_CHARS:
+    the line, the product before and after, and the cart's total and stores now (all from
+    pantry's re-price). Long names are shortened, never the figures."""
+    def render(name_chars: int, store_count: int) -> str:
+        if stores:
+            shown = ", ".join(_clip(x, name_chars) for x in stores[:store_count])
+            more = len(stores) - store_count
+            money = f"Trip now {_money(after)} at {shown}" + (f" and {more} more" if more > 0
+                                                               else "")
+        else:
+            money = f"Total now {_money(after)} (the plan chose no trip)"
+        if before is not None and before != after:
+            money += f", was {_money(before)}"
+        change = (f"back to the planner's pick, {_clip(now, name_chars)} "
+                  f"(was {_clip(was, name_chars)})" if undone
+                  else f"{_clip(was, name_chars)} -> {_clip(now, name_chars)}")
+        return (f"{CART_PREFIX} The shopper changed line {line_no} "
+                f"({_clip(ingredient, name_chars)}) of {_clip(recipe, name_chars)} in the cart: "
+                f"{change}. {money}.")
+
+    text = ""
+    for name_chars in (80, 40, 24, 16):
+        for store_count in sorted({len(stores), 2, 1}, reverse=True):
+            text = render(name_chars, max(store_count, 1))
+            if len(text) <= CART_NOTE_CHARS:
+                return text
+    return text[:CART_NOTE_CHARS - 1] + "…"
 
 
 def strip_tables(text: str) -> str:

@@ -143,6 +143,7 @@ def test_the_hub_asks_for_the_basis_and_only_it_keeps_it(pantry: PantrySession,
     assert result["structured"]["summary"]["burr_run"] == "run-1"     # trace views still get it
     [card] = next(e for e in events if e["type"] == "assistant")["plans"]
     assert "basis" not in card["summary"] and "llm_calls" not in card["summary"]
+    assert card["ref"] == 0 and card["pinned_lines"] == []       # its index in tool_log
     assert conv.tool_log[0][1]["summary"]["basis"]["recipe_slug"] == "spaghetti_bolognese"
 
 

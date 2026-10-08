@@ -488,7 +488,8 @@ class Agent:
                         # model's few sentences; the model's own message stays short in history.
                         # The browser draws the plans themselves (`plans`) under `reply`.
                         results = [r for _, r in conv.tool_log[first_result:]]
-                        cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY)
+                        cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY,
+                                           start=first_result)
                         text = with_tables(text, plan_tables(results))
                     if not turn.tool_calls and not text.strip() and turn.output_tokens \
                             and not nudged:
@@ -525,7 +526,8 @@ class Agent:
                 tables = plan_tables(results)
                 if tables:
                     reply = "The model did not finish its summary; here is the plan it made."
-                    cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY)
+                    cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY,
+                                       start=first_result)
                     yield {"type": "assistant", "step": steps, "text": with_tables(reply, tables),
                            **({"reply": reply, "plans": cards} if cards else {})}
                 yield self._done(conv, steps, "step budget reached", started)
