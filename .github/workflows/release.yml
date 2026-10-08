@@ -42,8 +42,11 @@ on:
         default: true
 
 # One release at a time, and never cancelled halfway: a newer run waits.
+# GitHub keeps one pending run per group and cancels the older pending run
+# when a newer one joins, so a dry run, which tags nothing, queues in a
+# group of its own and can never replace a pending release.
 concurrency:
-  group: release-pantry-platform
+  group: release-pantry-platform${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: false
 
 permissions:
