@@ -290,3 +290,28 @@ def test_excluding_the_united_states_by_its_alias_counts() -> None:
                    "structured": {"summary": {}}}]
         checks = {c.name: c.passed for c in case.grade(Run.from_events("m", case.id, 1, events))}
         assert checks["excludes the United States"], name
+
+
+def test_a_shoppers_cart_change_grounds_the_answer_that_quotes_it() -> None:
+    from demo_hub.evals import evaluate
+    change = {"type": "cart_change", "ts": 3.0, "at": 1.8e12, "ref": 1, "line_no": 1,
+              "lines": [1], "recipe_name": "Spaghetti Bolognese", "ingredient": "ground beef",
+              "from": {"id": 11, "name": "Lean Ground Beef 500g"},
+              "to": {"id": 12, "name": "Extra Lean Ground Beef 450g"},
+              "total_before": 13.95, "total_after": 15.45,
+              "stores_after": ["GreenLeaf Grocers Kitsilano", "Pantry Mart Downtown"],
+              "undone": False, "note": "[cart] ...",
+              "structured": {"summary": {"trip": {"total_cost": 15.45}}, "full": None}}
+    answer = "Your trip is now $15.45 at GreenLeaf Grocers Kitsilano and Pantry Mart Downtown."
+    told = [{"type": "start", "tools": []}, change, {"type": "assistant", "text": answer},
+            {"type": "done", "stop": "answered", "seconds": 1.0}]
+    stores = ["GreenLeaf Grocers Kitsilano", "Pantry Mart Downtown"]
+    run = Run.from_events("m", "online", 0, told)
+    assert run.shopper_changes[0]["total_after"] == 15.45 and "ts" not in run.shopper_changes[0]
+    assert run.tool_uses == [] and check_known_tools(run).passed       # not a tool use
+    checks = {c["name"]: c["passed"] for c in evaluate(told, stores)["checks"]}
+    assert checks["grounded_money"] and checks["grounded_stores"] and checks["known_tools"]
+    untold = [e for e in told if e["type"] != "cart_change"]
+    checks = {c["name"]: c["passed"] for c in evaluate(untold, stores)["checks"]}
+    assert not checks["grounded_money"] and not checks["grounded_stores"]
+    assert bench.record(run, [])["shopper_changes"] == 1

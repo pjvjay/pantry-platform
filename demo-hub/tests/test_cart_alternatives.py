@@ -11,9 +11,11 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from demo_hub import agent as agent_module
+from demo_hub import app as app_module
 from demo_hub.agent import (
     Agent,
     model_copy,
@@ -22,7 +24,9 @@ from demo_hub.agent import (
 from demo_hub.answers import plan_for_model
 from demo_hub.assistant_policy import POLICY
 from demo_hub.disclosure import Disclosure, visible_tools
+from demo_hub.mcp_targets import McpTargetError
 from demo_hub.settings import Settings
+from tests.conftest import console_client
 from tests.test_agent import FakeTargets, ScriptedChat, turn
 
 
@@ -424,12 +428,17 @@ def test_a_swap_is_refused_while_answering_on_a_stale_cart_or_on_the_sim_gateway
 
 def test_the_cart_routes_end_to_end(pantry: PantrySession, tmp_path: Any,
                                     monkeypatch: pytest.MonkeyPatch) -> None:
-    from demo_hub import app as app_module
-    from demo_hub.mcp_targets import McpTargetError
-    from tests.conftest import console_client
+    real = httpx.AsyncClient
 
+    def stores(request: httpx.Request) -> httpx.Response:      # pantry's /stores, for the evals
+        return httpx.Response(200, json=[{"id": 1, "name": "Pantry Mart Downtown"},
+                                         {"id": 2, "name": "GreenLeaf Grocers Kitsilano"}])
+
+    monkeypatch.setattr(app_module.httpx, "AsyncClient",
+                        lambda *a, **k: real(*a, **{**k, "transport": httpx.MockTransport(stores)}))
     client = console_client(app_module.create_app(Settings(
-        observer_model="", traces_dir=str(tmp_path / "traces"), images_dir=str(tmp_path / "i"))))
+        observer_model="", pantry_api_url="http://pantry.test",
+        traces_dir=str(tmp_path / "traces"), images_dir=str(tmp_path / "i"))))
     agent = client.app.state.agent  # type: ignore[attr-defined]
     agent.chat = ScriptedChat(turn(calls=[PLAN_CALL]), turn("Planned: $13.95."))
 
@@ -471,6 +480,10 @@ def test_the_cart_routes_end_to_end(pantry: PantrySession, tmp_path: Any,
     agent.chat = ScriptedChat(turn("Your trip is now $13.45 at Pantry Mart Downtown."))
     events = stream("what is my total now?", cid)
     assert [e["type"] for e in events][:2] == ["start", "cart_change"]
+    # the answer quotes the re-priced total and store: grounded by the change it was told
+    evals = next(e for e in events if e["type"] == "evals")
+    checks = {c["name"]: c["passed"] for c in evals["checks"]}
+    assert checks["grounded_money"] and checks["grounded_stores"] and checks["known_tools"]
     trace = client.get(f"/hub/traces/{events[0]['trace_id']}").json()
     [told] = [e for e in trace["spans"][0]["events"] if e["name"] == "cart_change"]
     assert told["attrs"]["total_after"] == 13.45 and "structured" not in told["attrs"]
