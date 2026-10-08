@@ -55,6 +55,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # The platform is released from main only. A dispatch from another
+      # branch would tag that branch's commit, and main's next plan, which
+      # reads only the tags merged into main, would pick the same version
+      # again and fail at the tag. A dry run tags nothing, so it may run on
+      # any branch.
+      - name: Main only
+        if: github.ref != 'refs/heads/main' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: |
+          echo "::error::the platform is released from main, not $GITHUB_REF: dispatch from main, or tick dry_run to only plan"
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           submodules: recursive
