@@ -124,6 +124,15 @@ Everything else converges from git. Details in
 [pantry-infra](https://github.com/pjvjay/pantry-infra) and
 [pantry-gitops](https://github.com/pjvjay/pantry-gitops).
 
+## Releases
+
+Every PR carries one release label (`release:major`, `release:minor`,
+`release:patch` or `release:none`); each component turns its labels into a
+`vX.Y.Z`, and the platform train pins a released set and tags the platform.
+**[RELEASING.md](RELEASING.md)** is the whole process: labels and what major
+means per repo, the 0.x policy, the train, rollback, bootstrap and
+troubleshooting.
+
 ## Working with the submodules
 
 Submodule pins mark a **known-good set** across the five repos — a
@@ -133,6 +142,10 @@ platform-level release marker.
 git submodule update --remote --merge   # pull every repo to latest main
 git commit -am "pin: <what changed>"    # record the new known-good set
 ```
+
+Once the components have release tags, the set is pinned by the release
+train instead (`python3 scripts/train.py --open-pr`), which pins tags and
+writes `release-set.json`; see [RELEASING.md](RELEASING.md#the-train).
 
 ## Origin
 
