@@ -38,12 +38,33 @@ def is_week(structured: Any) -> bool:
     return s is not None and isinstance(s.get("days"), list) and "shopping_list" in s
 
 
+SWAP = "still available, not a direct match: "
+EXCLUDED_PRODUCT = re.compile(r"^(?P<name>.*) \((?P<price>\$[\d.]+)\) — (?P<country>.+?) via \S+$")
+
+
+def options(d: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """What pantry lists for a left-out ingredient: (swaps the plan still allows, the excluded
+    products the shopper could allow back, as "name ($price, country)"). Other suggestions (the
+    nearest offer out of range) are already in the reason."""
+    swaps, back = [], []
+    for item in d.get("suggestions") or []:
+        item = str(item)
+        if item.startswith(SWAP):
+            swaps.append(item[len(SWAP):])
+        elif m := EXCLUDED_PRODUCT.match(item):
+            back.append(f"{m['name']} ({m['price']}, {m['country']})")
+    return swaps, back
+
+
 def _left_out(s: dict[str, Any]) -> list[str]:
     out = []
     for key in ("not_stocked", "out_of_range", "skipped"):
         for d in s.get(key) or []:
             reason = d.get("reason") or key.replace("_", " ")
-            out.append(f"{d.get('ingredient')} ({reason})")
+            swaps, back = options(d)
+            out.append(f"{d.get('ingredient')} ({reason}"
+                       + (f"; swap: {', '.join(swaps)}" if swaps else "")
+                       + (f"; or allow: {', '.join(back)}" if back else "") + ")")
     return out
 
 
@@ -85,7 +106,7 @@ def plan_table(s: dict[str, Any]) -> str:
            f"**Total:** {_total(s)}"]
     if (origin := _origin(s)) is not None:
         out.append(f"**Origin:** {origin}")
-    out.append(f"**Not found:** {', '.join(_left_out(s)) or 'nothing'}")
+    out.append(f"**Left out:** {'; '.join(_left_out(s)) or 'nothing'}")
     return "\n".join(out)
 
 
@@ -117,20 +138,38 @@ def recipe_table(structured: dict[str, Any]) -> str:
                       "|---|---|---|", *rows])
 
 
-def plan_tables(results: list[Any]) -> list[str]:
-    """The tables for this turn's results: the latest plan of each recipe (or week) once; the
-    recipe library's list only when the turn planned nothing (a listing was a step on the way)."""
-    latest: dict[str, str] = {}
+def _latest(results: list[Any]) -> tuple[list[tuple[str, dict[str, Any]]], Any]:
+    """This turn's plans to show, as (kind, summary): the latest plan of each recipe (or week)
+    once. And the recipe library's list, shown only when the turn planned nothing (a listing was
+    a step on the way)."""
+    latest: dict[str, tuple[str, dict[str, Any]]] = {}
     listing = None
     for structured in results:
         if is_plan(structured):
             s = _summary(structured) or {}
-            latest[f"plan:{s.get('recipe_slug') or s.get('recipe_name')}"] = plan_table(s)
+            latest[f"plan:{s.get('recipe_slug') or s.get('recipe_name')}"] = ("plan", s)
         elif is_week(structured):
-            latest["week"] = week_table(_summary(structured) or {})
+            latest["week"] = ("week", _summary(structured) or {})
         elif is_recipe_list(structured):
-            listing = recipe_table(structured)
-    return list(latest.values()) or ([listing] if listing else [])
+            listing = structured
+    return list(latest.values()), listing
+
+
+def plan_tables(results: list[Any]) -> list[str]:
+    """The tables for this turn's results (see _latest)."""
+    plans, listing = _latest(results)
+    if plans:
+        return [plan_table(s) if kind == "plan" else week_table(s) for kind, s in plans]
+    return [recipe_table(listing)] if listing else []
+
+
+def plan_cards(results: list[Any], drop: set[str] | frozenset[str] = frozenset()
+               ) -> list[dict[str, Any]]:
+    """The same plans as data, for the browser to draw as a cart: {kind, summary} each, without
+    the summary fields in `drop`; [] when the turn planned nothing."""
+    plans, _ = _latest(results)
+    return [{"kind": kind, "summary": {k: v for k, v in s.items() if k not in drop}}
+            for kind, s in plans]
 
 
 def strip_tables(text: str) -> str:
@@ -162,7 +201,7 @@ def plan_for_model(structured: Any) -> str | None:
         if s.get("trip"):
             out.append(f"lines at their cheapest stores instead (not the trip): "
                        f"{_money(s.get('total_cost'))}")
-        out.append(f"not found: {', '.join(_left_out(s)) or 'nothing'}")
+        out.append(f"left out: {'; '.join(_left_out(s)) or 'nothing'}")
         out += [f"note: {n}" for n in s.get("notes") or []]
     elif is_week(structured):
         s = _summary(structured) or {}
