@@ -1,8 +1,8 @@
 # ============================================================
 # pantry-platform — pull-request verification
 #
-# This repo is submodule pins plus the compose stack, so the only thing
-# worth checking is that the PINNED SET is real and coherent:
+# This repo is submodule pins plus the compose stack and the demo hub. The
+# checks: the PINNED SET is real and coherent, and the hub's own code works.
 #
 #   1. every pin resolves — checkout with submodules fails on a pin that
 #      points at a commit the remote no longer has
@@ -10,6 +10,7 @@
 #      merged commit, never a branch tip. A pin to an unmerged branch is
 #      what left this repo diverged from what actually shipped in August.
 #   3. docker compose still parses with the pinned set
+#   4. demo-hub's tests pass (hub-tests)
 #
 # Required by the ruleset on main.
 # ============================================================
@@ -57,3 +58,22 @@ jobs:
 
       - name: Compose stack parses with the pinned set
         run: docker compose config --quiet && echo "compose config ok"
+
+  hub-tests:
+    # demo-hub lives in this repo rather than in a submodule, so no other CI
+    # runs its tests. They need no network and no keys: upstreams are mocked,
+    # and the MCP client tests start their own server on a local port.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: demo-hub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: demo-hub/pyproject.toml
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
