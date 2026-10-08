@@ -134,6 +134,71 @@ git submodule update --remote --merge   # pull every repo to latest main
 git commit -am "pin: <what changed>"    # record the new known-good set
 ```
 
+## Checks on every pull request
+
+[`.github/workflows/verify.yml`](.github/workflows/verify.yml) runs four jobs
+on the pinned set:
+
+| Job | What it checks |
+|---|---|
+| `verify-pins` | Every pin resolves and is a merged commit on its repo's `main`; `docker compose config` parses. |
+| `hub-tests` | demo-hub's tests pass on Python 3.12, with no network and no keys. |
+| `shared-seed` | `seeds/products.json` and `seeds/recipes.json` are byte-identical in pantry-api and pantry-db. pantry-api's tests seed from its copy; production's `seed.sql` is rendered from pantry-db's. |
+| `schema-parity` | pantry-db's migrations and pantry-api's SQLAlchemy models build the same schema on Postgres 17. |
+
+### Reading a schema-parity failure
+
+The job builds two databases from the pinned submodules: `mig` with
+pantry-db's migrate image (`run-migrations.sh`, as in the cluster) and `orm`
+with pantry-api's `Base.metadata.create_all`.
+[`scripts/schema_parity.py`](scripts/schema_parity.py) then prints one line
+per difference, always `mig` first and `orm` second:
+
+```text
+Not allowed. Change the model or add a migration so the two agree; ...
+  "column recipe_line_amounts.unit: nullable mig no, orm yes",
+```
+
+That line says the migration declares `recipe_line_amounts.unit` NOT NULL
+and the model lets it be NULL. The other kinds of line:
+
+| Line | Meaning |
+|---|---|
+| `table T: only in mig` (or `orm`) | Only one side has the table. `only in orm` usually means a model whose migration is missing. |
+| `column T.C: only in mig` (or `orm`) | Only one side has the column. |
+| `column T.C: type mig A, orm B` | The types differ after normalising (`String` and `text`, `Float` and `double precision` count as the same). |
+| `column T.C: nullable mig no, orm yes` | NOT NULL on one side only. |
+| `column T.C: default mig A, orm B` | The server defaults differ. `none` is no DEFAULT, and `serial` and `identity` are auto-numbered keys. A model's Python-side `default=` is not a server default. |
+| `table T: primary key ...`, `foreign key ...`, `check ...` | The constraint differs, or only one side has it. |
+
+The migrations are the source of truth for the deployed schema (as
+`0001_init.sql` says), so usually the model changes to match. If the
+database has to change, add a new migration: `run-migrations.sh` never re-runs
+one that is already applied, so editing it changes nothing in the cluster.
+If the difference is intended, add the line exactly as printed to
+[`scripts/schema_parity_allow.json`](scripts/schema_parity_allow.json), in a
+group whose `reason` says why it is safe. Lines under "allowed differences
+not found here" do not fail the job: they are for tables the pinned commits
+do not have yet, or for differences fixed since, which can then be removed.
+
+To run it locally against any Postgres, with pantry-api installed
+(`pip install ./pantry-api`):
+
+```bash
+psql -c 'CREATE DATABASE mig' -c 'CREATE DATABASE orm'
+docker build -t pantry-db-migrate pantry-db
+# On Docker Desktop, drop --network host and set DB_HOST=host.docker.internal
+docker run --rm --network host -e DB_HOST=127.0.0.1 -e DB_USER=pantry \
+  -e DB_PASSWORD=pantry -e DB_NAME=mig pantry-db-migrate
+python -c "import sqlalchemy as sa; from pantry_planner.db import Base; \
+  Base.metadata.create_all(sa.create_engine('postgresql+psycopg://pantry:pantry@127.0.0.1:5432/orm'))"
+python scripts/schema_parity.py --verbose \
+  --mig postgresql+psycopg://pantry:pantry@127.0.0.1:5432/mig \
+  --orm postgresql+psycopg://pantry:pantry@127.0.0.1:5432/orm
+```
+
+`--verbose` also prints the allowed differences, grouped under their reasons.
+
 ## Origin
 
 The app itself (the Claude model-router pipeline) predates the platform —
