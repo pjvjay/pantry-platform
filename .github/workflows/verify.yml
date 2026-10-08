@@ -79,7 +79,11 @@ jobs:
           cache: pip
           cache-dependency-path: demo-hub/pyproject.toml
       - run: pip install -e ".[dev]"
-      - run: pytest -q
+      # python -m, as the hub README runs it: two test modules import
+      # tests.test_agent and tests.test_telemetry, which needs demo-hub/ on
+      # sys.path. The editable install maps only demo_hub, so bare pytest
+      # fails to collect them.
+      - run: python -m pytest -q
 
   shared-seed:
     # pantry-api's tests and local runs seed from its own copy of
