@@ -137,8 +137,9 @@ git commit -am "pin: <what changed>"    # record the new known-good set
 ## Checks on pull requests into main
 
 [`.github/workflows/verify.yml`](.github/workflows/verify.yml) runs four jobs
-on the pinned set for every pull request into `main` (and, from the Actions
-tab, by hand on any branch):
+for every pull request into `main` (and, from the Actions tab, by hand on any
+branch). `hub-tests` checks the hub in this repo; the other three check the
+pinned set:
 
 | Job | What it checks |
 |---|---|
@@ -176,7 +177,7 @@ and the model lets it be NULL. The other kinds of line:
 
 | Line | Meaning |
 |---|---|
-| `table T: only in mig` (or `orm`) | Only one side has the table. `only in orm` usually means a model whose migration is missing. |
+| `table T: only in mig` (or `orm`) | Only one side has the table. `only in orm` usually means a model whose migration is missing. On a pin move it can also mean only one pin moved: the pantry-db commit that adds a table and the pantry-api commit that adds its model have to be pinned together. |
 | `column T.C: only in mig` (or `orm`) | Only one side has the column. |
 | `column T.C: type mig A, orm B` | The types differ after normalising (`String` and `text`, `Float` and `double precision` count as the same). |
 | `column T.C: nullable mig no, orm yes` | NOT NULL on one side only. |
