@@ -16,11 +16,16 @@ from demo_hub.recipe_import import Importer, ImportFailure, import_note, needs_o
 from demo_hub.recipe_import.description import ingredient_lines, recipe_links
 from demo_hub.recipe_import.web import RecipeDoc
 from demo_hub.recipe_import.youtube import duration_seconds, video_id
-from tests.import_fakes import REAL_EXTRACTOR, Net, make_importer, recipe_page
+from tests.import_fakes import (
+    REAL_EXTRACTOR,
+    Net,
+    make_importer,
+    real_extractor_reason,
+    recipe_page,
+)
 
-real_extractor = pytest.mark.skipif(
-    not REAL_EXTRACTOR.is_file(),
-    reason="pantry-api's skills/recipe-shopper/scripts/extract_recipe.py is not checked out")
+real_extractor = pytest.mark.skipif(bool(real_extractor_reason()),
+                                    reason=real_extractor_reason())
 
 DAL = ["200 g red lentils", "1 tbsp cumin seeds", "2 cloves garlic, minced",
        "400 ml coconut milk", "salt, to taste"]
@@ -77,6 +82,7 @@ def test_a_microdata_page(tmp_path: Path) -> None:
 FIXTURES = REAL_EXTRACTOR.parents[3] / "tests" / "fixtures" / "recipe_pages"
 
 
+@real_extractor
 @pytest.mark.skipif(not (FIXTURES / "expected.json").is_file(),
                     reason="pantry-api's synthetic recipe pages are not checked out")
 def test_pantrys_synthetic_recipe_pages_import_as_the_extractor_reads_them(

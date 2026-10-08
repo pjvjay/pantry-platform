@@ -26,6 +26,16 @@ PUBLIC_2 = "151.101.1.67"
 REAL_EXTRACTOR = (Path(__file__).resolve().parents[2] / "pantry-api" / "skills"
                   / "recipe-shopper" / "scripts" / "extract_recipe.py")
 
+
+def real_extractor_reason() -> str:
+    """Why the tests on the real extractor cannot run here ("" when they can): the hub needs
+    the version that says which markup held the recipe (__version__ 1.0.0 and later)."""
+    if not REAL_EXTRACTOR.is_file():
+        return "pantry-api's skills/recipe-shopper/scripts/extract_recipe.py is not checked out"
+    if "__version__" not in REAL_EXTRACTOR.read_text(encoding="utf-8"):
+        return "the checked-out extract_recipe.py predates 1.0.0 (no method, no __version__)"
+    return ""
+
 FAKE_EXTRACTOR = '''\
 """A stand-in for extract_recipe.py: the names the hub reads, JSON-LD in plain script tags."""
 import json
