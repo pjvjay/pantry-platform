@@ -11,6 +11,7 @@
 #      what left this repo diverged from what actually shipped in August.
 #   3. docker compose still parses with the pinned set
 #   4. demo-hub's tests pass (hub-tests)
+#   5. pantry-api and pantry-db carry the same seed JSON (shared-seed)
 #
 # Required by the ruleset on main.
 # ============================================================
@@ -77,3 +78,29 @@ jobs:
           cache-dependency-path: demo-hub/pyproject.toml
       - run: pip install -e ".[dev]"
       - run: pytest -q
+
+  shared-seed:
+    # pantry-api's tests and local runs seed from its own copy of
+    # products.json and recipes.json; production gets seed.sql, which
+    # pantry-db renders from its copy. If the copies differ, pantry-api is
+    # tested against a catalog production does not have.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: pantry-api and pantry-db seed JSON are byte-identical
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in products.json recipes.json; do
+            if cmp pantry-api/seeds/$f pantry-db/seeds/$f; then
+              echo "ok    seeds/$f is the same in pantry-api and pantry-db"
+            else
+              echo "::error::seeds/$f differs between pantry-api and pantry-db at these pins — the two copies must be byte-identical"
+              fail=1
+            fi
+          done
+          exit $fail
