@@ -1,0 +1,22 @@
+[
+  {
+    "name": "release:major",
+    "color": "b60205",
+    "description": "Breaking change; below 1.0.0 it bumps the minor. Major per repo: RELEASING.md"
+  },
+  {
+    "name": "release:minor",
+    "color": "0e8a16",
+    "description": "New behaviour that nothing already using it notices"
+  },
+  {
+    "name": "release:patch",
+    "color": "1d76db",
+    "description": "A fix or internal change to something that ships"
+  },
+  {
+    "name": "release:none",
+    "color": "cfd3d7",
+    "description": "Changes nothing that ships: docs, tests, CI, tooling"
+  }
+]
