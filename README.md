@@ -155,14 +155,26 @@ lists them too.
 The jobs check the pinned submodules, so a pantry-db migration or a
 pantry-api model change gets its `shared-seed` and `schema-parity` check
 here, when a pull request moves its pin, not when it merges in its own repo.
-Run the parity check locally (below) before merging such a change there, or
-the drift turns up in the next pin bump.
+Neither repo's CI runs them, so a drift can merge there and turn up only in
+the next pin bump. Before merging such a change, run verify by hand on the
+pair of commits; each ref is a branch or a full commit SHA in that repo, and
+one left out keeps its pin:
+
+```bash
+gh workflow run verify.yml --ref main \
+  -f pantry_api_ref=feat/my-model -f pantry_db_ref=feat/my-migration
+```
+
+Or run the parity check locally (below). Move the pantry-api and pantry-db
+pins together when either carries a schema or seed change: both checks
+compare the two.
 
 ### Reading a schema-parity failure
 
-The job builds two databases from the pinned submodules: `mig` with
-pantry-db's migrate image (`run-migrations.sh`, as in the cluster) and `orm`
-with pantry-api's `Base.metadata.create_all`.
+The job builds two databases from the pinned submodules (or the commits a
+manual run asked for): `mig` with pantry-db's migrate image
+(`run-migrations.sh`, as in the cluster) and `orm` with pantry-api's
+`Base.metadata.create_all`.
 [`scripts/schema_parity.py`](scripts/schema_parity.py) then prints one line
 per difference, always `mig` first and `orm` second:
 

@@ -22,10 +22,13 @@
 # Runs on every pull request, whatever branch it targets: this repo's work
 # lands as a stack of branches, and a stacked pull request should not wait
 # until it targets main to learn that it breaks the hub or the pinned set.
+# workflow_dispatch runs it by hand on any branch.
+#
 # 5 and 6 check the PINNED submodules, so a pantry-db migration or a
 # pantry-api model change is checked here when a pull request moves its pin,
-# not when it merges in its own repo. workflow_dispatch runs it by hand on
-# any branch.
+# not when it merges in its own repo; neither repo's own CI runs them. To
+# check one before it merges there, run this by hand with pantry_api_ref and
+# pantry_db_ref: 5 and 6 then check those commits instead of the pins.
 # ============================================================
 
 name: verify
@@ -33,9 +36,20 @@ name: verify
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      pantry_api_ref:
+        description: pantry-api branch or full commit SHA for shared-seed and schema-parity (empty keeps the pin)
+        type: string
+        default: ""
+      pantry_db_ref:
+        description: pantry-db branch or full commit SHA for shared-seed and schema-parity (empty keeps the pin)
+        type: string
+        default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A manual run's refs are part of the group, so two runs checking
+  # different pairs on the same branch do not cancel each other.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.pantry_api_ref }}-${{ inputs.pantry_db_ref }}
   cancel-in-progress: true
 
 permissions:
@@ -105,6 +119,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: On a manual run, the pantry-api and pantry-db commits asked for
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          API_REF: ${{ inputs.pantry_api_ref }}
+          DB_REF: ${{ inputs.pantry_db_ref }}
+        run: bash scripts/checkout_refs.sh pantry-api "$API_REF" pantry-db "$DB_REF"
 
       - name: pantry-api and pantry-db seed JSON are byte-identical
         run: |
@@ -114,7 +134,7 @@ jobs:
             if cmp pantry-api/seeds/$f pantry-db/seeds/$f; then
               echo "ok    seeds/$f is the same in pantry-api and pantry-db"
             else
-              echo "::error::seeds/$f differs between pantry-api and pantry-db at these pins — the two copies must be byte-identical"
+              echo "::error::seeds/$f differs between pantry-api and pantry-db at these commits — the two copies must be byte-identical"
               fail=1
             fi
           done
@@ -123,10 +143,11 @@ jobs:
   schema-parity:
     # Production's schema comes from pantry-db's migrations; pantry-api's
     # tests build theirs from its SQLAlchemy models with create_all. This
-    # builds both from the pinned submodules on production's Postgres major
-    # and diffs them. scripts/schema_parity_allow.json lists the accepted
-    # differences, each with its reason; any other difference fails. How to
-    # read a failure: README, "Reading a schema-parity failure".
+    # builds both from the pinned submodules (on a manual run, the commits
+    # asked for) on production's Postgres major and diffs them.
+    # scripts/schema_parity_allow.json lists the accepted differences, each
+    # with its reason; any other difference fails. How to read a failure:
+    # README, "Reading a schema-parity failure".
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -149,6 +170,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: On a manual run, the pantry-api and pantry-db commits asked for
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          API_REF: ${{ inputs.pantry_api_ref }}
+          DB_REF: ${{ inputs.pantry_db_ref }}
+        run: bash scripts/checkout_refs.sh pantry-api "$API_REF" pantry-db "$DB_REF"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
