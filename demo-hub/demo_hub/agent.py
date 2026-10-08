@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from demo_hub.answers import (
+    cart_key,
     cart_note,
     cart_stores,
     cart_total,
@@ -366,7 +367,7 @@ class PendingChange:
     """A swap the model has not heard about yet. One per (recipe, purchase line): a later swap of
     the same line replaces `now` and keeps `was`, the product the model last knew, and every
     swap updates the cart's figures on all of its recipe's changes."""
-    recipe: str                     # answers.recipe_key of the cart
+    recipe: str                     # answers.cart_key of the cart
     recipe_name: str
     line_no: int                    # the purchase's own line
     lines: list[int]                # every recipe line the purchase covers
@@ -667,10 +668,10 @@ class Agent:
 
     @staticmethod
     def _newer(conv: Conversation, ref: int, summary: dict[str, Any]) -> bool:
-        """A later plan, or a later swap, of the same recipe: the cart at ref is not the
-        shopper's latest."""
-        key = recipe_key(summary)
-        return any(is_plan(r) and recipe_key(r["summary"]) == key
+        """A later plan, or a later swap, of the same recipe (answers.cart_key): the cart at
+        ref is not the shopper's latest."""
+        key = cart_key(summary)
+        return any(is_plan(r) and cart_key(r["summary"]) == key
                    for _, r in conv.tool_log[ref + 1:])
 
     async def _pantry(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -755,7 +756,7 @@ class Agent:
         hears once, from what it last knew to what the cart is now. A line put back as the model
         last knew it is not mentioned at all. Returns the change (None when nothing is left to
         tell for this line)."""
-        recipe = recipe_key(old)
+        recipe = cart_key(old)
         line_no = int(purchase["line_no"])
         same_recipe = [c for (r, _), c in conv.pending.items() if r == recipe]
         before = same_recipe[0].total_before if same_recipe else cart_total(old)
@@ -763,8 +764,8 @@ class Agent:
         now = _product(_purchase(new, line_no))
         pinned = {int(p["line_no"]) for p in (new.get("basis") or {}).get("pins") or []}
         change = PendingChange(
-            recipe=recipe, recipe_name=str(new.get("recipe_name") or recipe), line_no=line_no,
-            lines=lines, ingredient=str(purchase.get("ingredient") or ""),
+            recipe=recipe, recipe_name=str(new.get("recipe_name") or recipe_key(old)),
+            line_no=line_no, lines=lines, ingredient=str(purchase.get("ingredient") or ""),
             was=earlier.was if earlier else _product(purchase), now=now, total_before=before,
             undone=not pinned & set(lines))
         conv.pending[(recipe, line_no)] = change

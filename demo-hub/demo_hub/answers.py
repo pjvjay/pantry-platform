@@ -171,6 +171,21 @@ def recipe_key(summary: dict[str, Any]) -> str:
     return str(summary.get("recipe_slug") or summary.get("recipe_name") or "")
 
 
+def cart_key(summary: dict[str, Any]) -> str:
+    """Which cart a plan is, for the cart's swaps: its recipe_key and, for a plan with no slug
+    (a pasted or written recipe, whose name is only a title two recipes can share), the
+    ingredient names in the basis the hub keeps. A swap re-prices the same lines and a re-plan
+    of the same recipe reads the same names, so both keep the key; another recipe that happens
+    to have the same title does not."""
+    key = recipe_key(summary)
+    basis = summary.get("basis")
+    if summary.get("recipe_slug") or not isinstance(basis, dict):
+        return key
+    names = sorted(str(ln.get("name") or "") for ln in basis.get("lines") or []
+                   if isinstance(ln, dict))
+    return "\n".join([key, *names])
+
+
 def plan_tables(results: list[Any]) -> list[str]:
     """The tables for this turn's results (see _latest)."""
     plans, listing = _latest(results)

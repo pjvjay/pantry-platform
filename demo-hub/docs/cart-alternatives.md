@@ -119,7 +119,7 @@ console replaces the card with the old `ref` by the new one.
 | Status | When |
 |---|---|
 | 404 | As for alternatives |
-| 409 | A turn is running ("The assistant is answering; choose again when it finishes."); a newer plan or swap of the same recipe exists ("This cart is older than the latest plan for this recipe."); the conversation uses `gateway-sim` |
+| 409 | A turn is running ("The assistant is answering; choose again when it finishes."); a newer plan or swap of the same recipe exists ("This cart is older than the latest plan for this recipe."; a library recipe is its slug, a pasted one its title and the ingredient names in its basis, so two pasted recipes under one title are two carts); the conversation uses `gateway-sim` |
 | 422 | As for alternatives, plus pantry's pin refusals (a held-back origin, out of range, unknown id) and a line that is not in the cart |
 | 502 | pantry is not reachable |
 

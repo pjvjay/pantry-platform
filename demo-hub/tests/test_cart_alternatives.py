@@ -120,6 +120,18 @@ def repriced(basis: dict[str, Any], pins: list[dict[str, Any]]) -> dict[str, Any
     summary["trip"].update(stores=stores, basket_cost=basket, travel_cost=1.5 * len(stores),
                            total_cost=round(basket + 1.5 * len(stores), 2))
     summary["basis"]["pins"] = [{"line_no": n, "product_id": p} for n, p in sorted(merged.items())]
+    summary["basis"]["lines"] = copy.deepcopy(basis["lines"])     # pantry keeps the plan's lines
+    return result
+
+
+def pasted(name: str, names: list[str]) -> dict[str, Any]:
+    """plan_result as a pasted recipe's plan: no slug, the title `name`, these line names."""
+    result = plan_result("", name)
+    summary = result["summary"]
+    summary["recipe_slug"] = None
+    summary["basis"].update(path="nl", recipe_slug=None)
+    for ln, n in zip(summary["basis"]["lines"], names, strict=True):
+        ln["name"] = n
     return result
 
 
@@ -427,6 +439,27 @@ def test_a_swap_is_refused_while_answering_on_a_stale_cart_or_on_the_sim_gateway
     conv.target = "gateway-sim"
     status, text = refused(conv.id, 1, 1, 13)
     assert status == 409 and "pantry server" in text
+
+
+def test_two_pasted_recipes_under_one_title_are_two_carts(pantry: PantrySession) -> None:
+    """A pasted recipe has no slug, only a title another recipe can share. A later plan of
+    another recipe with that title leaves the first cart current, and their changes are told
+    apart; a swap, or a re-plan of the same lines, still makes a cart older."""
+    agent, conv = planned(pantry)
+    beef = ["ground beef", "garlic", "spaghetti", "garlic clove"]
+    tofu = ["tofu", "ginger", "rice", "green onion"]
+    conv.tool_log[:] = [("plan_from_text", pasted("Dinner", beef)),
+                        ("plan_from_text", pasted("Dinner", tofu))]
+    conv.pins.clear()
+    assert call(agent.swap(conv.id, 0, 1, 12))["card"]["ref"] == 2
+    assert call(agent.swap(conv.id, 1, 1, 13))["card"]["ref"] == 3
+    assert len(conv.pending) == 2
+    assert {c.recipe_name for c in conv.pending.values()} == {"Dinner"}
+    with pytest.raises(agent_module.CartError, match="older than the latest plan"):
+        call(agent.swap(conv.id, 0, 1, 13))
+    conv.tool_log.append(("plan_from_text", pasted("Dinner", tofu)))
+    with pytest.raises(agent_module.CartError, match="older than the latest plan"):
+        call(agent.swap(conv.id, 3, 1, 12))
 
 
 def test_the_cart_routes_end_to_end(pantry: PantrySession, tmp_path: Any,
