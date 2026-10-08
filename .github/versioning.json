@@ -1,0 +1,21 @@
+{
+  "component": "pantry-platform",
+  "image": null,
+  "baseline": "0.1.0",
+  "shipped_paths": [
+    "release-set.json",
+    "pantry-api",
+    "pantry-db",
+    "pantry-frontend",
+    "pantry-gitops",
+    "pantry-infra",
+    "demo/**",
+    "render.yaml",
+    "docker-compose.yml",
+    "demo-hub/pyproject.toml",
+    "demo-hub/demo_hub/**",
+    "demo-hub/scripts/**",
+    "demo-hub/data/**"
+  ],
+  "build_workflow": null
+}
