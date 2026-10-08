@@ -19,18 +19,19 @@
 # three report on the pull request but do not block a merge until the
 # ruleset lists them too.
 #
-# Runs on pull requests into main, so 5 and 6 check the PINNED submodules:
-# a pantry-db migration or a pantry-api model change is checked here when a
-# pull request moves its pin, not when it merges in its own repo. A pull
-# request stacked on another branch runs nothing until it targets main;
-# workflow_dispatch runs it by hand on any branch.
+# Runs on every pull request, whatever branch it targets: this repo's work
+# lands as a stack of branches, and a stacked pull request should not wait
+# until it targets main to learn that it breaks the hub or the pinned set.
+# 5 and 6 check the PINNED submodules, so a pantry-db migration or a
+# pantry-api model change is checked here when a pull request moves its pin,
+# not when it merges in its own repo. workflow_dispatch runs it by hand on
+# any branch.
 # ============================================================
 
 name: verify
 
 on:
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:

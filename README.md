@@ -134,12 +134,12 @@ git submodule update --remote --merge   # pull every repo to latest main
 git commit -am "pin: <what changed>"    # record the new known-good set
 ```
 
-## Checks on pull requests into main
+## Checks on pull requests
 
 [`.github/workflows/verify.yml`](.github/workflows/verify.yml) runs four jobs
-for every pull request into `main` (and, from the Actions tab, by hand on any
-branch). `hub-tests` checks the hub in this repo; the other three check the
-pinned set:
+on every pull request, including one stacked on another branch, and, from the
+Actions tab, by hand on any branch. `hub-tests` checks the hub in this repo;
+the other three check the pinned set:
 
 | Job | What it checks |
 |---|---|
@@ -156,8 +156,7 @@ The jobs check the pinned submodules, so a pantry-db migration or a
 pantry-api model change gets its `shared-seed` and `schema-parity` check
 here, when a pull request moves its pin, not when it merges in its own repo.
 Run the parity check locally (below) before merging such a change there, or
-the drift turns up in the next pin bump. A pull request stacked on another
-branch runs no checks until it targets `main`.
+the drift turns up in the next pin bump.
 
 ### Reading a schema-parity failure
 
