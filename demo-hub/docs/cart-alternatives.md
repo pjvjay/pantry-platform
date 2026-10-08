@@ -64,7 +64,7 @@ below the row above.
 | # | Key | Why it is here |
 |---|---|---|
 | 1 | Tier: the same ingredient, then not the same ingredient (a related word or a same-aisle substitute), then "outside" | A substitute is a different recipe. It never outranks the real ingredient, whatever it costs. "Outside" is a pick that matches none of the line's words: the selector saw the whole catalog. It is shown honestly, never as a match. |
-| 2 | How many of the recipe's words match (`units.semantic_key`) | The demo selector's own key, so the dialog cannot disagree with the plan about which product is closer |
+| 2 | How many of the recipe's words match, then whether the product is named for and mainly the line's ingredient word (`alternatives.closeness`) | The demo selector's `units.semantic_key`, with its head test read from the ingredient word instead of the line's last word: "cumin powder" is about cumin, so Cumin Seeds rank above Curry Powder. For a line that ends in its ingredient word this only breaks semantic_key's ties, so the dialog does not disagree with the plan about which product is closer |
 | 3 | Pack fit: covers, unknown, short | A pack that is too small makes the trip total look cheaper than the recipe really costs |
 | 4 | Origin preference, only when the shopper gave one | Demo mode and the week planner put it before price too. Without a preference this key does nothing. |
 | 5 | Trip total after the swap: prices, an extra stop, travel | This is what the shopper pays. For the first 40 rows the figure is a real re-price, the same code `/swap` runs, so they agree to the cent. Rows past 40, and plans with no location, have no trip figure. |
