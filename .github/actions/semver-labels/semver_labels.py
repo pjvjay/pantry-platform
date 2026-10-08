@@ -423,7 +423,13 @@ def discover_carried(gh: Any, pr: dict[str, Any], commits: list[dict[str, Any]],
     own = pr["number"]
     default = (pr.get("base", {}).get("repo") or {}).get("default_branch") or "main"
     carried: dict[int, Carried] = {}
-    queue: list[tuple[str, str | None, str]] = [(pr["head"]["ref"], None, "this PR's branch")]
+    queue: list[tuple[str, str | None, str]] = []
+    # Base-branch links only mean something inside this repository: a fork's branch names (often
+    # its own main) say nothing about which of this repo's PRs it carries.
+    head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
+    base_repo = ((pr.get("base") or {}).get("repo") or {}).get("full_name")
+    if head_repo == base_repo and pr["head"]["ref"] != default:
+        queue.append((pr["head"]["ref"], None, "this PR's branch"))
 
     def add(number: int, source: str, data: dict[str, Any] | None) -> Carried | None:
         if number == own:
@@ -448,7 +454,7 @@ def discover_carried(gh: Any, pr: dict[str, Any], commits: list[dict[str, Any]],
                         base=data["base"]["ref"], head=data["head"]["ref"])
         entry.on_default_branch = bool(entry.merged_at) and entry.base == default
         carried[number] = entry
-        if not entry.on_default_branch:
+        if not entry.on_default_branch and entry.head != default:
             queue.append((entry.head, entry.merged_at, f"#{number}"))
         return entry
 

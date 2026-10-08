@@ -264,6 +264,16 @@ class CarriedTests(unittest.TestCase):
         numbers = [c.number for c in sl.discover_carried(gh, gh.pulls["27"], [])]
         self.assertEqual(numbers, [24, 26, 28])
 
+    def test_a_fork_branch_is_not_followed(self) -> None:
+        gh = pr27_github()
+        gh.pulls["28"].update(state="closed", merged_at="2026-10-09T11:00:00Z")
+        pr = copy.deepcopy(gh.pulls["27"])
+        pr["head"]["repo"] = {"full_name": "someone/pantry-api"}
+        pr["base"]["repo"]["full_name"] = "pjvjay/pantry-api"
+        self.assertEqual([c.number for c in sl.discover_carried(gh, pr, [])], [24, 26])
+        pr["head"] = {"ref": "main", "repo": {"full_name": "pjvjay/pantry-api"}}
+        self.assertEqual([c.number for c in sl.discover_carried(gh, pr, [])], [24, 26])
+
     def test_a_carried_pr_already_on_main_sets_no_floor(self) -> None:
         gh = pr27_github()
         gh.pulls["27"]["body"] = "Lands: #20, #404"
