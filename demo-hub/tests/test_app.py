@@ -77,7 +77,8 @@ def test_status_reports_every_service(upstream: list[httpx.Request]) -> None:
     assert services["fetch"]["ok"] is False and services["burr"]["ok"] is False
     assert services["ollama"]["models"] == ["command-r7b:latest"]
     assert services["mcp-sim"]["skill"] == "/skills/local"
-    assert body["keys"] == {"gemini": True, "pantry_token": True, "contextforge_jwt": True}
+    assert body["keys"] == {"gemini": True, "pantry_token": True, "contextforge_jwt": True,
+                            "youtube": False}
     cf_lists = [r for r in upstream if r.url.path == "/servers"]
     assert cf_lists[0].headers["authorization"] == "Bearer jwt"
 
@@ -176,7 +177,7 @@ def test_agent_options_and_stream(monkeypatch: pytest.MonkeyPatch, upstream: Any
     assert options["default_model"] == "gemini:gemini-3-flash-preview" and options["skill_loaded"] is True
     assert [t["id"] for t in options["targets"]] == ["gateway-recipes", "pantry", "gateway-sim"]
 
-    async def fake_run(conv: Any, message: str) -> Any:
+    async def fake_run(conv: Any, message: str, recipe_doc: Any = None) -> Any:
         yield {"type": "start", "conversation_id": conv.id}
         yield {"type": "assistant", "text": f"you said {message}"}
         yield {"type": "done", "steps": 1, "stop": "answered", "seconds": 0.1,

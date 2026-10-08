@@ -32,6 +32,8 @@ GUARDED: list[tuple[str, str, Any]] = [
     ("POST", "/hub/agent/conversations/c1/alternatives", {"ref": 0, "line_no": 1}),
     ("POST", "/hub/agent/conversations/c1/swap", {"ref": 0, "line_no": 1, "product_id": None}),
     ("POST", "/hub/telemetry", {"kind": "page"}),
+    ("POST", "/hub/recipes/import", {"url": "https://example.com/r"}),
+    ("POST", "/hub/recipes/import/video", {"video_id": "dQw4w9WgXcQ", "consent": True}),
     ("POST", "/hub/sims/run", {"scenarios": ["a"]}),
     ("POST", "/hub/sims/jobs/j1/cancel", None),
     ("POST", "/hub/demo/reset", None),
@@ -69,7 +71,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
                                          mcpsim_ui_url="http://runner.test"))
     agent = app.state.agent
 
-    async def fake_run(conv: Any, message: str) -> Any:
+    async def fake_run(conv: Any, message: str, recipe_doc: Any = None) -> Any:
         yield {"type": "done", "steps": 0, "stop": "answered", "seconds": 0,
                "input_tokens": 0, "output_tokens": 0}
 

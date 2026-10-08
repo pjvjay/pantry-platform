@@ -6,6 +6,8 @@
 * ``/hub/mcp/*``          the MCP explorer: targets, catalog, call a tool, read, prompt
 * ``/hub/agent/*``        the Assistant: options, a chat turn streamed as server-sent events, and
                           a conversation's cart: a line's alternatives and the shopper's swap
+* ``/hub/recipes/*``      recipe import: a recipe page or a YouTube video read into reviewed
+                          lines, and, on the shopper's click, a video transcribed by Gemini
 * ``/hub/sims/*``         the mcp-sim runner: scenarios, runs, start and follow jobs
 * ``/hub/demo/reset``     reseed pantry's database and reload the demo origin evidence
 
@@ -25,7 +27,7 @@ import tempfile
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -37,7 +39,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from demo_hub import mcp_targets, pricing
 from demo_hub.agent import AGENT_TARGETS, Agent, CartError
@@ -46,6 +48,7 @@ from demo_hub.guard import Guard
 from demo_hub.images import ImageCache, ImageError
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
 from demo_hub.mcp_targets import McpTargetError, Targets, open_session
+from demo_hub.recipe_import import Importer, ImportFailure, RecipeDoc
 from demo_hub.runs import run_view
 from demo_hub.settings import Settings
 from demo_hub.sims import PRESETS, SimsClient, SimsError
@@ -55,10 +58,12 @@ from demo_hub.telemetry import (
     TraceStore,
     add_gateway_spans,
     compute_metrics,
+    import_trace,
 )
 
 TELEMETRY_KINDS = ("page", "api", "chat")
 STORES_TTL_S = 600.0
+MAX_RECIPE_DOC = 64_000          # ChatBody.recipe_doc, as JSON
 
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
               "proxy-authorization", "proxy-authenticate", "host", "content-length",
@@ -98,6 +103,21 @@ class ChatBody(BaseModel):
     model: str | None = None
     target: str = "gateway-recipes"
     disclosure: str | None = None       # "progressive" or "all"; the hub's default when omitted
+    # A RecipeDoc the shopper reviewed in the import sheet ("Plan this now"): it becomes the
+    # conversation's next imp:N and the model plans it with plan_from_lines. At most 64 KB.
+    recipe_doc: dict[str, Any] | None = None
+
+
+class ImportBody(BaseModel):
+    url: str = Field(min_length=1, max_length=2_000)
+
+
+class VideoImportBody(BaseModel):
+    """Gemini watches a video only on the shopper's click: ``consent`` must be true. The
+    length, when the hub cannot read it (no YouTube key), is the estimate the button showed."""
+    video_id: str = Field(pattern=r"^[A-Za-z0-9_-]{11}$")
+    consent: Literal[True]
+    duration_s: int | None = Field(default=None, ge=1, le=12 * 3600)
 
 
 class AlternativesBody(BaseModel):
@@ -134,7 +154,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="pantry demo hub", docs_url="/hub/docs", openapi_url="/hub/openapi.json",
                   redoc_url=None)
     targets = Targets(settings)
-    agent = Agent(settings, targets, ChatClient(settings))
+    importer = Importer(settings)
+    agent = Agent(settings, targets, ChatClient(settings), importer=importer)
     sims = SimsClient(settings)
     scratch = Path(tempfile.gettempdir()) / "pantry-demo-hub"
     store = TraceStore(settings.traces_dir or scratch / "traces")
@@ -142,6 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     http_stats = HttpStats()
     stores_cache: dict[str, Any] = {"at": 0.0, "names": []}
     app.state.settings, app.state.agent, app.state.targets = settings, agent, targets
+    app.state.importer = importer
     app.state.traces, app.state.images, app.state.http_stats = store, images, http_stats
 
     # Before the timing middleware below, so the timing wraps it: a refused request is counted.
@@ -236,8 +258,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                  **_strip(burr), "links": {"Burr UI": s.burr_url}},
             ],
             "keys": {"gemini": bool(s.gemini_api_key), "pantry_token": bool(s.pantry_mcp_token),
-                     "contextforge_jwt": bool(s.contextforge_jwt)},
+                     "contextforge_jwt": bool(s.contextforge_jwt),
+                     "youtube": bool(s.youtube_api_key)},
             "agent": {"default_model": s.default_agent_model},
+            "recipe_import": importer.status(),
+            "video_import": importer.video_status(),
         }
 
     # --- MCP explorer --------------------------------------------------------------------------
@@ -308,6 +333,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/hub/agent/chat")
     async def agent_chat(body: ChatBody) -> StreamingResponse:
+        doc = _reviewed_doc(body.recipe_doc) if body.recipe_doc is not None else None
         try:
             conv = agent.conversation(body.conversation_id, body.model
                                       or settings.default_agent_model, body.target,
@@ -327,10 +353,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # answer's evals arrive just before "done". The trace is kept even when the browser
             # goes away mid-answer, and ContextForge's spans join it once the turn is over.
             try:
-                async for event in agent.run(conv, body.message):
+                async for event in agent.run(conv, body.message, doc):
                     if event.get("type") == "done":     # graded with the turn's end in view
                         recorder.evals = evaluate([*recorder.events, event],
-                                                  await known_stores(), conv.model)
+                                                  await known_stores(), conv.model,
+                                                  plans=agent.turn_plans(conv))
                         yield sse(recorder.on({"type": "evals", "trace_id": recorder.id,
                                                **recorder.evals}))
                     yield sse(recorder.on(event))
@@ -441,6 +468,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def agent_forget(conversation_id: str) -> dict[str, bool]:
         return {"forgotten": agent.conversations.pop(conversation_id, None) is not None}
 
+    # --- recipe import -------------------------------------------------------------------------
+
+    async def _import(kind: str, url: str, call: Any) -> dict[str, Any]:
+        """One import route's call, kept as a trace (source "import") for the metrics: method,
+        host, lines, time and cost, the URL without its query."""
+        started = time.perf_counter()
+        try:
+            out = await call
+        except ImportFailure as exc:
+            store.save(import_trace(kind, url, (time.perf_counter() - started) * 1000,
+                                    error=exc.body()))
+            raise HTTPException(exc.status, exc.body()) from exc
+        store.save(import_trace(kind, url, (time.perf_counter() - started) * 1000, result=out))
+        return out
+
+    @app.post("/hub/recipes/import")
+    async def recipe_import(body: ImportBody) -> dict[str, Any]:
+        """A recipe page or a YouTube link read into a RecipeDoc for the shopper to review:
+        ImportResult {doc, method, linked_pages, video, needs, warnings}. No model is called."""
+        return await _import("link", body.url, importer.import_url(body.url))
+
+    @app.post("/hub/recipes/import/video")
+    async def recipe_import_video(body: VideoImportBody) -> dict[str, Any]:
+        """Gemini's transcription of a public video's ingredient lines, every line unconfirmed
+        until the shopper ticks it (needs: confirm_lines). Only on the shopper's click."""
+        return await _import("video", f"https://www.youtube.com/watch?v={body.video_id}",
+                             importer.import_video(body.video_id,
+                                                   duration_estimate_s=body.duration_s))
+
     # --- Simulations ---------------------------------------------------------------------------
 
     async def _sims(call: Any) -> Any:
@@ -523,6 +579,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.mount("/pantry", SpaFiles(directory=settings.spa_dist, html=True), name="spa")
 
     return app
+
+
+def _reviewed_doc(raw: dict[str, Any]) -> RecipeDoc:
+    """ChatBody.recipe_doc checked before the turn starts: 413 over 64 KB, 422 when it is not a
+    RecipeDoc or a line is still unconfirmed (planning it would plan what nobody reviewed)."""
+    if len(json.dumps(raw, ensure_ascii=False)) > MAX_RECIPE_DOC:
+        raise HTTPException(413, f"recipe_doc is over {MAX_RECIPE_DOC // 1000} KB")
+    try:
+        doc = RecipeDoc.model_validate(raw)
+    except ValidationError as exc:
+        raise HTTPException(422, {"code": "bad_recipe_doc",
+                                  "errors": exc.errors(include_url=False,
+                                                       include_context=False)}) from exc
+    if not doc.lines:
+        raise HTTPException(422, {"code": "no_lines", "message": "The recipe has no lines."})
+    unconfirmed = [ln.line_no for ln in doc.lines if not ln.confirmed]
+    if unconfirmed:
+        raise HTTPException(422, {"code": "unconfirmed_lines", "lines": unconfirmed,
+                                  "message": "Confirm or remove these lines before planning."})
+    return doc
 
 
 def _strip(probe_result: dict[str, Any]) -> dict[str, Any]:
