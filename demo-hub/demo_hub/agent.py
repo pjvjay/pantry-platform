@@ -63,7 +63,7 @@ from demo_hub.llm import (
     QuotaExhausted,
     parse_model,
 )
-from demo_hub.mcp_targets import McpTargetError, Targets, call_tool, open_session
+from demo_hub.mcp_targets import TEXT_LIMIT, McpTargetError, Targets, call_tool, open_session
 from demo_hub.observers import Condition, Policy, View
 from demo_hub.settings import Settings
 
@@ -280,10 +280,16 @@ def model_copy(structured: Any) -> Any:
 
 
 def for_browser(result: dict[str, Any]) -> dict[str, Any]:
-    """A tool result as the browser (and the turn's trace) gets it: everything but the basis."""
+    """A tool result as the browser (and the turn's trace) gets it: everything but the basis.
+    The MCP result's text is the same JSON as its structured content, basis included, so it is
+    written again from the stripped copy."""
     body = result.get("structured")
     stripped = without(body, SERVER_ONLY)
-    return result if stripped is body else {**result, "structured": stripped}
+    if stripped is body:
+        return result
+    text = json.dumps(stripped, ensure_ascii=False, indent=2)
+    return {**result, "structured": stripped, "text": text[:TEXT_LIMIT],
+            "truncated": len(text) > TEXT_LIMIT}
 
 
 def result_for_model(result: dict[str, Any], limit: int = RESULT_CHARS_FOR_MODEL) -> str:

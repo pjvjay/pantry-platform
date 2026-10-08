@@ -136,8 +136,10 @@ def pantry(monkeypatch: pytest.MonkeyPatch) -> PantrySession:
                         ) -> dict[str, Any]:
         session.calls.append((name, copy.deepcopy(arguments)))
         error, structured = "", None
+        text = ""
         if name in ("plan_recipe", "plan_from_text"):
             structured = plan_result()
+            text = json.dumps(structured, indent=2)      # pantry's text is the same JSON
         elif name == "rank_alternatives":
             if arguments["line_no"] not in (1, 2, 3, 4):
                 error = f"line {arguments['line_no']} is not a planned line; planned: 1, 2, 3, 4."
@@ -150,8 +152,8 @@ def pantry(monkeypatch: pytest.MonkeyPatch) -> PantrySession:
                 error = f"unknown product id {unknown[0]} in pins."
             else:
                 structured = repriced(arguments["basis"], arguments["pins"])
-        return {"name": name, "is_error": bool(error), "structured": structured, "text": error,
-                "ms": 1.0, "truncated": False}
+        return {"name": name, "is_error": bool(error), "structured": structured,
+                "text": error or text, "ms": 1.0, "truncated": False}
 
     monkeypatch.setattr(agent_module, "open_session", fake_open)
     monkeypatch.setattr(agent_module, "call_tool", fake_call)
@@ -193,7 +195,8 @@ def test_the_hub_asks_for_the_basis_and_only_it_keeps_it(pantry: PantrySession,
     assert "basis" not in tool_message and "Lean Ground Beef 500g" in tool_message
     # the browser's event, its trace and the cards go without it too; tool_log keeps it
     result = next(e for e in events if e["type"] == "tool_result")
-    assert "basis" not in result["structured"]["summary"]
+    assert "basis" not in result["structured"]["summary"] and '"basis"' not in result["text"]
+    assert json.loads(result["text"]) == result["structured"]
     assert result["structured"]["summary"]["burr_run"] == "run-1"     # trace views still get it
     [card] = next(e for e in events if e["type"] == "assistant")["plans"]
     assert "basis" not in card["summary"] and "llm_calls" not in card["summary"]
