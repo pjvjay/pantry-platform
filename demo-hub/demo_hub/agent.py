@@ -26,7 +26,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -366,13 +366,16 @@ class CartError(RuntimeError):
 
 @dataclass
 class PendingChange:
-    """A swap the model has not heard about yet. One per (recipe, purchase line): a later swap of
-    the same line replaces `now` and keeps `was`, the product the model last knew, and every
-    swap updates the cart's figures on all of its recipe's changes."""
+    """A swap the model has not heard about yet. One per (recipe, recipe line), not per purchase:
+    a swap can merge a line into another line's purchase, and a later swap or undo made on that
+    purchase has to reach the merged line's change too. A later swap of a line replaces `now`
+    and keeps `was`, the product the model last knew, and every swap updates the cart's figures
+    on all of its recipe's changes. ``as_told`` joins the lines that went from one product to the
+    same other product into one note, as the cart shows them."""
     recipe: str                     # answers.cart_key of the cart
     recipe_name: str
-    line_no: int                    # the purchase's own line
-    lines: list[int]                # every recipe line the purchase covers
+    line_no: int                    # the recipe line (the first of `lines` once told)
+    lines: list[int]                # [line_no]; once told, every line the note covers
     ingredient: str
     was: dict[str, Any]             # {id, name}: the product the model last knew
     now: dict[str, Any]             # {id, name}: the product in the cart now
@@ -399,6 +402,23 @@ class PendingChange:
                 "total_before": self.total_before, "total_after": self.total_after,
                 "stores_after": list(self.stores_after), "undone": self.undone,
                 "note": self.note(), "structured": {"summary": self.summary, "full": None}}
+
+
+def as_told(changes: list[PendingChange]) -> list[PendingChange]:
+    """The pending changes as the model hears them: the lines of one cart that went from the
+    same product to the same product are one note and one event (a garlic purchase covering
+    lines 2 and 4 reads "line 2 (garlic + garlic clove)"), in the order they were first
+    changed."""
+    groups: dict[tuple[Any, ...], list[PendingChange]] = {}
+    for c in changes:
+        groups.setdefault((c.recipe, c.was.get("id"), c.now.get("id"), c.undone), []).append(c)
+    out = []
+    for same in groups.values():
+        same.sort(key=lambda c: c.line_no)
+        names = dict.fromkeys(c.ingredient for c in same if c.ingredient)
+        out.append(replace(same[0], lines=[c.line_no for c in same],
+                           ingredient=" + ".join(names)))
+    return out
 
 
 def _purchase(summary: dict[str, Any], line_no: int) -> dict[str, Any] | None:
@@ -442,7 +462,7 @@ class Conversation:
     # argument (its plans then carry no basis, and the cart offers no Options)
     basis_tools: set[str] = field(default_factory=set)
     # The cart: the shopper's pins per plan (tool_log index -> line_no -> product_id), and the
-    # swaps the model has not been told about, (recipe, line) -> change, told before the
+    # swaps the model has not been told about, (recipe, recipe line) -> change, told before the
     # shopper's next message.
     pins: dict[int, dict[int, int]] = field(default_factory=dict)
     pending: dict[tuple[str, int], PendingChange] = field(default_factory=dict)
@@ -508,7 +528,7 @@ class Agent:
         # Swaps since the last turn reach the model as [cart] notes before the shopper's words
         # (appended, so the conversation's earlier messages, and a model's cached prompt, stay
         # as they were); the observers read only the shopper's words.
-        changes = list(conv.pending.values())
+        changes = as_told(list(conv.pending.values()))
         conv.pending.clear()
         notes = "\n".join(c.note() for c in changes)
         conv.messages.append({"role": "user",
@@ -748,37 +768,41 @@ class Agent:
             new_basis = new.get("basis") if isinstance(new.get("basis"), dict) else {}
             conv.pins[new_ref] = {int(p["line_no"]): int(p["product_id"])
                                   for p in new_basis.get("pins") or []}
-            change = self._queue(conv, summary, new, new_ref, purchase, lines)
+            changes = self._queue(conv, summary, new, new_ref, basis, lines)
         card = plan_card("plan", new, new_ref, FOR_BROWSER | SERVER_ONLY)
-        return {"card": card, "note": change.note() if change else ""}
+        return {"card": card, "note": "\n".join(c.note() for c in changes)}
 
     @staticmethod
     def _queue(conv: Conversation, old: dict[str, Any], new: dict[str, Any], new_ref: int,
-               purchase: dict[str, Any], lines: list[int]) -> PendingChange | None:
-        """Record the swap for the model's next turn, coalesced per (recipe, line): the model
-        hears once, from what it last knew to what the cart is now. A line put back as the model
-        last knew it is not mentioned at all. Returns the change (None when nothing is left to
-        tell for this line)."""
+               basis: dict[str, Any], lines: list[int]) -> list[PendingChange]:
+        """Record the swap for the model's next turn, coalesced per (recipe, recipe line): the
+        model hears once per line, from the product it last knew to the product the cart buys
+        for that line now, whichever purchase buys it. A line put back as the model last knew
+        it is not mentioned at all. Returns what is left to tell for the swap's lines, as the
+        model will read it (``as_told``; [] when nothing is)."""
         recipe = cart_key(old)
-        line_no = int(purchase["line_no"])
+        names = {int(b["line_no"]): str(b.get("name") or "") for b in basis.get("lines") or []}
+        pinned = {int(p["line_no"]) for p in (new.get("basis") or {}).get("pins") or []}
         same_recipe = [c for (r, _), c in conv.pending.items() if r == recipe]
         before = same_recipe[0].total_before if same_recipe else cart_total(old)
-        earlier = conv.pending.get((recipe, line_no))
-        now = _product(_purchase(new, line_no))
-        pinned = {int(p["line_no"]) for p in (new.get("basis") or {}).get("pins") or []}
-        change = PendingChange(
-            recipe=recipe, recipe_name=str(new.get("recipe_name") or recipe_key(old)),
-            line_no=line_no, lines=lines, ingredient=str(purchase.get("ingredient") or ""),
-            was=earlier.was if earlier else _product(purchase), now=now, total_before=before,
-            undone=not pinned & set(lines))
-        conv.pending[(recipe, line_no)] = change
-        if change.was.get("id") == now.get("id"):
-            del conv.pending[(recipe, line_no)]
+        for n in lines:
+            earlier = conv.pending.get((recipe, n))
+            was = earlier.was if earlier else _product(_purchase(old, n))
+            now = _product(_purchase(new, n))
+            if was.get("id") == now.get("id"):
+                conv.pending.pop((recipe, n), None)
+                continue
+            conv.pending[(recipe, n)] = PendingChange(
+                recipe=recipe, recipe_name=str(new.get("recipe_name") or recipe_key(old)),
+                line_no=n, lines=[n],
+                ingredient=names.get(n) or str((_purchase(new, n) or {}).get("ingredient") or ""),
+                was=was, now=now, total_before=before, undone=n not in pinned)
         cleaned = {k: v for k, v in new.items() if k not in FOR_BROWSER | SERVER_ONLY}
-        for c in [*same_recipe, change]:       # the cart's figures are the latest swap's
-            c.ref, c.summary = new_ref, cleaned
-            c.total_after, c.stores_after = cart_total(new), cart_stores(new)
-        return conv.pending.get((recipe, line_no))
+        for (r, _), c in conv.pending.items():     # the cart's figures are the latest swap's
+            if r == recipe:
+                c.ref, c.summary = new_ref, cleaned
+                c.total_after, c.stores_after = cart_total(new), cart_stores(new)
+        return as_told([c for (r, n), c in conv.pending.items() if r == recipe and n in lines])
 
     def _lean(self, model: str) -> bool:
         return self.settings.local_lean_tools and model.startswith("ollama:")

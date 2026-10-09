@@ -44,34 +44,66 @@ CATALOG = [_tool("list_recipes"), _tool("find_product", "query", "lat", "lon"), 
 
 
 def line(line_no: int, ingredient: str, pid: int, product: str, price: float,
-         also: list[int] | None = None) -> dict[str, Any]:
+         also: list[int] | None = None, store: str = "Pantry Mart Downtown") -> dict[str, Any]:
     return {"line_no": line_no, "ingredient": ingredient, "product_id": pid, "product": product,
-            "brand": "Demo", "size": "500g", "store": "Pantry Mart Downtown", "price": price,
+            "brand": "Demo", "size": "500g", "store": store, "price": price,
             "confidence": 0.9, "origin_country": "", "origin_status": "none", "match": "exact",
-            "also_lines": also or [], "packs": 1, "trip_store": "Pantry Mart Downtown",
-            "trip_price": price}
+            "also_lines": also or [], "packs": 1, "trip_store": store, "trip_price": price}
 
 
-def plan_result(slug: str = "spaghetti_bolognese", name: str = "Spaghetti Bolognese"
-                ) -> dict[str, Any]:
-    lines = [line(1, "ground beef", 11, "Lean Ground Beef 500g", 7.99),
-             line(2, "garlic + garlic clove", 21, "Garlic Bulb 3-pack", 2.49, also=[4]),
-             line(3, "spaghetti", 31, "Spaghetti 500g", 1.97)]
+# products a fake plan or re-price can buy: id -> (name, price, store)
+PRODUCTS = {11: ("Lean Ground Beef 500g", 7.99, "Pantry Mart Downtown"),
+            12: ("Extra Lean Ground Beef 450g", 8.49, "GreenLeaf Grocers Kitsilano"),
+            13: ("Ground Beef Family Pack 1kg", 9.99, "Pantry Mart Downtown"),
+            21: ("Garlic Bulb 3-pack", 2.49, "Pantry Mart Downtown"),
+            22: ("Fraser Farms Garlic 200g", 1.99, "Pantry Mart Downtown"),
+            31: ("Spaghetti 500g", 1.97, "Pantry Mart Downtown"),
+            32: ("Penne 500g", 1.79, "Pantry Mart Downtown"),
+            33: ("Rigatoni 500g", 2.29, "Pantry Mart Downtown")}
+
+BOLOGNESE = [{"line_no": 1, "name": "ground beef", "product_id": 11},
+             {"line_no": 2, "name": "garlic", "product_id": 21},
+             {"line_no": 3, "name": "spaghetti", "product_id": 31},
+             {"line_no": 4, "name": "garlic clove", "product_id": 21}]
+
+
+def purchases(basis_lines: list[dict[str, Any]], picks: dict[int, int],
+              pinned: set[int] | frozenset[int] = frozenset()) -> list[dict[str, Any]]:
+    """pantry's group_purchases in miniature: one purchase per product, drawn on the first line
+    it buys for, with the other lines it buys as also_lines (so lines 2 and 4 share the garlic,
+    and a line swapped to another line's product merges into that line's purchase)."""
+    out: dict[int, dict[str, Any]] = {}
+    for b in sorted(basis_lines, key=lambda b: b["line_no"]):
+        n, pid = b["line_no"], picks[b["line_no"]]
+        if pid in out:
+            out[pid]["also_lines"].append(n)
+            out[pid]["ingredient"] += f" + {b['name']}"
+            continue
+        name, price, store = PRODUCTS[pid]
+        out[pid] = line(n, b["name"], pid, name, price, store=store)
+        if n in pinned:
+            out[pid]["confidence"] = 1.0
+    return list(out.values())
+
+
+def plan_result(slug: str = "spaghetti_bolognese", name: str = "Spaghetti Bolognese",
+                basis_lines: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    basis_lines = copy.deepcopy(basis_lines or BOLOGNESE)
+    lines = purchases(basis_lines, {b["line_no"]: b["product_id"] for b in basis_lines})
+    stores = sorted({ln["trip_store"] for ln in lines})
     basket = round(sum(ln["price"] for ln in lines), 2)
+    travel = 1.5 * len(stores)
     return {"summary": {
         "recipe_slug": slug, "recipe_name": name, "total_cost": basket,
         "origin_status": "not_requested", "coverage": None, "lines": lines,
-        "trip": {"stores": ["Pantry Mart Downtown"], "basket_cost": basket, "travel_cost": 1.5,
-                 "total_cost": round(basket + 1.5, 2), "stops": 1, "items": []},
+        "trip": {"stores": stores, "basket_cost": basket, "travel_cost": travel,
+                 "total_cost": round(basket + travel, 2), "stops": len(stores), "items": []},
         "notes": [], "not_stocked": [], "out_of_range": [], "skipped": [],
         "llm_cost_usd": 0.0, "latency_ms": 12, "llm_calls": [], "burr_run": "run-1",
         "pipeline": {"build_plan": 3.0},
         "basis": {"v": 1, "path": "library", "recipe_slug": slug, "recipe_name": name,
-                  "lines": [{"line_no": 1, "name": "ground beef", "product_id": 11},
-                            {"line_no": 2, "name": "garlic", "product_id": 21},
-                            {"line_no": 3, "name": "spaghetti", "product_id": 31},
-                            {"line_no": 4, "name": "garlic clove", "product_id": 21}],
-                  "lat": 49.2827, "lon": -123.1207, "max_km": 5.0, "pins": []}},
+                  "lines": basis_lines, "lat": 49.2827, "lon": -123.1207, "max_km": 5.0,
+                  "pins": []}},
         "full": None}
 
 
@@ -89,38 +121,24 @@ class PantrySession:
                                       for t in self.catalog])
 
 
-# products a fake re-price can pin: id -> (name, price, store)
-PRODUCTS = {11: ("Lean Ground Beef 500g", 7.99, "Pantry Mart Downtown"),
-            12: ("Extra Lean Ground Beef 450g", 8.49, "GreenLeaf Grocers Kitsilano"),
-            13: ("Ground Beef Family Pack 1kg", 9.99, "Pantry Mart Downtown"),
-            21: ("Garlic Bulb 3-pack", 2.49, "Pantry Mart Downtown"),
-            22: ("Fraser Farms Garlic 200g", 1.99, "Pantry Mart Downtown"),
-            31: ("Spaghetti 500g", 1.97, "Pantry Mart Downtown")}
-
-
 def repriced(basis: dict[str, Any], pins: list[dict[str, Any]]) -> dict[str, Any]:
     """pantry's reprice_plan in miniature: the basis's pins merged with `pins`, a pin equal to
-    the planner's pick dropped, each pinned purchase's product, price and store swapped, the
-    trip re-totalled ($1.50 travel per store)."""
+    the planner's pick dropped, every line bought with its pinned product (purchases merge and
+    split as pantry's do), the trip re-totalled ($1.50 travel per store)."""
     planner = {b["line_no"]: b["product_id"] for b in basis["lines"]}
     merged = {p["line_no"]: p["product_id"] for p in [*basis["pins"], *pins]}
     merged = {n: pid for n, pid in merged.items() if pid != planner[n]}
-    result = plan_result(basis["recipe_slug"], basis["recipe_name"])
+    # pantry keeps the plan's lines
+    result = plan_result(basis["recipe_slug"], basis["recipe_name"], basis["lines"])
     summary = result["summary"]
-    for ln in summary["lines"]:
-        pid = merged.get(ln["line_no"])
-        if pid is not None:
-            name, price, store = PRODUCTS[pid]
-            ln.update(product_id=pid, product=name, price=price, store=store, trip_store=store,
-                      trip_price=price, confidence=1.0)
+    summary["lines"] = purchases(basis["lines"], {**planner, **merged}, set(merged))
     stores = sorted({ln["trip_store"] for ln in summary["lines"]})
     basket = round(sum(ln["price"] for ln in summary["lines"]), 2)
     summary.update(total_cost=basket, notes=[f"line {n}: chosen by the shopper"
                                              for n in sorted(merged)])
     summary["trip"].update(stores=stores, basket_cost=basket, travel_cost=1.5 * len(stores),
-                           total_cost=round(basket + 1.5 * len(stores), 2))
+                           total_cost=round(basket + 1.5 * len(stores), 2), stops=len(stores))
     summary["basis"]["pins"] = [{"line_no": n, "product_id": p} for n, p in sorted(merged.items())]
-    summary["basis"]["lines"] = copy.deepcopy(basis["lines"])     # pantry keeps the plan's lines
     return result
 
 
@@ -354,10 +372,11 @@ def test_a_swap_reprices_the_cart_and_waits_for_the_next_turn(pantry: PantrySess
     assert out["note"] == ("[cart] The shopper changed line 2 (garlic + garlic clove) of "
                            "Spaghetti Bolognese in the cart: Garlic Bulb 3-pack -> Fraser Farms "
                            "Garlic 200g. Trip now $13.45 at Pantry Mart Downtown, was $13.95.")
-    # one more tool_log entry, the pins it carries, one pending change; history untouched
+    # one more tool_log entry, the pins it carries, a pending change per recipe line (told as
+    # one); history untouched
     assert [n for n, _ in conv.tool_log] == ["plan_recipe", "reprice_plan"]
     assert conv.pins[1] == {2: 22, 4: 22}
-    assert list(conv.pending) == [("spaghetti_bolognese", 2)]
+    assert list(conv.pending) == [("spaghetti_bolognese", 2), ("spaghetti_bolognese", 4)]
     assert json.dumps(conv.messages) == before
 
     # the next turn: the change is told after "start", before the model reads the shopper
@@ -394,13 +413,69 @@ def test_swaps_of_one_line_coalesce_and_a_line_put_back_is_not_told(
     call(agent.swap(conv.id, 2, 3, 31))           # the planner's own pick: nothing to tell
     assert list(conv.pending) == [("spaghetti_bolognese", 1)]
     call(agent.swap(conv.id, 3, 2, 22))
-    assert [c.total_after for c in conv.pending.values()] == [15.45, 15.45]
+    assert [c.total_after for c in conv.pending.values()] == [15.45, 15.45, 15.45]
     assert {c.ref for c in conv.pending.values()} == {4}
     # line 1 back to what the model last knew: no longer worth a word
     out = call(agent.swap(conv.id, 4, 1, None))
-    assert list(conv.pending) == [("spaghetti_bolognese", 2)] and conv.pins[5] == {2: 22, 4: 22}
+    assert [n for _, n in conv.pending] == [2, 4] and conv.pins[5] == {2: 22, 4: 22}
     assert out["note"] == ""
     assert out["card"]["pinned_lines"] == [2, 4]
+
+
+PASTA = [{"line_no": 1, "name": "penne", "product_id": 32},
+         {"line_no": 2, "name": "garlic", "product_id": 21},
+         {"line_no": 3, "name": "spaghetti", "product_id": 31}]
+
+
+def pasta_cart(pantry: PantrySession) -> tuple[Agent, Any]:
+    """A planned cart with two pasta lines, whose line 3 the shopper then swapped to line 1's
+    Penne: pantry merges it into line 1's purchase (ref 1), and the model has not heard yet."""
+    agent, conv = planned(pantry)
+    conv.tool_log[0] = ("plan_recipe", plan_result("pasta_bake", "Pasta Bake", PASTA))
+    out = call(agent.swap(conv.id, 0, 3, 32))
+    [penne, _garlic] = out["card"]["summary"]["lines"]
+    assert (penne["line_no"], penne["also_lines"]) == (1, [3])
+    assert out["note"] == ("[cart] The shopper changed line 3 (spaghetti) of Pasta Bake in the "
+                           "cart: Spaghetti 500g -> Penne 500g. Trip now $5.78 at Pantry Mart "
+                           "Downtown, was $7.75.")
+    return agent, conv
+
+
+def test_undoing_on_the_purchase_a_line_was_merged_into_tells_nothing(
+        pantry: PantrySession) -> None:
+    """The merged line's change is its own, not the purchase's: putting the merged purchase
+    back to the planner's picks takes back the swap the model never heard of."""
+    agent, conv = pasta_cart(pantry)
+    out = call(agent.swap(conv.id, 1, 1, None))          # "Back to the planner's pick"
+    assert out["note"] == "" and not conv.pending and out["card"]["pinned_lines"] == []
+    assert [ln["product"] for ln in out["card"]["summary"]["lines"]] == [
+        "Penne 500g", "Garlic Bulb 3-pack", "Spaghetti 500g"]
+    agent.chat = ScriptedChat(turn("Ok."))
+    events, _ = chat_turn(agent, "what is my total now?", conv=conv)
+    assert "cart_change" not in [e["type"] for e in events]
+    assert agent.chat.requests[0]["messages"][-1]["content"] == "what is my total now?"
+
+
+def test_reswapping_a_merged_purchase_tells_each_line_from_what_the_model_knew(
+        pantry: PantrySession) -> None:
+    agent, conv = pasta_cart(pantry)
+    out = call(agent.swap(conv.id, 1, 1, 33))            # Rigatoni for the merged purchase
+    assert conv.pins[2] == {1: 33, 3: 33}
+    # one change per line, from each line's own last-known product, in the order the lines
+    # were first changed; neither contradicts the other
+    assert out["note"].splitlines() == [
+        ("[cart] The shopper changed line 3 (spaghetti) of Pasta Bake in the cart: Spaghetti "
+         "500g -> Rigatoni 500g. Trip now $6.28 at Pantry Mart Downtown, was $7.75."),
+        ("[cart] The shopper changed line 1 (penne) of Pasta Bake in the cart: Penne 500g -> "
+         "Rigatoni 500g. Trip now $6.28 at Pantry Mart Downtown, was $7.75.")]
+    agent.chat = ScriptedChat(turn("Ok."))
+    events, _ = chat_turn(agent, "what is my total now?", conv=conv)
+    told = [e for e in events if e["type"] == "cart_change"]
+    assert [(e["line_no"], e["lines"], e["from"]["id"], e["to"]["id"]) for e in told] == [
+        (3, [3], 31, 33), (1, [1], 32, 33)]
+    assert all(e["ref"] == 2 and e["total_after"] == 6.28 for e in told)
+    asked = agent.chat.requests[0]["messages"][-1]["content"]
+    assert asked == f"{out['note']}\n\nwhat is my total now?"
 
 
 def test_undoing_a_swap_the_model_knows_about_is_told_as_undone(pantry: PantrySession) -> None:

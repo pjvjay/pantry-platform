@@ -126,18 +126,22 @@ console replaces the card with the old `ref` by the new one.
 ### The `cart_change` event and the note
 
 On the next `/hub/agent/chat` turn, right after `start`, the hub emits one event per changed
-line:
+line, or per set of lines that went from the same product to the same product (a purchase
+covering lines 2 and 4):
 
 ```json
 {"type": "cart_change", "ref": 1, "line_no": 2, "lines": [2, 4],
- "recipe_name": "Spaghetti Bolognese", "ingredient": "garlic",
+ "recipe_name": "Spaghetti Bolognese", "ingredient": "garlic + garlic clove",
  "from": {"id": 21, "name": "Garlic Bulb 3-pack"}, "to": {"id": 22, "name": "Fraser Farms Garlic 200g"},
  "total_before": 13.95, "total_after": 13.45, "stores_after": ["Pantry Mart Downtown"],
  "undone": false, "note": "[cart] ...", "structured": {"summary": {"...": "..."}, "full": null}}
 ```
 
-Changes are coalesced per recipe and line:
-- `from` is the product the model last knew and `to` is the product in the cart now;
+Changes are coalesced per recipe and recipe line, not per purchase. A swap can merge a line
+into another line's purchase; a later swap or undo made on that purchase then updates the
+merged line's own change, so the model never hears of a swap that was taken back.
+- `from` is the product the model last knew for the line and `to` is the product the cart buys
+  for it now; a line back to what the model last knew is not mentioned;
 - `total_before` is the cart's total when the model last knew it;
 - every change of one cart carries that cart's latest `total_after`, `stores_after`, `ref` and
   `structured`.
