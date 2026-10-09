@@ -51,7 +51,6 @@ __all__ = ["DRAFT_KEY", "ImportFailure", "Importer", "RecipeDoc", "import_note",
 # The key of a doc imported outside a conversation (the console's import sheet). Chat keeps its
 # own docs as imp:1, imp:2, ... and re-keys a doc the console sends (ChatBody.recipe_doc).
 DRAFT_KEY = "imp:draft"
-MIN_DESCRIPTION_LINES = 3      # fewer ingredient-like lines is not a list
 MAX_NOTE = 8_000
 LINKED_MEMORY = 64
 
@@ -203,9 +202,8 @@ class Importer:
             links = description.recipe_links(details["description"])
             for link in links:
                 self._remember(link["url"], vid, str(video["channel"]))
-            if len(lines) < MIN_DESCRIPTION_LINES:
+            if not lines:            # description.py decides what counts as a list
                 warnings.append("The description has no ingredient list.")
-                lines = []
         if not lines:
             return result(None, linked_pages=links, video=video, warnings=warnings)
         bounded, cut = web.bounded(lines)

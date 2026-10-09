@@ -41,8 +41,10 @@ says "Reading links needs the local demo hub".
      401, 403 or 404 is 422 `not_public`.
    - With a YouTube Data API key: `videos.list?part=snippet,contentDetails` (1 unit) gives the
      description and the length. The description's ingredient list (the block under an
-     "Ingredients" heading, or else the longest run of three or more lines starting with an
-     amount or a bullet) becomes the doc, `method: youtube_description`. Up to three links that
+     "Ingredients" heading, up to the next heading or method step; or else the longest run of
+     three or more lines that start with an amount once any bullet or list number is set aside,
+     so a method written as "1. Boil the water" is never read as ingredients) becomes the doc,
+     `method: youtube_description`. Up to three links that
      could be the creator's written recipe (never social, shop, tip or shortener links) are
      offered as `linked_pages`; importing one of them is `method: youtube_linked_page`, with the
      channel kept on the source.

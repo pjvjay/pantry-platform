@@ -7,10 +7,14 @@ list leave this module (and are then read by pantry's parser, at most 60 of at m
 characters); the rest of the description is never stored, logged or shown to a model, so
 nothing a description says can reach the Assistant as an instruction.
 
-The list is the block under an "Ingredients" heading, up to the next heading or the first
-line that is not an ingredient. Without a heading, the longest run of three or more lines that
-start with an amount or a bullet is taken. Both are heuristics: every line is shown to the
-shopper beside its parsed amount before anything is planned.
+The list is the block under an "Ingredients" heading, up to the next heading, a method step
+("2. Boil the water") or the first line that is not an ingredient; a block of one or two lines
+counts only when each starts with a bullet or an amount. Without a heading, the longest run of
+three or more lines that start with an amount (after any bullet or list number) is taken, so a
+method written as numbered steps is never read as ingredients. Both are heuristics: in the
+import sheet every line is shown beside its parsed amount before anything is planned, but a
+link pasted in chat is planned straight away, so the heuristics lean towards finding no list
+(the shopper then chooses how to read it) over reading prose as one.
 """
 
 from __future__ import annotations
@@ -40,6 +44,14 @@ AMOUNT_START = re.compile(
     r"^\W{0,3}(\d|[¼½¾⅐-⅞]|(a|an|one|two|three|four|five|six|half"
     r"|pinch|dash|handful|few|some|bunch|small|medium|large)\s)", re.IGNORECASE)
 SUBHEADING = re.compile(r"^\W*(for (the )?\w[\w\s]{0,30}|\w[\w\s]{0,30}):\s*$", re.IGNORECASE)
+# a bullet or a list number ("1.", "2)") in front of a line's own words
+MARKER = re.compile(r"^\s*(?:[-*•▪◦·–—✓✔➤►▶‣⁃]\s*|\d+[.)]\s+)+")
+# the first word of a method step ("1. Boil the water", "- Stir in the cream"). Such a line is
+# never an ingredient, and under an ingredients heading it means the steps have begun.
+STEP = re.compile(
+    r"^(add|bake|beat|blend|boil|bring|chop|combine|cook|cover|cut|drain|fold|fry|heat|knead"
+    r"|let|marinate|melt|mix|place|pour|preheat|put|reduce|remove|rinse|roast|saut[eé]|serve"
+    r"|simmer|soak|spread|sprinkle|stir|strain|toss|transfer|whisk)\b", re.IGNORECASE)
 
 # Hosts that are never the written recipe: video and social sites, shops, link shorteners
 # (where a link goes cannot be told without following it), tips and merchandise.
@@ -63,6 +75,17 @@ def _ingredient_like(line: str) -> bool:
     return bool(BULLET.match(line) or AMOUNT_START.match(line)) and not line.endswith(":")
 
 
+def _words(line: str) -> str:
+    """The line without its bullet or list number: "2. Boil the water" -> "Boil the water"."""
+    return MARKER.sub("", line, count=1)
+
+
+def _amount_first(line: str) -> bool:
+    """Starts with an amount once any bullet or list number is set aside ("1. 2 cups rice",
+    "- 1 egg", "200 g lentils"), unlike a numbered step ("1. Boil the water")."""
+    return bool(AMOUNT_START.match(_words(line))) and not line.endswith(":")
+
+
 def _usable(line: str) -> bool:
     """A line that can be an ingredient: not a chapter mark, not a link, not prose."""
     return bool(line) and not CHAPTER.match(line) and not URL.search(line) \
@@ -76,19 +99,23 @@ def ingredient_lines(description: str) -> list[str]:
     for i, row in enumerate(rows):
         if INGREDIENTS_HEADING.match(row):
             block = _block(rows[i + 1:])
-            if block:
+            # a heading says a list follows, so two lines can be one ("2 cups rice", "1
+            # onion"); a short block that does not read as a list ("Thanks for watching!") is not
+            if len(block) >= MIN_RUN or (block and all(map(_ingredient_like, block))):
                 return block[:MAX_LINES]
     return _longest_run(rows)[:MAX_LINES]
 
 
 def _block(rows: list[str]) -> list[str]:
     """The lines under an ingredients heading: sub-headings ("For the sauce:") and blank lines
-    are skipped, and the block ends at another heading or a line that reads as prose."""
+    are skipped, and the block ends at another heading, a method step or a line that reads as
+    prose."""
     out: list[str] = []
     for row in rows:
         if not row:
             continue
-        if OTHER_HEADING.match(row) or (INGREDIENTS_HEADING.match(row) and out):
+        if OTHER_HEADING.match(row) or (INGREDIENTS_HEADING.match(row) and out) \
+                or STEP.match(_words(row)):
             break
         if SUBHEADING.match(row):
             continue
@@ -103,10 +130,12 @@ def _block(rows: list[str]) -> list[str]:
 
 
 def _longest_run(rows: list[str]) -> list[str]:
+    """With no heading to say a list follows, only lines that start with an amount: a bullet
+    or a number alone also starts every line of a method written as steps."""
     best: list[str] = []
     run: list[str] = []
     for row in [*rows, ""]:
-        if row and _usable(row) and _ingredient_like(row):
+        if row and _usable(row) and _amount_first(row):
             run.append(row)
             continue
         if len(run) > len(best):

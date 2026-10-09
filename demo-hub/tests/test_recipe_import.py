@@ -244,6 +244,23 @@ def test_a_description_with_a_list_becomes_a_doc(tmp_path: Path) -> None:
     assert linked["doc"]["source"]["channel"] == "Home Cook"
 
 
+def test_a_method_in_numbered_steps_is_not_imported_as_ingredients(tmp_path: Path) -> None:
+    """Steps would be planned as purchases in chat, and method text is never kept: a
+    description whose only list is its method offers the choice instead."""
+    net = Net()
+    net.video(VID, description="Quick pasta\n1. Boil a big pot of salted water\n2. Cook the "
+              "spaghetti until al dente\n3. Toss with butter and parmesan\n4. Serve right away")
+    importer = make_importer(tmp_path, net, youtube_api_key="yt-key")
+    result = run(importer, f"https://youtu.be/{VID}")
+    assert result["doc"] is None and result["needs"] == "choose_method"
+    assert result["warnings"] == ["The description has no ingredient list."]
+    assert net.parsed == []                                  # nothing went to parse-lines
+    # two lines under an Ingredients heading are a list
+    net.video(VID, description="Ingredients\n2 cups rice\n1 onion\nMethod\nCook it.")
+    result = run(importer, f"https://youtu.be/{VID}")
+    assert [ln["text"] for ln in result["doc"]["lines"]] == ["2 cups rice", "1 onion"]
+
+
 @pytest.mark.parametrize("status,why", [
     (403, "The YouTube Data API refused the key (quota spent, or the API not enabled for it)"),
     (400, "The YouTube Data API refused the key (not a valid API key)"),
@@ -277,7 +294,7 @@ def test_an_oembed_404_is_not_public(tmp_path: Path) -> None:
     assert (err.status, err.code) == (422, "not_public")
 
 
-# --- descriptions: ten shapes ---------------------------------------------------------------------
+# --- descriptions: sixteen shapes ----------------------------------------------------------------
 
 SAMPLES: list[tuple[str, list[str]]] = [
     ("Ingredients:\n2 cups rice\n1 onion\n3 cloves garlic\n\nInstructions:\nCook.",
@@ -305,6 +322,21 @@ SAMPLES: list[tuple[str, list[str]]] = [
       "https://amzn.to/pan my pan\n1 tbsp butter\nsalt"),
      ["2 eggs", "1 tbsp butter", "salt"]),
     ("Two lines only:\n- 1 egg\n- 1 slice toast\n\nThat's it!", []),
+    # a method written as numbered steps, with no ingredients heading, is not a list
+    (("Quick garlic butter pasta\n1. Boil a big pot of salted water\n2. Cook the spaghetti "
+      "until al dente\n3. Toss with butter and parmesan\n4. Serve right away\nEnjoy!"), []),
+    (("Steps:\n- Rinse the rice\n- Bring 2 cups water to a boil\n- Stir in the rice\n"
+      "- Simmer for 15 minutes"), []),
+    # numbered ingredient lines do start with an amount
+    ("1) 2 cups flour\n2) 1 egg\n3) 1 cup milk\n4) Whisk together",
+     ["1) 2 cups flour", "2) 1 egg", "3) 1 cup milk"]),
+    # under a heading, the list ends where the steps begin, even without a Method heading
+    (("Ingredients\n- 1 cup rice\n- 2 cups water\n- salt\n1. Rinse the rice\n"
+      "2. Boil the water"), ["- 1 cup rice", "- 2 cups water", "- salt"]),
+    # a heading says a list follows: two lines are a list there, and kept
+    ("Ingredients\n2 cups rice\n1 onion\nMethod\nCook it all.", ["2 cups rice", "1 onion"]),
+    # but a short block that does not read as a list is not one
+    ("Ingredients: in the link below\nThanks for watching!", []),
 ]
 
 
