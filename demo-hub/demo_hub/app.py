@@ -10,6 +10,7 @@
                           lines, and, on the shopper's click, a video transcribed by Gemini
 * ``/hub/sims/*``         the mcp-sim runner: scenarios, runs, start and follow jobs
 * ``/hub/demo/reset``     reseed pantry's database and reload the demo origin evidence
+* ``/hub/calendar/*``     opt-in Google Calendar sync of the approved meal plan (gcal_routes.py)
 
 Secrets (the pantry bearer token, the ContextForge JWT, the Gemini key) stay in this process;
 the browser only ever talks to the hub. ``guard.py`` checks every request first: the hub's own
@@ -42,9 +43,10 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from demo_hub import mcp_targets, meal_plans, pricing
+from demo_hub import gcal_routes, mcp_targets, meal_plans, pricing
 from demo_hub.agent import AGENT_TARGETS, Agent, CartError
 from demo_hub.evals import evaluate
+from demo_hub.gcal_sync import CalendarSync
 from demo_hub.guard import Guard
 from demo_hub.images import ImageCache, ImageError
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
@@ -171,7 +173,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     images = ImageCache(settings.images_dir or scratch / "images")
     http_stats = HttpStats()
     stores_cache: dict[str, Any] = {"at": 0.0, "names": []}
+    calendar = CalendarSync(settings)
     app.state.settings, app.state.agent, app.state.targets = settings, agent, targets
+    app.state.calendar = calendar
     app.state.importer = importer
     app.state.traces, app.state.images, app.state.http_stats = store, images, http_stats
 
@@ -268,7 +272,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ],
             "keys": {"gemini": bool(s.gemini_api_key), "pantry_token": bool(s.pantry_mcp_token),
                      "contextforge_jwt": bool(s.contextforge_jwt),
-                     "youtube": bool(s.youtube_api_key)},
+                     "youtube": bool(s.youtube_api_key),
+                     "google_calendar_client": calendar.configured(),
+                     "google_calendar_connected": calendar.connected()},
             "agent": {"default_model": s.default_agent_model},
             "recipe_import": importer.status(),
             "video_import": importer.video_status(),
@@ -560,6 +566,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/hub/sims/jobs/{job_id}/cancel")
     async def sim_cancel(job_id: str) -> Any:
         return await _sims(sims.cancel(job_id))
+
+    # --- Google Calendar sync (opt-in; nothing happens until the shopper connects) -------------
+
+    app.include_router(gcal_routes.router(calendar))
 
     # --- demo data -----------------------------------------------------------------------------
 
