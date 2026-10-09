@@ -43,7 +43,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from demo_hub import gcal_routes, mcp_targets, meal_plans, pricing
+from demo_hub import gcal_routes, mcp_targets, meal_plans, pricing, redact
 from demo_hub.agent import AGENT_TARGETS, Agent, CartError
 from demo_hub.evals import evaluate
 from demo_hub.gcal_sync import CalendarSync
@@ -653,8 +653,11 @@ def main() -> None:  # pragma: no cover - the console entry point
     import uvicorn
 
     settings = Settings.from_env()
-    uvicorn.run(create_app(settings), host=os.environ.get("HUB_HOST", "127.0.0.1"),
-                port=settings.hub_port)
+    config = uvicorn.Config(create_app(settings), host=os.environ.get("HUB_HOST", "127.0.0.1"),
+                            port=settings.hub_port)
+    # after uvicorn has set up its loggers: the access log never shows an OAuth code or state
+    redact.install()
+    uvicorn.Server(config).run()
 
 
 if __name__ == "__main__":  # pragma: no cover
