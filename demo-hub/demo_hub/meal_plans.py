@@ -8,9 +8,12 @@ for the turn (``MealTurn``), and tells the model in one ``[meals]`` note (at mos
 characters). When the model calls ``plan_meals``, the hub fills in what the model would get
 wrong (``fill``):
 
-- ``dishes``: the parse's exact and plural matches, when the model sent none. Dishes the model
-  sent are used, except one naming a recipe the parse holds only as a proposal, which stays a
-  proposal; every difference from the parse is listed on the result (``with_differences``);
+- ``dishes``: the parse's exact and plural matches, with the counts the shopper wrote. When the
+  parse matched anything, the model's own dishes never decide what is placed: a recipe it adds
+  or swaps in (Granite once replaced the "briyani" proposal with Simple Chicken Curry) is not
+  placed, and every difference from the parse is listed on the result (``with_differences``)
+  for the model to ask the shopper about. The model's dishes are used only when the parse
+  matched nothing;
 - ``proposed``: the parse's alias and fuzzy matches, which pantry never places: the shopper
   says Use or Not this on the card;
 - ``days``: the period the shopper wrote ("in 2 weeks"), over the model's;
@@ -264,18 +267,12 @@ def fill(arguments: dict[str, Any], turn: MealTurn | None, context: dict[str, An
     out = {k: v for k, v in arguments.items() if k not in HIDDEN}
     if turn is not None:
         given = _dish_list(arguments.get("dishes"))
-        proposed = [dict(p) for p in turn.proposed]
-        if given is None:
-            out["dishes"] = [dict(d) for d in turn.dishes]
-        else:
-            keep = []
-            for d in given:
-                p = next((p for p in turn.proposed if _same(str(d["recipe"]), p["recipe_key"],
-                                                            turn)), None)
-                if p is None:
-                    keep.append(d)
-            out["dishes"] = keep
-        out["proposed"] = proposed
+        # The shopper's words decide what is placed (G10): with a parse that matched anything,
+        # a dish the model adds, swaps in or recounts is reported back (``differences``), never
+        # placed without the shopper.
+        out["dishes"] = ([dict(d) for d in turn.dishes] if given is None or turn.found
+                         else given)
+        out["proposed"] = [dict(p) for p in turn.proposed]
         if turn.period_days:
             out["days"] = turn.period_days
     if context:
@@ -288,10 +285,11 @@ def fill(arguments: dict[str, Any], turn: MealTurn | None, context: dict[str, An
 
 
 def differences(arguments: dict[str, Any], turn: MealTurn | None) -> list[str]:
-    """How the arguments the model sent differ from what the shopper wrote (the parse): another
-    number of days, dishes missing or added, other counts, and a dish that needs the shopper's
-    OK, which stays a proposal. Only the days when the model sent no dishes (the hub's are the
-    parse's); [] with no parse."""
+    """How the arguments the model sent differ from what the shopper wrote (the parse), and what
+    the plan does instead (``fill``): another number of days or other counts (the shopper's are
+    used), a dish the model left out (placed anyway), one it added (not placed: ask the shopper
+    first), and one that needs the shopper's OK (a proposal). Only the days when the model sent
+    no dishes (the hub's are the parse's); [] with no parse."""
     if turn is None:
         return []
     out = []
@@ -313,16 +311,17 @@ def differences(arguments: dict[str, Any], turn: MealTurn | None) -> list[str]:
             continue
         dish = next((x for x in turn.dishes if _same(name, x["recipe"], turn)), None)
         if dish is None:
-            out.append(f"{name} ({count}) is not in the shopper's message")
+            out.append(f"{name} ({count}) is not in the shopper's message, so it is not "
+                       "placed: ask the shopper before adding it")
             continue
         matched.add(dish["recipe"])
         if count != dish["count"]:
-            out.append(f"{name}: {count} meals, the shopper asked for {dish['count']}")
+            out.append(f"{name}: {count} meals, the shopper asked for {dish['count']}, which "
+                       "the plan uses")
     for x in turn.dishes:
         if x["recipe"] not in matched:
             out.append(f"the shopper also asked for {x['count']} "
-                       f"{turn.titles.get(x['recipe'], x['recipe'])}, which is not in your "
-                       "dishes")
+                       f"{turn.titles.get(x['recipe'], x['recipe'])}, which the plan includes")
     return [f"Differs from the shopper's message: {d}." for d in out]
 
 

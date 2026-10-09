@@ -355,37 +355,57 @@ def test_fuzzy_and_alias_matches_are_never_placed_only_proposed(pantry: Any) -> 
                             "+ 7 mango milkshakes in 2 weeks")
     [(_, sent)] = pantry
     placed = {d["recipe"] for d in sent["dishes"]}
-    assert placed == {"Chicken Fried Rice", "Mango Milkshake"}     # the model's own names
+    assert placed == {RICE, SHAKE}                  # the parse's matches, not the model's names
     assert [(p["recipe_key"], p["how"]) for p in sent["proposed"]] == [
         (PIZZA, "fuzzy"), (BIRYANI, "alias")]
     summary = next(e for e in events if e["type"] == "assistant")["plans"][0]["summary"]
-    assert {m["recipe_key"] for m in summary["meals"]} == {"Chicken Fried Rice",
-                                                           "Mango Milkshake"}
+    assert {m["recipe_key"] for m in summary["meals"]} == {RICE, SHAKE}
     assert [p["recipe_key"] for p in summary["proposals"]] == [PIZZA, BIRYANI]
     warnings = summary["warnings"]
     assert any("Pepperoni Pizza: the shopper wrote \"peperoni piza\"" in w for w in warnings)
     assert any("Chicken Biryani: the shopper wrote \"chicken briyani\"" in w for w in warnings)
 
 
-def test_model_dishes_are_used_and_their_differences_listed(pantry: Any) -> None:
+def test_the_shoppers_dishes_are_placed_and_the_models_differences_listed(pantry: Any) -> None:
     own = {"id": "c1", "name": "plan_meals", "arguments": {"days": 7, "dishes": [
         {"recipe": "Pepperoni Pizza", "count": 2}, {"recipe": "Garlic Bread", "count": 1}]}}
     agent, _, _, _ = make_agent(turn(calls=[own]), turn("Done."))
     events, conv = chat(agent, SENTENCE)
     [(_, sent)] = pantry
-    assert sent["dishes"] == own["arguments"]["dishes"]
+    assert sent["dishes"] == PARSED_DISHES
     assert sent["days"] == 14 and sent["proposed"] == PARSED_PROPOSALS
     result = next(e for e in events if e["type"] == "tool_result")
     warnings = result["structured"]["summary"]["warnings"]
     lead = "Differs from the shopper's message: "
     assert warnings == [lead + w for w in (
         "days 7: the shopper wrote 14 days, which the plan uses.",
-        "Pepperoni Pizza: 2 meals, the shopper asked for 3.",
-        "Garlic Bread (1) is not in the shopper's message.",
-        "the shopper also asked for 2 Chicken Fried Rice, which is not in your dishes.",
-        "the shopper also asked for 7 Mango Milkshake, which is not in your dishes.")]
+        "Pepperoni Pizza: 2 meals, the shopper asked for 3, which the plan uses.",
+        ("Garlic Bread (1) is not in the shopper's message, so it is not placed: ask the "
+         "shopper before adding it."),
+        "the shopper also asked for 2 Chicken Fried Rice, which the plan includes.",
+        "the shopper also asked for 7 Mango Milkshake, which the plan includes.")]
     read = next(m["content"] for m in conv.messages if m.get("role") == "tool")
     assert "warning: Differs from the shopper's message: days 7" in read
+
+
+def test_a_recipe_the_model_swaps_in_for_a_proposal_is_never_placed(pantry: Any) -> None:
+    # Granite's first live run: it planned the library's chicken curry and sent it in place of
+    # the "briyani" proposal, which would have put a dish the shopper never named on the plan.
+    swap = {"id": "c1", "name": "plan_meals", "arguments": {"days": 14, "dishes": [
+        {"recipe": "Pepperoni Pizza", "count": 3}, {"recipe": "Chicken Fried Rice", "count": 2},
+        {"recipe": "Simple Chicken Curry", "count": 3},
+        {"recipe": "Mango Milkshake", "count": 7, "slot": "snack"}]}}
+    agent, _, _, _ = make_agent(turn(calls=[swap]), turn("Done."))
+    events, _ = chat(agent, SENTENCE)
+    [(_, sent)] = pantry
+    assert sent["dishes"] == PARSED_DISHES
+    assert "Simple Chicken Curry" not in {d["recipe"] for d in sent["dishes"]}
+    assert [p["recipe_key"] for p in sent["proposed"]] == [BIRYANI]
+    warnings = next(e for e in events if e["type"] == "tool_result")[
+        "structured"]["summary"]["warnings"]
+    assert ("Differs from the shopper's message: Simple Chicken Curry (3) is not in the "
+            "shopper's message, so it is not placed: ask the shopper before adding it."
+            in warnings)
 
 
 def test_malformed_dishes_are_replaced_by_the_parse(pantry: Any) -> None:

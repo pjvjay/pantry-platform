@@ -72,11 +72,15 @@ The hub sets the rest:
 | `start_date` | tomorrow in Vancouver; pantry uses it only when there is no current plan |
 | `lat`, `lon`, `max_km` | the shopper's location, as for every plan tool |
 
-**Model-supplied dishes are used**, with one exception: a dish naming a recipe the parse holds
-only as a proposal ("Chicken Biryani" when the shopper wrote "briyani") stays a proposal. Every
-difference from the parse (other counts, dishes missing or added, another period, a dish moved
-to the proposals) is listed first among the result's warnings, prefixed "Differs from the
-shopper's message:", where the model reads it.
+**The shopper's words decide what is placed.** When the parse matched anything, the dishes sent
+to pantry are the parse's exact and plural matches with the shopper's counts, whatever the model
+sent. A recipe the model adds or swaps in is not placed: in the first live run Granite planned
+Simple Chicken Curry and sent it in place of the "briyani" proposal, which would have put a
+dish the shopper never named on the calendar. A name that needs the shopper's OK stays a
+proposal. Every difference from the parse (other counts, a dish missing or added, another
+period, a dish moved to the proposals) is listed first among the result's warnings, prefixed
+"Differs from the shopper's message:", where the model reads it and can ask the shopper. The
+model's own dishes are used only when the parse matched nothing.
 
 ## When the model makes no tool call (Granite-first)
 
