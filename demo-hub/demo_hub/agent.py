@@ -624,6 +624,9 @@ class Agent:
                           else system_prompt(self.settings)}
                 first_result = len(conv.tool_log)        # this turn's results start here
                 conv.turn_first = first_result
+                # a card's ref is what opens the cart's Options: none while cart alternatives
+                # are off, though plan_from_lines still brings its basis back for the evals
+                refs = first_result if self.settings.cart_alternatives else None
                 nudged = False
                 conv.turn_calls.clear()
                 for steps in range(1, self.settings.agent_max_steps + 1):
@@ -675,7 +678,7 @@ class Agent:
                         # The browser draws the plans themselves (`plans`) under `reply`.
                         results = [r for _, r in conv.tool_log[first_result:]]
                         cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY,
-                                           start=first_result)
+                                           start=refs)
                         text = with_tables(text, plan_tables(results))
                     if not turn.tool_calls and not text.strip() and turn.output_tokens \
                             and not nudged:
@@ -712,8 +715,7 @@ class Agent:
                 tables = plan_tables(results)
                 if tables:
                     reply = "The model did not finish its summary; here is the plan it made."
-                    cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY,
-                                       start=first_result)
+                    cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY, start=refs)
                     yield {"type": "assistant", "step": steps, "text": with_tables(reply, tables),
                            **({"reply": reply, "plans": cards} if cards else {})}
                 yield self._done(conv, steps, "step budget reached", started)

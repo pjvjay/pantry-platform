@@ -355,6 +355,9 @@ def test_plan_from_lines_asks_for_its_basis_with_cart_alternatives_off(pantry: A
     report = evaluate(events, [], "gemini:m", plans=agent.turn_plans(conv))
     check = next(c for c in report["checks"] if c["name"] == "import_grounded")
     assert check["passed"], check
+    # the basis is for the eval only: the card offers no Options the hub would then refuse
+    [card] = next(e for e in events if e["type"] == "assistant")["plans"]
+    assert "ref" not in card and "basis" not in card["summary"]
 
 
 def test_import_grounded_does_not_apply_to_a_plan_without_its_basis(
