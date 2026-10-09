@@ -400,8 +400,10 @@ def test_a_reviewed_doc_joins_the_conversation(pantry: Any, tmp_path: Path) -> N
     imported = next(e for e in events if e["type"] == "recipe_import")
     assert imported["via"] == "console" and imported["doc_key"] == "imp:1"
     assert conv.docs["imp:1"]["key"] == "imp:1"                 # re-keyed
+    # the shopper answered the servings question in the sheet: the note says it is theirs
     assert chat_.requests[0]["messages"][-1]["content"].startswith(
-        "[import] Weeknight Dal (serves 2), from Home Cook, 2 lines, doc_key imp:1:")
+        "[import] Weeknight Dal (serves 2, your answer; the recipe does not say), from Home "
+        "Cook, 2 lines, doc_key imp:1:")
     assert "plan_from_lines" in [f["function"]["name"] for f in chat_.requests[0]["tools"]]
     [(_, sent)] = pantry
     assert [ln["quantity"] for ln in sent["lines"]] == [100.0, 200.0]

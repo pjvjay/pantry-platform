@@ -70,7 +70,9 @@ says "Reading links needs the local demo hub".
   - 2 cloves garlic, minced
   ```
 
-  At most 8,000 characters; lines that do not fit are counted, and still planned.
+  At most 8,000 characters; lines that do not fit are counted, and still planned. A servings
+  count the shopper gave in the import sheet reads `(serves 2, your answer; the recipe does not
+  say)`, so the model never reports it as the recipe's.
 - `link_reader` then offers `plan_from_lines` and **not** `fetch*` (nor the skill, which tells
   the model to fetch). The PREAMBLE says: plan it with `plan_from_lines(doc_key=...)`; do not
   fetch the link; do not retype the lines.

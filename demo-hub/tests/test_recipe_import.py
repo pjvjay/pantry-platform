@@ -165,6 +165,11 @@ def test_the_import_note_is_the_lines_and_nothing_else() -> None:
     assert import_note("imp:1", doc) == (
         "[import] Red Lentil Dal (servings not stated), from blog.example, 3 lines, "
         "doc_key imp:1:\n- 200 g red lentils\n- 2 cloves garlic, minced\n- salt, to taste")
+    stated = {**doc, "servings": 4, "servings_basis": "source"}
+    assert import_note("imp:1", stated).startswith("[import] Red Lentil Dal (serves 4), from")
+    yours = {**doc, "servings": 2, "servings_basis": "your_setting"}
+    assert import_note("imp:1", yours).startswith(
+        "[import] Red Lentil Dal (serves 2, your answer; the recipe does not say), from")
     big = {**doc, "lines": [{"name": "x" * 200, "quantity": 1.0, "unit": "g", "note": "y" * 250}
                             for _ in range(60)]}
     note = import_note("imp:2", big)

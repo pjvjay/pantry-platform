@@ -86,16 +86,23 @@ def _amount(line: dict[str, Any]) -> str:
 def import_note(doc_key: str, doc: dict[str, Any], limit: int = MAX_NOTE) -> str:
     """What the model reads of an imported recipe, before the shopper's words:
 
-        [import] <title> (serves N | servings not stated), from <site or channel>, K lines,
-        doc_key imp:N:
+        [import] <title> (serves N | serves N, your answer; the recipe does not say |
+        servings not stated), from <site or channel>, K lines, doc_key imp:N:
         - 400 g spaghetti
+
+    A servings count the shopper gave in the import sheet (servings_basis your_setting) is
+    said to be theirs, so the model never reports it as the recipe's own.
 
     Only the parsed lines (each at most 300 characters, at most 60) and the title, never the
     page or the description. At most ``limit`` characters: lines that do not fit are counted,
     and planning still uses all of them (the hub fills them in from the doc)."""
     source = doc.get("source") or {}
     where = source.get("channel") or source.get("site") or "the shopper's paste"
-    servings = f"serves {doc['servings']}" if doc.get("servings") else "servings not stated"
+    servings = "servings not stated"
+    if doc.get("servings"):
+        servings = f"serves {doc['servings']}" + (
+            ", your answer; the recipe does not say"
+            if doc.get("servings_basis") == "your_setting" else "")
     lines = doc.get("lines") or []
     head = (f"[import] {doc.get('title')} ({servings}), from {where}, {len(lines)} lines, "
             f"doc_key {doc_key}:")
