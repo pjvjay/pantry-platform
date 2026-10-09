@@ -13,6 +13,10 @@ lines, about a fifth of the tokens (reading ran at 10-15 tokens/s on the demo la
 cart's Options dialog and a swap name the plan by it. A week card links to the Meal plan.
 ``cart_note`` is the line the model reads, before the shopper's next message, about a swap the
 shopper made in the cart.
+
+A meal plan (pantry's plan_meals) is a draft the shopper applies in the Meal plan: its card
+carries the ops to apply, the plan's base rev and "Open in Meal plan"; ``mealplan_table`` is
+its Markdown, and a local model reads it as at most 12 lines (``mealplan_for_model``).
 """
 
 from __future__ import annotations
@@ -25,6 +29,10 @@ WEEK_TOOLS = {"plan_week"}
 # A week card has no basis (each day's plan would make it large), so it offers no Options; the
 # Meal plan opens it as a draft whose every trip line has them.
 WEEK_LINKS = ({"label": "Open in Meal plan", "href": "#/mealplan?from=week"},)
+MEALPLAN_TOOLS = {"plan_meals"}
+MEALPLAN_LINKS = ({"label": "Open in Meal plan", "href": "#/mealplan?from=assistant"},)
+MEALPLAN_MODEL_LINES = 12
+MEALPLAN_MODEL_CHARS = 1500
 CART_PREFIX = "[cart]"
 CART_NOTE_CHARS = 300
 TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$")
@@ -47,6 +55,12 @@ def is_plan(structured: Any) -> bool:
 def is_week(structured: Any) -> bool:
     s = _summary(structured)
     return s is not None and isinstance(s.get("days"), list) and "shopping_list" in s
+
+
+def is_mealplan(structured: Any) -> bool:
+    """A plan_meals result: a meal-plan draft's summary."""
+    s = _summary(structured)
+    return s is not None and s.get("kind") == "mealplan" and isinstance(s.get("meals"), list)
 
 
 SWAP = "still available, not a direct match: "
@@ -161,6 +175,8 @@ def _latest(results: list[Any]) -> tuple[list[tuple[str, dict[str, Any], int]], 
             latest[f"plan:{recipe_key(s)}"] = ("plan", s, i)
         elif is_week(structured):
             latest["week"] = ("week", _summary(structured) or {}, i)
+        elif is_mealplan(structured):
+            latest["mealplan"] = ("mealplan", _summary(structured) or {}, i)
         elif is_recipe_list(structured):
             listing = structured
     return list(latest.values()), listing
@@ -190,7 +206,8 @@ def plan_tables(results: list[Any]) -> list[str]:
     """The tables for this turn's results (see _latest)."""
     plans, listing = _latest(results)
     if plans:
-        return [plan_table(s) if kind == "plan" else week_table(s) for kind, s, _ in plans]
+        return [plan_table(s) if kind == "plan" else mealplan_table(s) if kind == "mealplan"
+                else week_table(s) for kind, s, _ in plans]
     return [recipe_table(listing)] if listing else []
 
 
@@ -211,6 +228,11 @@ def plan_card(kind: str, summary: dict[str, Any], ref: int | None = None,
         card.update(ref=ref, pinned_lines=pinned_lines(summary))
     elif kind == "week":
         card["links"] = [dict(link) for link in WEEK_LINKS]
+    elif kind == "mealplan":
+        card["links"] = [dict(link) for link in MEALPLAN_LINKS]
+        card["base_rev"] = summary.get("base_rev")
+        if summary.get("drafted_from_message"):
+            card["label"] = "drafted from your message"
     return card
 
 
@@ -287,6 +309,8 @@ def with_tables(text: str, tables: list[str]) -> str:
 
 def plan_for_model(structured: Any) -> str | None:
     """A plan or week result as short lines for a local model; None for any other result."""
+    if is_mealplan(structured):
+        return mealplan_for_model(_summary(structured) or {})
     if is_plan(structured):
         s = _summary(structured) or {}
         out = [f"plan: {s.get('recipe_name')} ({s.get('recipe_slug')})"]
@@ -317,3 +341,108 @@ def plan_for_model(structured: Any) -> str | None:
         return None
     out.append("(the shopper sees these lines as a table under your answer)")
     return "\n".join(out)
+
+
+# --- meal plans (plan_meals) -------------------------------------------------------------------------
+
+_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _day(iso: Any) -> str:
+    """'2026-10-10' -> 'Sat 10 Oct'."""
+    import datetime as dt
+
+    try:
+        d = dt.date.fromisoformat(str(iso))
+    except ValueError:
+        return str(iso)
+    return f"{_DAYS[d.weekday()]} {d.day} {_MONTHS[d.month - 1]}"
+
+
+def _trip_cost(t: dict[str, Any]) -> str:
+    if t.get("total_cost") is None:
+        return "price unknown"
+    return ("at least " if t.get("total_is_floor") else "") + _money(t.get("total_cost"))
+
+
+def _dishes(items: list[dict[str, Any]]) -> str:
+    return ", ".join(f"{a.get('count')} {a.get('title')}"
+                     + (f" ({a.get('slot')})" if a.get("slot") not in (None, "dinner") else "")
+                     for a in items)
+
+
+def _proposals(s: dict[str, Any]) -> str:
+    return "; ".join(f"{p.get('count')} {p.get('title')} (you wrote \"{p.get('input')}\")"
+                     for p in s.get("proposals") or [])
+
+
+def _unmatched(s: dict[str, Any]) -> str:
+    out = []
+    for u in s.get("unmatched") or []:
+        could = ", ".join(str(c.get("title")) for c in u.get("candidates") or [])
+        out.append(f"{u.get('input')}" + (f" (could be {could})" if could else ""))
+    return "; ".join(out)
+
+
+def mealplan_table(s: dict[str, Any]) -> str:
+    """A drafted meal plan as Markdown: the meals by day, the trips, the dishes waiting for the
+    shopper's OK and the names not found. The console draws the card instead."""
+    by_day: dict[str, list[str]] = {}
+    for m in s.get("meals") or []:
+        by_day.setdefault(str(m.get("date")), []).append(
+            f"{m.get('title')}" + (f" ({m.get('slot')})" if m.get("slot") != "dinner" else "")
+            + ("" if m.get("new") else " (already planned)"))
+    out = [f"### Meal plan draft: {s.get('days')} days from {_day(s.get('start_date'))}", "",
+           "| Day | Meals |", "|---|---|"]
+    out += [f"| {_day(d)} | {', '.join(meals)} |" for d, meals in sorted(by_day.items())]
+    trips = s.get("trips") or []
+    out += ["", f"**Trips ({s.get('strategy')}, suggested):** "
+            + ("; ".join(f"{_day(t.get('date'))} {_trip_cost(t)} at "
+                         f"{', '.join(t.get('stores') or []) or 'no store'}" for t in trips)
+               or "none")]
+    if trips:
+        out.append(f"**Total:** {_trip_cost(s)} (demo prices)")
+    if s.get("proposals"):
+        out.append(f"**Needs your OK:** {_proposals(s)}")
+    if s.get("unmatched"):
+        out.append(f"**Not found:** {_unmatched(s)}")
+    if s.get("nutrition"):
+        out.append(f"**Nutrition:** {s['nutrition']}")
+    return "\n".join(out)
+
+
+def mealplan_for_model(s: dict[str, Any]) -> str:
+    """A drafted meal plan as at most MEALPLAN_MODEL_LINES short lines (and under
+    MEALPLAN_MODEL_CHARS) for a local model: what was placed, what waits for the shopper's OK,
+    what was not found, the trips and their total, the nutrition line as pantry wrote it."""
+    new = [m for m in s.get("meals") or [] if m.get("new")]
+    added = s.get("added") or []
+    lines = [(f"meal plan draft (not applied yet): {len(new)} new meal(s) over {s.get('days')} "
+              f"days from {_day(s.get('start_date'))}, each serving "
+              f"{s.get('household_servings')}")]
+    lines.append(f"placed: {_dishes(added) or 'nothing'}")
+    lines.append(f"needs the shopper's OK, not placed: {_proposals(s) or 'none'}")
+    lines.append(f"not found: {_unmatched(s) or 'none'}")
+    if s.get("unplaced"):
+        lines.append("no free slot: " + ", ".join(f"{u.get('count')} {u.get('title')}"
+                                                  for u in s["unplaced"]))
+    trips = s.get("trips") or []
+    shown = "; ".join(f"{_day(t.get('date'))} {_trip_cost(t)}" for t in trips[:4])
+    more = f" and {len(trips) - 4} more" if len(trips) > 4 else ""
+    total = s.get("total_cost")
+    lines.append(f"trips ({s.get('strategy')}, suggested): {len(trips)}: {shown or 'none'}{more}"
+                 + ("" if total is None else f"; total {_trip_cost(s)} (demo prices)"))
+    other = s.get("other_strategy")
+    if isinstance(other, dict):
+        lines.append(f"other strategy ({other.get('name')}): {other.get('trips')} trip(s), "
+                     f"{_trip_cost(other)}")
+    if s.get("nutrition"):
+        lines.append(str(s["nutrition"]))
+    lines += [f"warning: {w}" for w in (s.get("warnings") or [])[:2]]
+    lines.append("(the shopper sees the plan as a card under your answer; only they apply it "
+                 "and approve trips)")
+    lines = lines[:MEALPLAN_MODEL_LINES - 1] + lines[-1:] if len(lines) > MEALPLAN_MODEL_LINES \
+        else lines
+    text = "\n".join(_clip(line, 400) for line in lines)
+    return text if len(text) < MEALPLAN_MODEL_CHARS else text[:MEALPLAN_MODEL_CHARS - 2] + "…"

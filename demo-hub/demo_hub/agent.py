@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from demo_hub import meal_plans
 from demo_hub.answers import (
     cart_key,
     cart_note,
@@ -65,7 +66,7 @@ from demo_hub.llm import (
     parse_model,
 )
 from demo_hub.mcp_targets import TEXT_LIMIT, McpTargetError, Targets, call_tool, open_session
-from demo_hub.observers import Condition, Policy, View
+from demo_hub.observers import Condition, Policy, View, normalize
 from demo_hub.recipe_import import Importer, ImportFailure, RecipeDoc, import_note
 from demo_hub.recipe_import import result as import_result
 from demo_hub.recipe_import.youtube import video_id
@@ -80,15 +81,20 @@ REASONING_CHARS = 8_000            # a step's reasoning sent to the browser and 
 # tool_log), never sent to the model nor the browser: the plan's basis, which the cart's
 # Options dialog and a swap are built from, and which no client is trusted to send back.
 # FOR_MODEL_NESTED: paths inside the summary for the browser only ("*" is every item of a list).
-FOR_BROWSER = frozenset({"llm_calls", "burr_run", "pipeline"})
+# A meal plan's whole draft (top level) and the ops its card applies (summary.ops) are for the
+# browser too.
+FOR_BROWSER = frozenset({"llm_calls", "burr_run", "pipeline", "draft"})
 SERVER_ONLY = frozenset({"basis"})
-FOR_MODEL_NESTED = frozenset({("nutrition", "lines"), ("days", "*", "nutrition", "lines")})
+FOR_MODEL_NESTED = frozenset({("nutrition", "lines"), ("days", "*", "nutrition", "lines"),
+                              ("ops",)})
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
 # tools that take the shopper's location: the hub always sends it (models dropped it, typed it
 # and made it up: lat -74, lon -84; lon +123.11), and the distance for the two plan tools
 LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines", "plan_week", "find_product",
-                  "get_product"}
-PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines"}
+                  "get_product", "plan_meals"}
+PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines", "plan_meals"}
+# the observer whose condition has the hub read counted dishes before the model (meal_plans)
+MEAL_OBSERVER = "meal_planner"
 # plan_from_lines' reviewed recipe: the model names it by doc_key and the hub fills these in from
 # the conversation's docs (an imported link, or the console's reviewed doc), so the model never
 # retypes a line and cannot change an amount the shopper reviewed
@@ -131,6 +137,12 @@ Plans:
   are only its cheapest offer in range. With no trip, the plan chose no stores: say so.
 - Origin: report the plan's own origin_status and coverage; call get_product_origins only with the
   basket's product_ids.
+- A message that starts with [meals] lists the dishes the hub read from the shopper's words: call
+  plan_meals once with no dishes (the hub fills them in, with the dates and the shopper's plan).
+  Then say in two or three sentences how many meals were placed and the trips' total, and ask
+  about each dish that "needs your OK" and each unmatched name. Never state how long food keeps,
+  and never approve a trip or offer to: the shopper applies the plan and approves trips in the
+  Meal plan.
 - A message that starts with [cart] reports a product the shopper swapped in the cart themselves:
   use its figures for that cart from then on. Do not plan the recipe again unless asked; if you
   do, say that a new plan drops the shopper's swaps.
@@ -225,6 +237,44 @@ def lean_description(text: str, limit: int = LEAN_DESCRIPTION) -> str:
     return out
 
 
+DEFS = "#/$defs/"
+
+
+def _refs(node: Any, found: set[str]) -> None:
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith(DEFS):
+            found.add(ref[len(DEFS):])
+        for value in node.values():
+            _refs(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _refs(value, found)
+
+
+def used_defs(schema: dict[str, Any]) -> dict[str, Any]:
+    """``schema`` with only the ``$defs`` its properties still reach. A hidden argument's types
+    stay behind otherwise: plan_meals' hidden ``current`` and ``my_recipe_docs`` carried a
+    RecipeDoc, a meal plan and their parts, about 2,000 tokens a local model read for nothing."""
+    defs = schema.get("$defs")
+    if not isinstance(defs, dict):
+        return schema
+    keep: set[str] = set()
+    todo: set[str] = set()
+    _refs({k: v for k, v in schema.items() if k != "$defs"}, todo)
+    while todo:
+        name = todo.pop()
+        if name not in keep and name in defs:
+            keep.add(name)
+            _refs(defs[name], todo)
+    if keep == set(defs):
+        return schema
+    out = {k: v for k, v in schema.items() if k != "$defs"}
+    if keep:
+        out["$defs"] = {k: v for k, v in defs.items() if k in keep}
+    return out
+
+
 def lean_schema(node: Any) -> Any:
     if isinstance(node, list):
         return [lean_schema(x) for x in node]
@@ -278,6 +328,8 @@ def without(structured: Any, keys: frozenset[str] | set[str],
     if not isinstance(structured, dict):
         return structured
     out = structured
+    if keys & (out.keys() - {"summary", "full"}):    # a meal plan's draft, beside its summary
+        out = {k: v for k, v in out.items() if k not in keys}
     for part in ("summary", "full"):
         body = out.get(part)
         if isinstance(body, dict) and keys & body.keys():
@@ -491,6 +543,10 @@ class Conversation:
     turn_import: dict[str, Any] | None = None
     plan_docs: dict[int, str] = field(default_factory=dict)
     turn_first: int = 0
+    # The console's Meal plan in brief (ChatBody.meal_plan), as sent with the latest message, in
+    # memory only; and what the hub read of this turn's counted dishes (meal_plans.MealTurn).
+    meal_plan: dict[str, Any] | None = None
+    turn_meals: meal_plans.MealTurn | None = None
 
 
 def first_link(text: str) -> str | None:
@@ -500,11 +556,13 @@ def first_link(text: str) -> str | None:
 
 class Agent:
     def __init__(self, settings: Settings, targets: Targets, chat: ChatClient,
-                 importer: Importer | None = None) -> None:
+                 importer: Importer | None = None, meal_parser: Any = None) -> None:
         self.settings = settings
         self.targets = targets
         self.chat = chat
         self.importer = importer or Importer(settings)
+        # pantry's Quick add parse, (base url, body) -> result; tests pass their own
+        self.meal_parser = meal_parser or meal_plans.parse_selection
         self.conversations: OrderedDict[str, Conversation] = OrderedDict()
         self.policy = load_policy(settings.disclosure_policy)
 
@@ -548,13 +606,16 @@ class Agent:
         return await self.chat.warm(model, [system], functions)
 
     async def run(self, conv: Conversation, user_text: str,
-                  recipe_doc: RecipeDoc | None = None) -> AsyncIterator[dict[str, Any]]:
+                  recipe_doc: RecipeDoc | None = None,
+                  meal_plan: dict[str, Any] | None = None) -> AsyncIterator[dict[str, Any]]:
         """One turn. ``recipe_doc``: a recipe the shopper reviewed in the console's import
-        sheet ("Plan this now"), joined to the conversation before the model reads anything."""
+        sheet ("Plan this now"), joined to the conversation before the model reads anything.
+        ``meal_plan``: the console's Meal plan in brief (meal_plans.MealPlanBody)."""
         if conv.lock.locked():
             yield {"type": "error", "message": "this conversation is already answering"}
             return
         async with conv.lock:
+            conv.meal_plan = meal_plan
             async for event in self._run(conv, user_text, recipe_doc):
                 yield event
 
@@ -572,6 +633,7 @@ class Agent:
         message = conv.messages[-1]
         conv.user_texts.append(user_text)
         conv.turn_import = None
+        conv.turn_meals = None
         steps = 0
         told = False
         try:
@@ -619,6 +681,16 @@ class Agent:
                     message["content"] = "\n\n".join(x for x in (notes, note, user_text) if x)
                 async for event in self._observe(conv, "turn"):
                     yield event
+                # Counted dishes are read in code too, before the model's first call.
+                meals_note = None
+                async for item in self._pre_meal_selection(conv, user_text, d):
+                    if isinstance(item, str):
+                        meals_note = item
+                    else:
+                        yield item
+                if meals_note:
+                    message["content"] = "\n\n".join(x for x in (notes, note, meals_note,
+                                                                 user_text) if x)
                 # Progressive: the skill joins the conversation when an observer enables it.
                 system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
                           else system_prompt(self.settings)}
@@ -670,8 +742,14 @@ class Agent:
                            **({"reasoning": turn.reasoning[:REASONING_CHARS]}
                               if turn.reasoning else {})}
                     conv.messages.append(turn.message)
-                    text = turn.text
+                    text = reply = turn.text
                     cards: list[dict[str, Any]] = []
+                    if not turn.tool_calls and self._draft_due(conv, first_result):
+                        # the model answered without planning the dishes the hub read: the hub
+                        # drafts the plan itself (Granite-first, G10)
+                        async for event in self._draft_meals(conv, session, steps):
+                            yield event
+                        text = reply = text or meal_plans.DRAFTED_REPLY
                     if not turn.tool_calls:
                         # the plan's table, built from its result: the shopper sees it under the
                         # model's few sentences; the model's own message stays short in history.
@@ -694,19 +772,23 @@ class Agent:
                                f"{turn.output_tokens} tokens (DEMO_LOCAL_MAX_TOKENS)"}
                     if text:
                         yield {"type": "assistant", "text": text, "step": steps,
-                               **({"reply": strip_tables(turn.text), "plans": cards}
+                               **({"reply": strip_tables(reply), "plans": cards}
                                   if cards else {})}
                     if not turn.tool_calls:
                         yield self._done(conv, steps, "answered", started)
                         return
                     for call in turn.tool_calls:
                         sent = self._with_hub_args(call["name"], call["arguments"],
-                                                   call["name"] in conv.basis_tools, conv.docs)
+                                                   call["name"] in conv.basis_tools, conv.docs,
+                                                   conv)
                         filled = sorted(k for k in sent if k not in call["arguments"])
-                        call = {**call, "arguments": sent}
+                        call = {**call, "arguments": sent, "asked": call["arguments"]}
                         yield {"type": "tool_call", "id": call["id"], "name": call["name"],
                                "arguments": sent, "step": steps,
-                               **({"filled_by_hub": filled} if filled else {})}
+                               **({"filled_by_hub": filled} if filled else {}),
+                               # what the model itself wrote, where the hub replaces some of it
+                               **({"asked": call["asked"]}
+                                  if canonical(call["name"]) == "plan_meals" else {})}
                         async for event in self._tool(conv, session, call, steps):
                             yield event
                 # out of steps after the work was done (a 3B model planned, then kept calling
@@ -725,6 +807,77 @@ class Agent:
                     yield change.event()
             yield {"type": "error", "message": str(exc)}
             yield self._done(conv, steps, "error", started)
+
+    # --- meal plans: counted dishes read before the model, a draft when it makes none ----------
+
+    def _meal_request(self, conv: Conversation) -> bool:
+        """The meal_planner observer's code conditions hold for the shopper's newest message
+        (checked here in any disclosure mode: in "all" no observer runs)."""
+        view = self._view(conv)
+        return any(c.check is not None and normalize(c.check(view))[0] is True
+                   for o in self.policy.observers if o.name == MEAL_OBSERVER
+                   for c in o.conditions)
+
+    @staticmethod
+    def _meal_tool(d: Disclosure) -> str | None:
+        """plan_meals' name on this target, when the model is offered it."""
+        return next((t["name"] for t in d.catalog if canonical(t["name"]) == "plan_meals"
+                     and d.is_offered(t["name"])), None)
+
+    async def _pre_meal_selection(self, conv: Conversation, user_text: str, d: Disclosure
+                                  ) -> AsyncIterator[dict[str, Any] | str]:
+        """Read the shopper's counted dishes with pantry's Quick add parse before the first
+        model call, when meal_planner's condition holds and plan_meals is offered (an
+        observer can withdraw it). Yields the meal_selection event, then the [meals] note (a
+        str) when the parse matched a dish. A failed parse leaves the turn to the model."""
+        if self._meal_tool(d) is None or not self._meal_request(conv):
+            return
+        started = time.perf_counter()
+        body = meal_plans.parse_request(user_text, conv.meal_plan)
+        try:
+            parse = await self.meal_parser(self.settings.pantry_api_url, body)
+        except Exception as exc:  # noqa: BLE001 - a failed parse never fails the turn
+            yield {"type": "meal_selection", "status": "failed",
+                   "error": f"{type(exc).__name__}: {exc}"[:300], "ms": _ms_since(started)}
+            return
+        turn = meal_plans.read_parse(parse)
+        conv.turn_meals = turn
+        yield {"type": "meal_selection", "status": "ok", "result": parse,
+               "note": turn.note if turn.found else None, "ms": _ms_since(started)}
+        if turn.found:
+            yield turn.note
+
+    def _draft_due(self, conv: Conversation, first_result: int) -> bool:
+        """The hub drafts the plan itself: the parse matched dishes this turn, plan_meals is
+        offered, and no plan_meals call of this turn succeeded."""
+        d = conv.disclosure
+        return (conv.turn_meals is not None and conv.turn_meals.found and d is not None
+                and self._meal_tool(d) is not None
+                and not any(tool == "plan_meals" and isinstance(r, dict)
+                            for tool, r in conv.tool_log[first_result:]))
+
+    async def _draft_meals(self, conv: Conversation, session: Any, step: int
+                           ) -> AsyncIterator[dict[str, Any]]:
+        """plan_meals called by the hub with the parsed dishes, after the model's reply. The
+        call joins the conversation as the hub's (an assistant tool call with no arguments, then
+        its result), so the model knows the draft on the next turn; the card is labelled
+        "drafted from your message"."""
+        d = conv.disclosure
+        assert d is not None
+        name = self._meal_tool(d)
+        assert name is not None
+        call_id = f"hub_{uuid.uuid4().hex[:8]}"
+        sent = self._with_hub_args(name, {}, False, conv.docs, conv)
+        conv.messages.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}]})
+        yield {"type": "tool_call", "id": call_id, "name": name, "arguments": sent, "step": step,
+               "filled_by_hub": sorted(sent), "by_hub": True}
+        async for event in self._tool(conv, session, {"id": call_id, "name": name,
+                                                      "arguments": sent}, step):
+            yield event
+        if conv.tool_log and conv.tool_log[-1][0] == "plan_meals":
+            tool, structured = conv.tool_log[-1]
+            conv.tool_log[-1] = (tool, meal_plans.drafted(structured))
 
     # --- recipe import: a link read, or a reviewed doc joined, before the model -----------------
 
@@ -980,7 +1133,8 @@ class Agent:
 
     def _with_hub_args(self, name: str, arguments: dict[str, Any],
                        takes_basis: bool = False,
-                       docs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                       docs: dict[str, dict[str, Any]] | None = None,
+                       conv: Conversation | None = None) -> dict[str, Any]:
         """The arguments the hub fills in, whatever the model sent.
 
         A location-taking tool (LOCATION_TOOLS) gets the shopper's location
@@ -998,9 +1152,15 @@ class Agent:
 
         plan_from_lines gets the reviewed recipe the model named by ``doc_key`` from ``docs``
         (the conversation's): its lines, title and servings, exactly as reviewed. Lines the
-        model wrote itself are never passed on; an unknown doc_key is refused in ``_tool``."""
+        model wrote itself are never passed on; an unknown doc_key is refused in ``_tool``.
+
+        plan_meals gets the dishes the hub read from the shopper's words, the proposals, the
+        period, the console's Meal plan and tomorrow's date (``meal_plans.fill``)."""
         tool = canonical(name)
         out = dict(arguments)
+        if tool == "plan_meals":
+            out = meal_plans.fill(out, conv.turn_meals if conv else None,
+                                  conv.meal_plan if conv else None)
         if tool == "plan_from_lines":
             for k in DOC_ARGS:
                 out.pop(k, None)
@@ -1044,19 +1204,22 @@ class Agent:
             hidden = {"basis"} if tool in BASIS_TOOLS else set()
             if tool == "plan_from_lines":
                 hidden |= DOC_ARGS
+            if tool == "plan_meals":
+                hidden |= meal_plans.HIDDEN
             locating = located and tool in LOCATION_TOOLS
             if locating:
                 hidden |= {"lat", "lon"} | ({"max_km", "verbose"}
                                             if lean and tool in PLAN_LOCATION_TOOLS else set())
             properties = schema.get("properties")
             if isinstance(properties, dict) and (locating or hidden & properties.keys()):
-                schema = {**schema,
-                          "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
-                                             if locating and k in COUNTRY_ARGS
-                                             and isinstance(v, dict) else v)
-                                         for k, v in properties.items() if k not in hidden},
-                          **({"required": [r for r in schema["required"] if r not in hidden]}
-                             if "required" in schema else {})}
+                schema = used_defs({
+                    **schema,
+                    "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
+                                       if locating and k in COUNTRY_ARGS
+                                       and isinstance(v, dict) else v)
+                                   for k, v in properties.items() if k not in hidden},
+                    **({"required": [r for r in schema["required"] if r not in hidden]}
+                       if "required" in schema else {})})
                 t = {**t, "inputSchema": schema}
             out.append(t)
         return out
@@ -1118,6 +1281,10 @@ class Agent:
             except Exception as exc:  # noqa: BLE001 - the model sees the failure
                 result = {"name": name, "is_error": True, "structured": None,
                           "text": f"{type(exc).__name__}: {exc}", "ms": 0, "truncated": False}
+            if canonical(name) == "plan_meals":
+                # the dishes the model sent, set against what the shopper wrote
+                result = meal_plans.with_differences(result, meal_plans.differences(
+                    call.get("asked") or {}, conv.turn_meals))
         local = conv.model.startswith("ollama:")
         limit = self.settings.local_result_chars if local else RESULT_CHARS_FOR_MODEL
         compact = (plan_for_model(result.get("structured"))

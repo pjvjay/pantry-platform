@@ -107,6 +107,19 @@ class Settings:
     video_import_price: tuple[float, float] = (0.0, 0.0)
     gemini_native_url: str = "https://generativelanguage.googleapis.com/v1beta"
     usage_dir: str = ""
+    # Google Calendar sync (docs/google-calendar.md): the OAuth client JSON the user downloaded
+    # (mode 600; "" or missing turns sync off), the refresh token the hub writes (mode 600) and
+    # the sync ledger's folder. HUB_OAUTH_ORIGINS: console origins that may sign in (empty: the
+    # hub's own 127.0.0.1 address and Vite's localhost:5173). The Google URLs are overridable
+    # for tests; nothing here is ever logged.
+    google_oauth_client_file: str = ""
+    google_token_file: str = ""
+    calendar_dir: str = ""
+    oauth_origins: tuple[str, ...] = ()
+    google_auth_url: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    google_token_url: str = "https://oauth2.googleapis.com/token"
+    google_revoke_url: str = "https://oauth2.googleapis.com/revoke"
+    google_calendar_url: str = "https://www.googleapis.com/calendar/v3"
 
     @staticmethod
     def from_env() -> Settings:
@@ -174,6 +187,18 @@ class Settings:
             gemini_native_url=env.get("GEMINI_NATIVE_URL", Settings.gemini_native_url)
             .rstrip("/"),
             usage_dir=env.get("DEMO_USAGE_DIR", "~/.pantry-demo/usage"),
+            google_oauth_client_file=env.get("GOOGLE_OAUTH_CLIENT_FILE",
+                                             "~/.pantry-secrets/google_oauth_client.json"),
+            google_token_file=env.get("GOOGLE_CALENDAR_TOKEN_FILE",
+                                      "~/.pantry-secrets/google_calendar_token.json"),
+            calendar_dir=env.get("DEMO_CALENDAR_DIR", "~/.pantry-demo/calendar"),
+            oauth_origins=tuple(o.strip() for o in env.get("HUB_OAUTH_ORIGINS", "").split(",")
+                                if o.strip()),
+            google_auth_url=env.get("GOOGLE_AUTH_URL", Settings.google_auth_url),
+            google_token_url=env.get("GOOGLE_TOKEN_URL", Settings.google_token_url),
+            google_revoke_url=env.get("GOOGLE_REVOKE_URL", Settings.google_revoke_url),
+            google_calendar_url=env.get("GOOGLE_CALENDAR_URL", Settings.google_calendar_url)
+            .rstrip("/"),
         )
 
 

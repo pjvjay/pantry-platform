@@ -10,6 +10,7 @@
                           lines, and, on the shopper's click, a video transcribed by Gemini
 * ``/hub/sims/*``         the mcp-sim runner: scenarios, runs, start and follow jobs
 * ``/hub/demo/reset``     reseed pantry's database and reload the demo origin evidence
+* ``/hub/calendar/*``     opt-in Google Calendar sync of the approved meal plan (gcal_routes.py)
 
 Secrets (the pantry bearer token, the ContextForge JWT, the Gemini key) stay in this process;
 the browser only ever talks to the hub. ``guard.py`` checks every request first: the hub's own
@@ -42,9 +43,10 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from demo_hub import mcp_targets, pricing
+from demo_hub import gcal_routes, mcp_targets, meal_plans, pricing, redact
 from demo_hub.agent import AGENT_TARGETS, Agent, CartError
 from demo_hub.evals import evaluate
+from demo_hub.gcal_sync import CalendarSync
 from demo_hub.guard import Guard
 from demo_hub.images import ImageCache, ImageError
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
@@ -110,6 +112,9 @@ class ChatBody(BaseModel):
     # A RecipeDoc the shopper reviewed in the import sheet ("Plan this now"): it becomes the
     # conversation's next imp:N and the model plans it with plan_from_lines. At most 64 KB.
     recipe_doc: dict[str, Any] | None = None
+    # The console's Meal plan in brief (meal_plans.MealPlanBody), sent with every message: what
+    # plan_meals drafts against. At most 64 KB, kept in memory with the conversation only.
+    meal_plan: dict[str, Any] | None = None
 
 
 class ImportBody(BaseModel):
@@ -168,7 +173,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     images = ImageCache(settings.images_dir or scratch / "images")
     http_stats = HttpStats()
     stores_cache: dict[str, Any] = {"at": 0.0, "names": []}
+    calendar = CalendarSync(settings)
     app.state.settings, app.state.agent, app.state.targets = settings, agent, targets
+    app.state.calendar = calendar
     app.state.importer = importer
     app.state.traces, app.state.images, app.state.http_stats = store, images, http_stats
 
@@ -265,7 +272,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ],
             "keys": {"gemini": bool(s.gemini_api_key), "pantry_token": bool(s.pantry_mcp_token),
                      "contextforge_jwt": bool(s.contextforge_jwt),
-                     "youtube": bool(s.youtube_api_key)},
+                     "youtube": bool(s.youtube_api_key),
+                     "google_calendar_client": calendar.configured(),
+                     "google_calendar_connected": calendar.connected()},
             "agent": {"default_model": s.default_agent_model},
             "recipe_import": importer.status(),
             "video_import": importer.video_status(),
@@ -341,6 +350,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def agent_chat(body: ChatBody) -> StreamingResponse:
         doc = _reviewed_doc(body.recipe_doc) if body.recipe_doc is not None else None
         try:
+            meal_plan = (meal_plans.meal_plan_body(body.meal_plan)
+                         if body.meal_plan is not None else None)
+        except meal_plans.MealPlanRefused as exc:
+            raise HTTPException(exc.status, exc.detail) from exc
+        try:
             conv = agent.conversation(body.conversation_id, body.model
                                       or settings.default_agent_model, body.target,
                                       body.disclosure)
@@ -359,7 +373,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # answer's evals arrive just before "done". The trace is kept even when the browser
             # goes away mid-answer, and ContextForge's spans join it once the turn is over.
             try:
-                async for event in agent.run(conv, body.message, doc):
+                async for event in agent.run(conv, body.message, doc,
+                                             **({"meal_plan": meal_plan} if meal_plan else {})):
                     if event.get("type") == "done":     # graded with the turn's end in view
                         recorder.evals = evaluate([*recorder.events, event],
                                                   await known_stores(), conv.model,
@@ -552,6 +567,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def sim_cancel(job_id: str) -> Any:
         return await _sims(sims.cancel(job_id))
 
+    # --- Google Calendar sync (opt-in; nothing happens until the shopper connects) -------------
+
+    app.include_router(gcal_routes.router(calendar))
+
     # --- demo data -----------------------------------------------------------------------------
 
     @app.post("/hub/demo/reset")
@@ -634,8 +653,11 @@ def main() -> None:  # pragma: no cover - the console entry point
     import uvicorn
 
     settings = Settings.from_env()
-    uvicorn.run(create_app(settings), host=os.environ.get("HUB_HOST", "127.0.0.1"),
-                port=settings.hub_port)
+    config = uvicorn.Config(create_app(settings), host=os.environ.get("HUB_HOST", "127.0.0.1"),
+                            port=settings.hub_port)
+    # after uvicorn has set up its loggers: the access log never shows an OAuth code or state
+    redact.install()
+    uvicorn.Server(config).run()
 
 
 if __name__ == "__main__":  # pragma: no cover

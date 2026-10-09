@@ -122,6 +122,20 @@ if [ -s "$SECRETS_DIR/youtube_api_key" ]; then
 else
   echo "  info  no YouTube Data API key: YouTube links give their title and channel only"
 fi
+# Optional: Google Calendar sync (docs/google-calendar.md). The OAuth client JSON is one you made in
+# your own Cloud project; up.sh never makes Google credentials, never prints the file, and only
+# keeps it private. Connecting happens in the console (Meal plan, Add to calendar).
+GOOGLE_CLIENT=$SECRETS_DIR/google_oauth_client.json
+if [ -f "$GOOGLE_CLIENT" ]; then
+  chmod 600 "$GOOGLE_CLIENT"
+  if [ -f "$SECRETS_DIR/google_calendar_token.json" ]; then
+    echo "  ok    Google OAuth client: calendar sync is set up, with a saved connection"
+  else
+    echo "  ok    Google OAuth client: calendar sync is set up (connect it from the console)"
+  fi
+else
+  echo "  info  no Google OAuth client ($GOOGLE_CLIENT): calendar sync is off"
+fi
 if [ -f "$STATE_DIR/pids/hub.pid" ] && kill -0 "$(cat "$STATE_DIR/pids/hub.pid")" 2>/dev/null; then
   kill "$(cat "$STATE_DIR/pids/hub.pid")" && sleep 1   # always restart: it is cheap and picks up new settings
 fi
@@ -135,7 +149,10 @@ fi
     FETCH_URL=http://127.0.0.1:$FETCH_PORT MCPSIM_UI_URL=http://127.0.0.1:$RUNNER_PORT \
     DEMO_AGENT_MODEL=$AGENT_MODEL DEMO_OBSERVER_MODEL=$OBSERVER_MODEL \
     DEMO_BURR_DIR=$PANTRY_API_DIR/.burr BURR_URL=http://127.0.0.1:$BURR_PORT \
-    YOUTUBE_API_KEY_FILE=$SECRETS_DIR/youtube_api_key DEMO_VIDEO_IMPORT=${DEMO_VIDEO_IMPORT:-0}
+    YOUTUBE_API_KEY_FILE=$SECRETS_DIR/youtube_api_key DEMO_VIDEO_IMPORT=${DEMO_VIDEO_IMPORT:-0} \
+    GOOGLE_OAUTH_CLIENT_FILE=$GOOGLE_CLIENT \
+    GOOGLE_CALENDAR_TOKEN_FILE=$SECRETS_DIR/google_calendar_token.json \
+    DEMO_CALENDAR_DIR=$STATE_DIR/calendar
   start_bg hub .venv/bin/python -m demo_hub.app
 )
 wait_for "demo hub" "http://127.0.0.1:$HUB_PORT/hub/mcp/targets" 30
