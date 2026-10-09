@@ -3,8 +3,8 @@ path, a resolver that can rebind, the socket's peer address), pantry's parse-lin
 oEmbed and Data API, Gemini, and a small stand-in for the skill's extractor.
 
 The real extractor lives in pantry-api (skills/recipe-shopper/scripts/extract_recipe.py), which
-this repo's CI does not check out; ``REAL_EXTRACTOR`` is used where it is there, and the tests
-that need it skip with that reason where it is not.
+the hub-tests job checks out at the pinned submodule; ``REAL_EXTRACTOR`` is used where it is
+there and new enough, and the tests that need it skip with the reason where it is not.
 """
 
 from __future__ import annotations
