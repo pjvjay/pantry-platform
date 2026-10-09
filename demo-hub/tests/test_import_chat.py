@@ -213,6 +213,20 @@ def test_a_page_the_hub_cannot_read_goes_to_fetch_as_before(pantry: Any, tmp_pat
     assert chat_.requests[0]["messages"][-1]["content"] == "cook https://news.example/x"
 
 
+def test_a_line_past_a_docs_bounds_names_the_line_in_chat(pantry: Any, tmp_path: Path) -> None:
+    """A pantry-api without the 1,000,000 bound: the chat's import fails naming the line (not
+    a bare import_error), and the turn reads the page with fetch as before."""
+    net = Net()
+    net.serve("https://blog.example/bread", recipe_page("Bread", ["2000000 g flour"]))
+    agent, chat_ = make_agent(tmp_path, net, turn("Reading it."))
+    events, conv = chat(agent, "cook https://blog.example/bread")
+    failed = next(e for e in events if e["type"] == "recipe_import")
+    assert failed["status"] == "failed" and failed["error"]["code"] == "bad_upstream"
+    assert failed["error"]["status"] == 502 and "line 1 (2000000 g flour)" in \
+        failed["error"]["message"]
+    assert failed["fallback"] is True and conv.docs == {}
+    assert "fetch-fetch" in [f["function"]["name"] for f in chat_.requests[0]["tools"]]
+
 def test_without_the_extractor_links_go_to_fetch(pantry: Any, tmp_path: Path) -> None:
     chat_ = ScriptedChat(turn("Reading it."))
     agent = Agent(Settings(observer_model=""), FakeTargets(), chat_)

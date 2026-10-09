@@ -130,6 +130,43 @@ def test_the_chat_route_checks_the_reviewed_doc(monkeypatch: pytest.MonkeyPatch,
     assert post(bad).status_code == 422
     huge = reviewed()                 # past pantry's bound on an amount: refused here, not at
     huge["lines"][0]["quantity"] = 2_000_000          # the plan call
-    assert post(huge).json()["detail"]["code"] == "bad_recipe_doc"
+    detail = post(huge).json()["detail"]
+    assert detail["code"] == "bad_recipe_doc"
+    # a sentence the console shows as it is, naming the line as the sheet numbers it
+    assert detail["message"].startswith("The recipe cannot be planned as it stands (line 1 "
+                                        "quantity: Input should be less than or equal to")
     assert post({**reviewed(), "lines": []}).json()["detail"]["code"] == "no_lines"
     assert len(seen) == 1
+
+
+def test_a_line_pantry_reads_past_a_docs_bounds_is_a_502_naming_it(tmp_path: Path) -> None:
+    """A pantry-api without the 1,000,000 bound reads "2000000 g flour" as 2000000.0, which no
+    RecipeDoc holds: the route answers 502 bad_upstream naming the line, never 500, and the
+    hub does not change the amount."""
+    net = Net()
+    net.serve("https://blog.example/bread", recipe_page("Bread", ["500 g water",
+                                                                  "2000000 g flour"]))
+    client, app = route_client(tmp_path, net)
+    r = client.post("/hub/recipes/import", json={"url": "https://blog.example/bread"})
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert detail["code"] == "bad_upstream" and detail["line_no"] == 2
+    assert detail["message"].startswith("pantry read line 2 (2000000 g flour) into something "
+                                        "a recipe cannot hold (quantity: Input should be less "
+                                        "than or equal to 1000000)")
+    stored = app.state.traces.get(app.state.traces.list(1)[0]["id"])
+    assert stored["spans"][0]["status"] == "error"
+
+
+def test_an_import_that_fails_unforeseen_is_a_502_not_a_500(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, app = route_client(tmp_path, Net())
+
+    async def broken(url: str, key: str = "imp:draft") -> Any:
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(app.state.importer, "import_url", broken)
+    r = client.post("/hub/recipes/import", json={"url": "https://blog.example/dal"})
+    assert r.status_code == 502
+    assert r.json()["detail"] == {"code": "import_error",
+                                  "message": "The hub could not read the link (RuntimeError)."}

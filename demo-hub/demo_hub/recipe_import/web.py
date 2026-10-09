@@ -19,7 +19,7 @@ from types import ModuleType
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from demo_hub.recipe_import.fetch import ImportFailure, Page
 
@@ -177,26 +177,55 @@ async def parse_lines(pantry_url: str, lines: list[str], *, title: str = "",
     return r.json()
 
 
+def problem(error: Any) -> str:
+    """One pydantic error as a phrase a shopper can find: "line 2 quantity: Input should be
+    less than or equal to 1000000" (a doc's lines are numbered from 1, as the sheet shows)."""
+    loc = list(error.get("loc") or ())
+    if len(loc) >= 2 and loc[0] == "lines" and isinstance(loc[1], int):
+        loc = [f"line {loc[1] + 1}", *loc[2:]]
+    where = " ".join(str(p) for p in loc) or "value"
+    return f"{where}: {error.get('msg', 'not valid')}"
+
+
 def doc_from_parsed(key: str, title: str, yield_text: str, parsed: dict[str, Any],
                     source: RecipeSource, warnings: list[str],
                     evidence: list[LineEvidence | None] | None = None,
                     amount_basis: AmountBasis | None = None,
                     confirmed: bool = True) -> RecipeDoc:
     """The RecipeDoc for parse-lines' answer. ``evidence``, ``amount_basis`` and ``confirmed``
-    override each line's (a video's timestamps, its lines unticked)."""
+    override each line's (a video's timestamps, its lines unticked).
+
+    A line pantry read into something no RecipeDoc holds is 502 bad_upstream naming that line
+    (a pantry-api without the 1,000,000 quantity bound reads "2000000 g flour" as 2000000.0):
+    the hub never changes an amount it was given, and an import never answers 500."""
     lines = []
     for i, ln in enumerate(parsed.get("lines") or []):
-        lines.append(RecipeLine(
-            line_no=int(ln["line_no"]), text=str(ln.get("text") or "")[:MAX_LINE_TEXT],
-            name=str(ln["name"])[:MAX_LINE_NAME], quantity=ln.get("quantity"),
-            unit=str(ln.get("unit") or ""), note=str(ln.get("note") or "")[:300],
-            evidence=evidence[i] if evidence and i < len(evidence) else None,
-            confirmed=confirmed, amount_basis=amount_basis or ln.get("amount_basis")
-            or "stated_by_source"))
+        text = str(ln.get("text") or "")[:MAX_LINE_TEXT]
+        try:
+            lines.append(RecipeLine(
+                line_no=int(ln["line_no"]), text=text, name=str(ln["name"])[:MAX_LINE_NAME],
+                quantity=ln.get("quantity"), unit=str(ln.get("unit") or ""),
+                note=str(ln.get("note") or "")[:300],
+                evidence=evidence[i] if evidence and i < len(evidence) else None,
+                confirmed=confirmed, amount_basis=amount_basis or ln.get("amount_basis")
+                or "stated_by_source"))
+        except ValidationError as exc:
+            raise ImportFailure(
+                502, "bad_upstream", f"pantry read line {i + 1} ({text[:80]}) into something "
+                f"a recipe cannot hold ({problem(exc.errors()[0])}). Paste the list with that "
+                "line corrected, or update pantry-api.", line_no=i + 1) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ImportFailure(502, "bad_upstream", "pantry's parse-lines answered line "
+                                f"{i + 1} without a name or a line number.",
+                                line_no=i + 1) from exc
     servings = parsed.get("servings")
     all_warnings = [*warnings, *(str(w) for w in parsed.get("warnings") or [])]
-    return RecipeDoc(key=key, title=(title or source.site or "Recipe")[:200], servings=servings,
-                     servings_stated=servings is not None,
-                     servings_basis="source" if servings is not None else None,
-                     yield_text=yield_text[:200], lines=lines, source=source,
-                     warnings=all_warnings[:20])
+    try:
+        return RecipeDoc(key=key, title=(title or source.site or "Recipe")[:200],
+                         servings=servings, servings_stated=servings is not None,
+                         servings_basis="source" if servings is not None else None,
+                         yield_text=yield_text[:200], lines=lines, source=source,
+                         warnings=all_warnings[:20])
+    except ValidationError as exc:
+        raise ImportFailure(502, "bad_upstream", "pantry's parse-lines answer is not a recipe "
+                            f"the hub can hold ({problem(exc.errors()[0])}).") from exc

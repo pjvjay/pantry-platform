@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -48,7 +49,8 @@ from demo_hub.guard import Guard
 from demo_hub.images import ImageCache, ImageError
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
 from demo_hub.mcp_targets import McpTargetError, Targets, open_session
-from demo_hub.recipe_import import Importer, ImportFailure, RecipeDoc
+from demo_hub.recipe_import import Importer, ImportFailure, RecipeDoc, without_query
+from demo_hub.recipe_import.web import problem
 from demo_hub.runs import run_view
 from demo_hub.settings import Settings
 from demo_hub.sims import PRESETS, SimsClient, SimsError
@@ -64,6 +66,8 @@ from demo_hub.telemetry import (
 TELEMETRY_KINDS = ("page", "api", "chat")
 STORES_TTL_S = 600.0
 MAX_RECIPE_DOC = 64_000          # ChatBody.recipe_doc, as UTF-8 JSON bytes
+
+log = logging.getLogger(__name__)
 
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
               "proxy-authorization", "proxy-authenticate", "host", "content-length",
@@ -476,10 +480,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         started = time.perf_counter()
         try:
             out = await call
-        except ImportFailure as exc:
+        except Exception as exc:
+            failure = exc if isinstance(exc, ImportFailure) else None
+            if failure is None:
+                # as in the chat's _pre_import: an import the hub did not foresee failing is a
+                # 502 the console can show, with the traceback in the hub's log, never a 500
+                log.exception("recipe import failed: %s", without_query(url))
+                failure = ImportFailure(502, "import_error", "The hub could not read the link "
+                                        f"({type(exc).__name__}).")
             store.save(import_trace(kind, url, (time.perf_counter() - started) * 1000,
-                                    error=exc.body()))
-            raise HTTPException(exc.status, exc.body()) from exc
+                                    error=failure.body()))
+            raise HTTPException(failure.status, failure.body()) from exc
         store.save(import_trace(kind, url, (time.perf_counter() - started) * 1000, result=out))
         return out
 
@@ -589,9 +600,12 @@ def _reviewed_doc(raw: dict[str, Any]) -> RecipeDoc:
     try:
         doc = RecipeDoc.model_validate(raw)
     except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_context=False)
         raise HTTPException(422, {"code": "bad_recipe_doc",
-                                  "errors": exc.errors(include_url=False,
-                                                       include_context=False)}) from exc
+                                  "message": "The recipe cannot be planned as it stands ("
+                                  + problem(errors[0]) + "). Correct it in the import sheet "
+                                  "and try again.",
+                                  "errors": errors}) from exc
     if not doc.lines:
         raise HTTPException(422, {"code": "no_lines", "message": "The recipe has no lines."})
     unconfirmed = [ln.line_no for ln in doc.lines if not ln.confirmed]
