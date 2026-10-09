@@ -768,7 +768,7 @@ class CalendarSync:
                         led["hash"] = op.hash
                     entries[op.item_id] = led
                     return Result(op.item_id, "conflict", True,
-                                  message="Kept your edit in Google Calendar.")
+                                  message="Kept your edit in Google Calendar")
                 if op.origin == "delete":
                     return await self._delete(client, calendar, op, entries)
                 assert op.body is not None
@@ -778,13 +778,13 @@ class CalendarSync:
                 except PreconditionFailed:
                     return _edited(op)
                 self._record(entries, op, event)
-                return Result(op.item_id, "conflict", True, message="Overwritten with the plan.")
+                return Result(op.item_id, "conflict", True, message="Overwritten with the plan")
             if op.op == "deleted_in_google":
                 if choice != "restore":
                     return None
                 event = await self._restore(client, calendar, diff, op)
                 self._record(entries, op, event)
-                return Result(op.item_id, "deleted_in_google", True, message="Restored.")
+                return Result(op.item_id, "deleted_in_google", True)
         except (QuotaExceeded, RateLimited, Unavailable, Unauthorized, OAuthError) as exc:
             raise _stop_for(exc) from exc
         except NotFound as exc:

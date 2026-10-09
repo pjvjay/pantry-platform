@@ -136,7 +136,7 @@ def test_an_edit_in_google_is_a_conflict_kept_by_default(env: CalendarEnv) -> No
     before = env.google.writes
     r = env.apply(sched, diff, {"cook-m1": "keep"})
     assert r.json()["results"] == [{"item_id": "cook-m1", "op": "conflict", "ok": True,
-                                    "message": "Kept your edit in Google Calendar."}]
+                                    "message": "Kept your edit in Google Calendar"}]
     assert env.google.writes == before
     assert items(env)["cook-m1"][0]["summary"] == "Cook: pizza night (moved to 7pm)"
     # kept: the next review shows it unchanged, until the plan changes that meal
@@ -200,7 +200,7 @@ def test_a_deletion_in_google_is_reported_and_restored_only_when_asked(env: Cale
     # restore: brought back as it was, same id
     diff = env.preview(sched).json()
     r = env.apply(sched, diff, {"cook-m2": "restore"}).json()
-    assert r["results"][0]["ok"] and r["results"][0]["message"] == "Restored."
+    assert r["results"] == [{"item_id": "cook-m2", "op": "deleted_in_google", "ok": True}]
     assert items(env)["cook-m2"][0]["id"] == ev["id"]
     assert env.preview(sched).json()["counts"]["noop"] == 5
 
