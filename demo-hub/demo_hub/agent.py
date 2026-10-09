@@ -55,8 +55,9 @@ from demo_hub.settings import Settings
 MAX_CONVERSATIONS = 50
 GOAL_PREFIX = "Goal enabled by observation"
 RESULT_CHARS_FOR_MODEL = 16_000
+REASONING_CHARS = 8_000            # a step's reasoning sent to the browser and kept in its trace
 # Plan-summary fields for the browser's trace views, never sent to the model.
-FOR_BROWSER = {"llm_calls", "burr_run"}
+FOR_BROWSER = {"llm_calls", "burr_run", "pipeline"}
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
 
 PREAMBLE = """\
@@ -298,8 +299,13 @@ class Agent:
                             conv.model = fallback
                     conv.input_tokens += turn.input_tokens
                     conv.output_tokens += turn.output_tokens
+                    # tokens from the provider's usage (Gemini), or Ollama's own counts in metrics
                     yield {"type": "llm_call", "step": steps, "model": conv.model,
-                           "tool_calls": len(turn.tool_calls), **turn.metrics}
+                           "tool_calls": len(turn.tool_calls),
+                           "prompt_tokens": turn.input_tokens,
+                           "output_tokens": turn.output_tokens, **turn.metrics,
+                           **({"reasoning": turn.reasoning[:REASONING_CHARS]}
+                              if turn.reasoning else {})}
                     conv.messages.append(turn.message)
                     if turn.text:
                         yield {"type": "assistant", "text": turn.text, "step": steps}
@@ -340,11 +346,13 @@ class Agent:
             except Exception as exc:  # noqa: BLE001 - the model sees the failure
                 result = {"name": name, "is_error": True, "structured": None,
                           "text": f"{type(exc).__name__}: {exc}", "ms": 0, "truncated": False}
-        yield {"type": "tool_result", "id": call["id"], **result, "step": step}
         limit = (self.settings.local_result_chars if conv.model.startswith("ollama:")
                  else RESULT_CHARS_FOR_MODEL)
-        conv.messages.append({"role": "tool", "tool_call_id": call["id"],
-                              "content": result_for_model(result, limit)})
+        content = result_for_model(result, limit)
+        # model_chars: how much of the result the model reads (shrunk or cut to its limit)
+        yield {"type": "tool_result", "id": call["id"], **result, "step": step,
+               "model_chars": len(content)}
+        conv.messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
         if scope:
             yield {"type": "notice", "text": f"scope violation: {name} ({scope})"}
         elif added:

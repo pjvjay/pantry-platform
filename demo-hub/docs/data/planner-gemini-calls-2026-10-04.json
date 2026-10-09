@@ -1,0 +1,223 @@
+{
+ "about": "pantry planner's Gemini calls on 2026-10-04, from pantry's per-attempt HTTP traces (httptrace.py, carried in each plan's Burr span); tests' mocked calls removed",
+ "calls": [
+  {
+   "at": "2026-10-04T22:27:36-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3.1-flash-lite",
+   "total_ms": 48621,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 503,
+     "detail": null,
+     "total_ms": 43590,
+     "wait_ms": 43566,
+     "server_ms": 43503,
+     "backoff_ms": 1000,
+     "new_connection": true
+    },
+    {
+     "n": 2,
+     "status": 200,
+     "detail": null,
+     "total_ms": 3940,
+     "wait_ms": 3929,
+     "server_ms": 3903,
+     "backoff_ms": 0,
+     "new_connection": false
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:30:12-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3.1-flash-lite",
+   "total_ms": 3493,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 3426,
+     "wait_ms": 3414,
+     "server_ms": 3374,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:30:15-07:00",
+   "step": "escalate",
+   "model": "gemini:gemini-flash-lite-latest",
+   "total_ms": 1026,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 995,
+     "wait_ms": 988,
+     "server_ms": 955,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:35:03-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3.1-flash-lite",
+   "total_ms": 13432,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 13407,
+     "wait_ms": 13403,
+     "server_ms": 13305,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:35:36-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3.1-flash-lite",
+   "total_ms": 5016,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 503,
+     "detail": "UNAVAILABLE: This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+     "total_ms": 412,
+     "wait_ms": 406,
+     "server_ms": 375,
+     "backoff_ms": 1000,
+     "new_connection": true
+    },
+    {
+     "n": 2,
+     "status": 200,
+     "detail": null,
+     "total_ms": 3570,
+     "wait_ms": 3560,
+     "server_ms": 3546,
+     "backoff_ms": 0,
+     "new_connection": false
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:35:41-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3.1-flash-lite",
+   "total_ms": 4780,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 4755,
+     "wait_ms": 4749,
+     "server_ms": 4715,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:37:08-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3.1-flash-lite",
+   "total_ms": 3171,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 3142,
+     "wait_ms": 3138,
+     "server_ms": 3036,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:37:11-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3-flash-preview",
+   "total_ms": 3100,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 3071,
+     "wait_ms": 3066,
+     "server_ms": 3033,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:37:14-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3-flash-preview",
+   "total_ms": 3390,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 3362,
+     "wait_ms": 3357,
+     "server_ms": 3324,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:37:26-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3.1-flash-lite",
+   "total_ms": 4562,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 4530,
+     "wait_ms": 4525,
+     "server_ms": 4371,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  },
+  {
+   "at": "2026-10-04T22:37:31-07:00",
+   "step": "select_products",
+   "model": "gemini:gemini-3-flash-preview",
+   "total_ms": 2859,
+   "attempts": [
+    {
+     "n": 1,
+     "status": 200,
+     "detail": null,
+     "total_ms": 2834,
+     "wait_ms": 2829,
+     "server_ms": 2735,
+     "backoff_ms": 0,
+     "new_connection": true
+    }
+   ]
+  }
+ ]
+}

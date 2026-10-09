@@ -59,6 +59,9 @@ class Settings:
     local_result_chars: int = 4000
     # Every model call's timing, for the next call's estimate ("" keeps it in memory only).
     timings_path: str = ""
+    # Assistant traces and browser measurements (JSON lines) and the image cache ("" = none).
+    traces_dir: str = ""
+    images_dir: str = ""
 
     @staticmethod
     def from_env() -> Settings:
@@ -96,6 +99,8 @@ class Settings:
             ollama_think=_flag(env.get("OLLAMA_THINK", "")),
             ollama_timeout_s=float(env.get("OLLAMA_TIMEOUT_S", str(Settings.ollama_timeout_s))),
             timings_path=env.get("LLM_TIMINGS_PATH", "~/.pantry-demo/llm-timings.jsonl"),
+            traces_dir=env.get("DEMO_TRACES_DIR", "~/.pantry-demo/traces"),
+            images_dir=env.get("DEMO_IMAGES_DIR", "~/.pantry-demo/images"),
         )
 
 

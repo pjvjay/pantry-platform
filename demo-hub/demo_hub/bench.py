@@ -33,10 +33,11 @@ from typing import Any
 
 import httpx
 
-from demo_hub.agent import Agent
+from demo_hub.agent import AGENT_TARGETS, Agent
 from demo_hub.llm import ChatClient, parse_model, split_variant
 from demo_hub.mcp_targets import Targets
 from demo_hub.settings import Settings
+from demo_hub.telemetry import TraceRecorder, TraceStore, add_gateway_spans
 
 # The read-only tools a shopper's questions need, plus near misses to choose between. The full
 # profile offers all 15, exactly as the Assistant does.
@@ -57,6 +58,12 @@ DECLINE_WORDS = ("no ", "not ", "n't", "unable", "cannot", "couldn", "isn't", "n
 
 
 # --- one run, as the grader sees it ---------------------------------------------------------------
+
+
+def canonical_tool(name: str) -> str:
+    """A tool's name as the cases write it, whichever server answered: ContextForge's
+    ``pantry-find-product`` is pantry's ``find_product``."""
+    return str(name).removeprefix("pantry-").replace("-", "_")
 
 
 @dataclass
@@ -80,6 +87,8 @@ class Run:
     stop: str = ""
     errors: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    trace_id: str = ""                       # the run's Assistant trace, when one was kept
+    answer_confidence: float | None = None   # its online evals' share of checks passed
 
     @staticmethod
     def from_events(model: str, case: str, rep: int, events: Iterable[dict[str, Any]]) -> Run:
@@ -88,7 +97,13 @@ class Run:
         for e in events:
             kind = e.get("type")
             if kind == "start":
-                run.tools_offered = list(e.get("tools") or [])
+                run.tools_offered = [canonical_tool(t) for t in e.get("tools") or []]
+            elif kind in ("observation", "tools_offered"):
+                # progressive disclosure: an observer (or discover_tools) changed the toolset
+                added = [canonical_tool(t) for t in e.get("added") or []]
+                removed = {canonical_tool(t) for t in e.get("removed") or []}
+                run.tools_offered = [t for t in run.tools_offered if t not in removed] + [
+                    t for t in added if t not in run.tools_offered]
             elif kind == "llm_call":
                 run.llm_calls.append({k: v for k, v in e.items() if k != "type"})
             elif kind == "assistant":
@@ -100,7 +115,7 @@ class Run:
                 result = e.get("structured") if e.get("structured") is not None else e.get("text")
                 run.tool_uses.append(
                     ToolUse(
-                        str(e.get("name") or call.get("name")),
+                        canonical_tool(str(e.get("name") or call.get("name"))),
                         dict(call.get("arguments") or {}),
                         bool(e.get("is_error")),
                         result,
@@ -390,12 +405,40 @@ async def run_case(
     rep: int,
     tools: frozenset[str] | None,
     disclosure: str = "all",
+    target: str = "pantry",
+    store: TraceStore | None = None,
+    stores: Iterable[str] = (),
 ) -> Run:
-    conv = agent.conversation(None, parse_variant(spec)[0], "pantry", disclosure)
-    conv.tools = tools
-    events = [e async for e in agent.run(conv, case.message)]
+    """One case, once. With a ``store`` the run is also kept as an Assistant trace (the same
+    spans, online evals and, through ContextForge, gateway spans as a turn in the browser), tagged
+    with its case, so the Metrics page and the report read bench runs like any other turn."""
+    from demo_hub.evals import evaluate  # evals grades with this module's checks
+
+    conv = agent.conversation(None, parse_variant(spec)[0], target, disclosure)
+    # through ContextForge the same tools are named pantry-<tool-with-dashes>
+    conv.tools = tools if tools is None or target == "pantry" else frozenset(
+        "pantry-" + t.replace("_", "-") for t in tools)
+    # the trace names the full spec (e.g. "#think=false"): the agent's model has the variant
+    # applied through its settings, not in its name
+    recorder = TraceRecorder(conversation_id=conv.id, model=spec, target=target,
+                             message=case.message, disclosure=disclosure)
+    events = []
+    async for e in agent.run(conv, case.message):
+        events.append(e)
+        recorder.on(e)
     agent.conversations.pop(conv.id, None)
-    return Run.from_events(spec, case.id, rep, events)
+    run = Run.from_events(spec, case.id, rep, events)
+    if store is not None:
+        recorder.evals = evaluate(events, stores, spec)
+        trace = recorder.to_dict() | {"source": "bench", "case": case.id, "rep": rep}
+        store.save(trace)
+        settings = agent.settings
+        if target != "pantry" and await add_gateway_spans(trace, settings.contextforge_url,
+                                                          settings.contextforge_jwt):
+            store.save(trace)
+        run.trace_id = trace["id"]
+        run.answer_confidence = recorder.evals["answer_confidence"]
+    return run
 
 
 def record(run: Run, checks: list[Check]) -> dict[str, Any]:
@@ -409,6 +452,8 @@ def record(run: Run, checks: list[Check]) -> dict[str, Any]:
         "stop": run.stop,
         "errors": run.errors,
         "seconds": run.seconds,
+        "trace_id": run.trace_id,
+        "answer_confidence": run.answer_confidence,
         "tools_offered": len(run.tools_offered),
         "tool_uses": [
             {"name": u.name, "arguments": u.arguments, "is_error": u.is_error, "ms": u.ms}
@@ -723,6 +768,10 @@ async def main(argv: list[str] | None = None) -> Path:
         help="all: every profile tool from the first call (as the first runs); "
         "progressive: the Assistant's observers enable them",
     )
+    parser.add_argument("--target", choices=AGENT_TARGETS, default="pantry",
+                        help="pantry: the MCP server directly; gateway-recipes: through ContextForge")
+    parser.add_argument("--no-traces", action="store_true",
+                        help="do not keep each run as an Assistant trace")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--report-only", action="store_true")
     args = parser.parse_args(argv)
@@ -755,6 +804,7 @@ async def main(argv: list[str] | None = None) -> Path:
             "num_ctx": args.num_ctx,
             "models": args.model,
             "disclosure": args.disclosure,
+            "target": args.target,
             "model_info": {},
             "demo_mode": None,
         }
@@ -768,6 +818,15 @@ async def main(argv: list[str] | None = None) -> Path:
             except (httpx.HTTPError, ValueError):
                 meta["demo_mode"] = None
         targets = Targets(settings)
+        store = None if args.no_traces else TraceStore(settings.traces_dir
+                                                       or out / "traces")
+        stores: list[str] = []
+        async with httpx.AsyncClient(timeout=10) as client:
+            try:
+                stores = [s["name"] for s in
+                          (await client.get(f"{settings.pantry_api_url}/stores")).json()]
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                stores = []
         agents = {}
         for spec in args.model:
             variant = variant_settings(settings, parse_variant(spec)[1])
@@ -779,16 +838,18 @@ async def main(argv: list[str] | None = None) -> Path:
                     if (model, case.id, rep) in done:
                         continue
                     started = time.perf_counter()
-                    run = await run_case(agents[model], model, case, rep, tools, args.disclosure)
+                    run = await run_case(agents[model], model, case, rep, tools, args.disclosure,
+                                         args.target, store, stores)
                     checks = grade(run, case)
                     rec = record(run, checks)
                     with runs_path.open("a", encoding="utf-8") as fh:
                         fh.write(json.dumps(rec) + "\n")
                     records.append(rec)
                     if model not in meta["model_info"]:
-                        meta["model_info"][model] = await ollama_model_info(
+                        meta["model_info"][model] = (await ollama_model_info(
                             settings, parse_variant(model)[0]
-                        ) | {"options": parse_variant(model)[1]}
+                        ) if model.startswith("ollama:") else {"model": model}) | {
+                            "options": parse_variant(model)[1]}
                     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
                     write_outputs(out, records, meta, reported(args.model, records))
                     print(

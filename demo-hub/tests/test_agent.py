@@ -112,7 +112,7 @@ def test_a_tool_call_then_an_answer(session: FakeSession) -> None:
                          "eta_s": 2.0}
     assert events[3]["phase"] == "writing" and events[3]["tokens"] == 3
     assert events[4] == {"type": "llm_call", "step": 1, "model": "gemini:m", "tool_calls": 1,
-                         "wall_s": 0.5}
+                         "prompt_tokens": 10, "output_tokens": 2, "wall_s": 0.5}
     assert events[5]["arguments"] == {"query": "penne"}
     assert events[6]["structured"]["items"][0]["price"] == 1.97
     assert events[-1] | {"seconds": 0} == {"type": "done", "steps": 2, "stop": "answered",
