@@ -122,8 +122,14 @@ def test_the_chat_route_checks_the_reviewed_doc(monkeypatch: pytest.MonkeyPatch,
     big = reviewed()
     big["warnings"] = ["x" * 70_000]
     assert post(big).status_code == 413
+    wide = reviewed()                 # 40,000 characters, 80,000 bytes: the cap is in bytes
+    wide["warnings"] = ["é" * 40_000]
+    assert post(wide).status_code == 413
     bad = reviewed()
     bad["lines"][0]["quantity"] = -1
     assert post(bad).status_code == 422
+    huge = reviewed()                 # past pantry's bound on an amount: refused here, not at
+    huge["lines"][0]["quantity"] = 2_000_000          # the plan call
+    assert post(huge).json()["detail"]["code"] == "bad_recipe_doc"
     assert post({**reviewed(), "lines": []}).json()["detail"]["code"] == "no_lines"
     assert len(seen) == 1

@@ -63,7 +63,7 @@ from demo_hub.telemetry import (
 
 TELEMETRY_KINDS = ("page", "api", "chat")
 STORES_TTL_S = 600.0
-MAX_RECIPE_DOC = 64_000          # ChatBody.recipe_doc, as JSON
+MAX_RECIPE_DOC = 64_000          # ChatBody.recipe_doc, as UTF-8 JSON bytes
 
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
               "proxy-authorization", "proxy-authenticate", "host", "content-length",
@@ -584,7 +584,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 def _reviewed_doc(raw: dict[str, Any]) -> RecipeDoc:
     """ChatBody.recipe_doc checked before the turn starts: 413 over 64 KB, 422 when it is not a
     RecipeDoc or a line is still unconfirmed (planning it would plan what nobody reviewed)."""
-    if len(json.dumps(raw, ensure_ascii=False)) > MAX_RECIPE_DOC:
+    if len(json.dumps(raw, ensure_ascii=False).encode("utf-8")) > MAX_RECIPE_DOC:
         raise HTTPException(413, f"recipe_doc is over {MAX_RECIPE_DOC // 1000} KB")
     try:
         doc = RecipeDoc.model_validate(raw)

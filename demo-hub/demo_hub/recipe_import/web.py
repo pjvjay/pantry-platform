@@ -27,6 +27,9 @@ MAX_DOC_LINES = 60
 MAX_LINE_TEXT = 300
 MAX_LINE_NAME = 200
 MAX_SERVINGS = 100
+# pantry's bound on a line's amount (models.MAX_LINE_QUANTITY): a doc the hub holds must be one
+# pantry plans, or the shopper's "Plan this now" would fail only at the plan call
+MAX_LINE_QUANTITY = 1_000_000
 PAGE_TYPES = {"", "text/html", "application/xhtml+xml", "application/xml", "text/xml"}
 
 AmountBasis = Literal["stated_by_source", "demo_house_amounts", "parsed_from_your_paste",
@@ -42,7 +45,8 @@ class RecipeLine(BaseModel):
     line_no: int = Field(ge=1)
     text: str = Field(max_length=MAX_LINE_TEXT)
     name: str = Field(min_length=1, max_length=MAX_LINE_NAME)
-    quantity: float | None = Field(default=None, ge=0)
+    quantity: float | None = Field(default=None, ge=0, le=MAX_LINE_QUANTITY,
+                                   allow_inf_nan=False)
     unit: str = Field(default="", max_length=40)
     note: str = Field(default="", max_length=300)
     evidence: LineEvidence | None = None
