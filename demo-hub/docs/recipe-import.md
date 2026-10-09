@@ -72,8 +72,11 @@ says "Reading links needs the local demo hub".
   The model never sees those arguments (`_plan_tools`), and any it sends are dropped. An unknown
   `doc_key` is refused by the hub, naming the known keys.
 - The console's "Plan this now" sends the reviewed doc as `ChatBody.recipe_doc`. The hub checks
-  it (413 over 64 KB; 422 `bad_recipe_doc`, `no_lines` or `unconfirmed_lines`), stores it as the
-  conversation's next `imp:N` and adds the same note.
+  it (413 over 64 KB of UTF-8 JSON; 422 `bad_recipe_doc`, with pantry's own bounds on a line,
+  `no_lines` or `unconfirmed_lines`), stores it as the conversation's next `imp:N` and adds the
+  same note. On a target without `plan_from_lines` (a gateway whose pantry tools were not
+  refreshed) the turn ends with an `error` event before the model is called, since the model
+  could only retype the lines.
 - The online eval `import_grounded` (evals.py) checks every turn that imported a recipe: each
   plan of it was `plan_from_lines`, and every planned basis line's name, quantity and unit equals
   the doc's. `plan_from_text` on an imported recipe, a changed amount or unit, or an added or

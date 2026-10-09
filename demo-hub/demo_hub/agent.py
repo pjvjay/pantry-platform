@@ -597,6 +597,14 @@ class Agent:
                 # A link is read, or the console's reviewed recipe joins, in code before the
                 # model's first call: the model then names the doc instead of reading the page.
                 note = None
+                if recipe_doc is not None and not self._plans_lines(tools):
+                    # The note would name a tool this target lacks, and the model would retype
+                    # the lines into plan_from_text: the very re-reading the doc is there to stop.
+                    yield {"type": "error", "message": f"the {conv.target} target has no "
+                           "plan_from_lines, so it cannot plan a reviewed recipe as reviewed; "
+                           "choose the pantry target, or refresh the gateway's pantry tools"}
+                    yield self._done(conv, steps, "error", started)
+                    return
                 if recipe_doc is not None:
                     note, event = self._take_doc(conv, recipe_doc)
                     yield event
@@ -720,8 +728,11 @@ class Agent:
     def _imports(self, tools: list[dict[str, Any]]) -> bool:
         """The hub reads links itself when it can (the skill's extractor is there) and the
         target can plan what it reads (plan_from_lines); otherwise links go to fetch as before."""
-        return any(canonical(t["name"]) == "plan_from_lines" for t in tools) \
-            and self.importer.available()[0]
+        return self._plans_lines(tools) and self.importer.available()[0]
+
+    @staticmethod
+    def _plans_lines(tools: list[dict[str, Any]]) -> bool:
+        return any(canonical(t["name"]) == "plan_from_lines" for t in tools)
 
     @staticmethod
     def _next_key(conv: Conversation) -> str:

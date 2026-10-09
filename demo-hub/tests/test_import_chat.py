@@ -299,6 +299,21 @@ def test_a_reviewed_doc_joins_the_conversation(pantry: Any, tmp_path: Path) -> N
     assert sent["lines"][0]["amount_basis"] == "transcribed_confirmed_by_you"
 
 
+def test_a_reviewed_doc_on_a_target_without_plan_from_lines_is_refused(
+        pantry: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A gateway not yet refreshed with plan_from_lines: the model would be told to call a tool
+    it does not have, and could only retype the lines. The turn stops before the model."""
+    from demo_hub.recipe_import import RecipeDoc
+    monkeypatch.setitem(globals(), "CATALOG",
+                        [t for t in CATALOG if t["name"] != "plan_from_lines"])
+    agent, chat_ = make_agent(tmp_path, Net(), turn("Planned."))
+    events, conv = chat(agent, "Plan this recipe", recipe_doc=RecipeDoc.model_validate(reviewed()))
+    [error] = [e for e in events if e["type"] == "error"]
+    assert "plan_from_lines" in error["message"]
+    assert events[-1]["type"] == "done" and events[-1]["stop"] == "error"
+    assert chat_.requests == [] and pantry == [] and conv.docs == {}
+
+
 def test_a_chat_import_is_a_span_on_the_turn(pantry: Any, tmp_path: Path) -> None:
     from demo_hub.telemetry import TraceRecorder, compute_metrics
     net = Net()
