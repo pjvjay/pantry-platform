@@ -164,8 +164,10 @@ def pantry(monkeypatch: pytest.MonkeyPatch) -> PantrySession:
                 error = f"unknown product id {unknown[0]} in pins."
             else:
                 structured = repriced(arguments["basis"], arguments["pins"])
+        # pantry's MCP server reports a ToolError as the SDK's prefix and its message
         return {"name": name, "is_error": bool(error), "structured": structured,
-                "text": error or text, "ms": 1.0, "truncated": False}
+                "text": f"Error executing tool {name}: {error}" if error else text, "ms": 1.0,
+                "truncated": False}
 
     monkeypatch.setattr(agent_module, "open_session", fake_open)
     monkeypatch.setattr(agent_module, "call_tool", fake_call)

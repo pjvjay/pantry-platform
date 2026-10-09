@@ -100,7 +100,7 @@ The body is `{ref: int ≥ 0, line_no: 1-60, limit?: 1-25 = 12}`. It returns 200
 | Status | When |
 |---|---|
 | 404 | Unknown conversation (`detail` says "ask again to re-plan"), unknown ref, or `DEMO_CART_ALTERNATIVES=0` |
-| 422 | The ref is not a recipe plan; the plan has no basis; pantry's own refusal (e.g. "line 9 is not a planned line; planned: 1, 2, 3."), passed through as `detail`; a body out of bounds |
+| 422 | The ref is not a recipe plan; the plan has no basis; pantry's own refusal (e.g. "line 9 is not a planned line; planned: 1, 2, 3."), passed through as `detail` without the MCP SDK's "Error executing tool …:" prefix; a body out of bounds |
 | 502 | pantry is not reachable |
 
 ### `POST /hub/agent/conversations/{cid}/swap`

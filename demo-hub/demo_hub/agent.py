@@ -352,6 +352,8 @@ def _lists(node: Any) -> list[tuple[int, list[Any]]]:
 CART_TARGET = "pantry"
 CART_GONE = ("This conversation is gone (the hub restarted or forgot it): ask again to "
              "re-plan.")
+# The MCP SDK puts this before a tool's own refusal; the shopper reads pantry's reason alone.
+TOOL_ERROR_PREFIX = re.compile(r"^Error executing tool [\w.-]+: ")
 
 
 class CartError(RuntimeError):
@@ -683,7 +685,8 @@ class Agent:
         except McpTargetError as exc:
             raise CartError(f"pantry is not reachable: {exc}", 502) from exc
         if result.get("is_error"):
-            raise CartError(str(result.get("text") or f"{tool} failed"), 422)
+            reason = TOOL_ERROR_PREFIX.sub("", str(result.get("text") or ""), count=1)
+            raise CartError(reason or f"{tool} failed", 422)
         structured = result.get("structured")
         if not isinstance(structured, dict):
             raise CartError(f"pantry's {tool} answered without data", 502)
