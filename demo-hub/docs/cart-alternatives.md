@@ -68,7 +68,7 @@ below the row above.
 | 3 | Pack fit: covers, unknown, short | A pack that is too small makes the trip total look cheaper than the recipe really costs |
 | 4 | Origin preference, only when the shopper gave one | Demo mode and the week planner put it before price too. Without a preference this key does nothing. |
 | 5 | Trip total after the swap: prices, an extra stop, travel | This is what the shopper pays. For the first 40 rows the figure is a real re-price, the same code `/swap` runs, so they agree to the cent. Rows past 40, and plans with no location, have no trip figure. |
-| 6 | Cost of the recipe's amount | Breaks ties between rows with equal trips |
+| 6 | Cost of the recipe's amount, at the price a pack where the row's trip buys it (`trip.buys_at`) | Breaks ties between rows with equal trips. The row's `offer` is the lowest price in range, but the trip skips that store when the stop costs more than it saves, so the row's price, this cost and the unit price are the trip store's: what the cart charges after "Use this" |
 | 7 | Rating, only to break an exact cent tie | The reviews are synthetic, so they never outweigh a price |
 | 8 | Catalog id | Makes the order total, so it is stable from call to call |
 
@@ -193,4 +193,6 @@ Then the S3 smoke run:
 3. Choose rank 2. Check that the total changes and "Changed by you" shows.
 4. Ask "what is my total now?". Check that the answer quotes the new total and the online
    evals pass.
-5. Ask for a week plan. Check that its card shows "Open in Meal plan".
+5. Ask for a week plan. The hub gives its card "Open in Meal plan"; the console draws the link
+   only once it has the Meal plan tab (P5), because on a console without it the link would
+   land on the Overview and drop the conversation. Before P5, check that no link is drawn.
