@@ -1,0 +1,143 @@
+# ============================================================
+# pantry-platform — tag the platform when a release train merges
+#
+# A train PR (scripts/train.py --open-pr) is the only kind of PR that
+# changes release-set.json, and verify-pins has already checked it in
+# strict mode. When it merges, this run:
+#
+#   1. checks the set strictly again, so a set that reached main some
+#      other way is never tagged
+#   2. sets the level: the largest component move since the previous
+#      platform tag is the floor, the labels of the platform PRs merged
+#      since that tag can raise it, and the 0.x policy applies
+#      (RELEASING.md)
+#   3. reserves vX.Y.Z with one API call; a rerun on the same commit
+#      continues, a tag on another commit fails (tags never move)
+#   4. publishes a GitHub Release with the component table
+#
+# Render rebuilds the public demo by itself: the train changed the FROM
+# lines in demo/Dockerfile, which its buildFilter watches. Tags made with
+# GITHUB_TOKEN start no workflows, so all of this stays in one run.
+# ============================================================
+
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: ["release-set.json"]
+  workflow_dispatch:
+    inputs:
+      level:
+        description: "Override the level (none, patch, minor, major); recorded in the notes"
+        required: false
+        default: ""
+      promote_major:
+        description: "N.0.0 to start a new major; 1.0.0 ends the 0.x policy"
+        required: false
+        default: ""
+      dry_run:
+        description: "Plan and print the notes; tag and publish nothing"
+        type: boolean
+        default: true
+
+# One release at a time, and never cancelled halfway: a newer run waits.
+# GitHub keeps one pending run per group and cancels the older pending run
+# when a newer one joins, so a dry run, which tags nothing, queues in a
+# group of its own and can never replace a pending release.
+concurrency:
+  group: release-pantry-platform${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '-dry-run' || '' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write          # the tag and the Release
+  pull-requests: read      # the labels of the PRs merged since the last tag
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The platform is released from main only. A dispatch from another
+      # branch would tag that branch's commit, and main's next plan, which
+      # reads only the tags merged into main, would pick the same version
+      # again and fail at the tag. A dry run tags nothing, so it may run on
+      # any branch.
+      - name: Main only
+        if: github.ref != 'refs/heads/main' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: |
+          echo "::error::the platform is released from main, not $GITHUB_REF: dispatch from main, or tick dry_run to only plan"
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0          # tags and history, in submodules too
+
+      - name: The set is coherent (strict)
+        run: python3 scripts/verify_release_set.py --mode strict --fetch --registry
+
+      - name: Previous release set
+        id: previous
+        run: |
+          set -euo pipefail
+          prev=$(git tag --merged HEAD --list 'v*' --sort=-v:refname \
+                 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -n "$prev" ] && git cat-file -e "$prev:release-set.json" 2>/dev/null; then
+            git show "$prev:release-set.json" > "$RUNNER_TEMP/previous-set.json"
+            echo "path=$RUNNER_TEMP/previous-set.json" >> "$GITHUB_OUTPUT"
+          fi
+          echo "previous platform tag: ${prev:-none}"
+
+      - name: Component level
+        id: distance
+        uses: ./.github/actions/semver-labels
+        with:
+          command: platform-level
+          release-set: release-set.json
+          previous-set: ${{ steps.previous.outputs.path }}
+
+      - name: Plan
+        id: plan
+        uses: ./.github/actions/semver-labels
+        with:
+          command: plan
+          floor: ${{ steps.distance.outputs.level }}
+          level: ${{ inputs.level }}
+          promote-major: ${{ inputs.promote_major }}
+          by: "@${{ github.actor }} in run ${{ github.run_id }}"
+          plan-file: ${{ runner.temp }}/plan.json
+
+      - name: Notes
+        if: steps.plan.outputs.skip != 'true'
+        uses: ./.github/actions/semver-labels
+        with:
+          command: notes
+          plan-file: ${{ runner.temp }}/plan.json
+          notes-file: ${{ runner.temp }}/notes.md
+          release-set: release-set.json
+          previous-set: ${{ steps.previous.outputs.path }}
+
+      - name: Reserve the tag
+        if: steps.plan.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        uses: ./.github/actions/semver-labels
+        with:
+          command: reserve-tag
+          tag: ${{ steps.plan.outputs.tag }}
+          sha: ${{ github.sha }}
+
+      - name: GitHub Release
+        if: steps.plan.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          NOTES: ${{ runner.temp }}/notes.md
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already has a Release (a rerun); nothing to do"
+          else
+            gh release create "$TAG" --verify-tag --latest \
+              --title "pantry-platform $VERSION" --notes-file "$NOTES"
+          fi

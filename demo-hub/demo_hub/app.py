@@ -2,7 +2,7 @@
 
 * ``/pantry/``            the grocery app (pantry-frontend's built SPA, from ``SPA_DIST``)
 * ``/pantry/api/*``       pantry-api, proxied (REST, and its ``/mcp`` endpoint)
-* ``/hub/status``         every service's health, versions and links
+* ``/hub/status``         every service's health, versions and links, and the release block
 * ``/hub/mcp/*``          the MCP explorer: targets, catalog, call a tool, read, prompt
 * ``/hub/agent/*``        the Assistant: options, and a chat turn streamed as server-sent events
 * ``/hub/sims/*``         the mcp-sim runner: scenarios, runs, start and follow jobs
@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from demo_hub import mcp_targets
+from demo_hub import mcp_targets, version
 from demo_hub.agent import AGENT_TARGETS, Agent
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
 from demo_hub.mcp_targets import McpTargetError, Targets, open_session
@@ -121,6 +121,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 probe(client, s.burr_url),
             )
             servers = await probe(client, f"{s.contextforge_url}/servers", headers=cf_headers)
+        # git runs in a thread so a slow checkout never stalls the event loop.
+        release = await asyncio.to_thread(version.release_block, pantry_health=pantry.get("body"),
+                                          spa_dist=s.spa_dist)
         ollama_models = [m.get("name") for m in (ollama.get("body") or {}).get("models", [])] \
             if ollama["ok"] else []
         sim_body = sim.get("body") or {}
@@ -151,6 +154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "keys": {"gemini": bool(s.gemini_api_key), "pantry_token": bool(s.pantry_mcp_token),
                      "contextforge_jwt": bool(s.contextforge_jwt)},
             "agent": {"default_model": s.default_agent_model},
+            "release": release,
         }
 
     # --- MCP explorer --------------------------------------------------------------------------

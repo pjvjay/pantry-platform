@@ -1,0 +1,97 @@
+# ============================================================
+# pantry-db — CI build & GitOps bump
+#
+# Flow (the GitOps loop, step by step):
+#   push to main
+#     → docker build (linux/amd64 + linux/arm64)
+#     → push to GHCR: ghcr.io/pjvjay/pantry-db-migrate:dev-<sha>
+#     → bump_image_tag.py in pjvjay/pantry-gitops (no external binary)
+#     → ArgoCD detects the gitops commit and re-runs the migration
+#       Job on the next sync (PreSync hook)
+#
+# Auth:
+#   - GHCR push: the workflow's own GITHUB_TOKEN (packages: write)
+#   - gitops write-back: GITOPS_PAT repo secret — a fine-grained PAT
+#     with contents:write on pjvjay/pantry-gitops only
+# ============================================================
+
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "migrations/**"
+      - "seeds/**"
+      - "scripts/**"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pantry-db-migrate
+  GITOPS_REPO: pjvjay/pantry-gitops
+
+jobs:
+  build-push-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Verify seed.sql is up to date with the JSON seeds
+        run: |
+          python3 scripts/gen-seed-sql.py
+          git diff --exit-code seeds/seed.sql || {
+            echo "::error::seeds/seed.sql is stale — run scripts/gen-seed-sql.py and commit."; exit 1; }
+
+      - name: Set up QEMU (for the arm64 half of the build)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tag
+        id: tag
+        run: echo "tag=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+
+      - name: Bump image tag in pantry-gitops
+        run: |
+          git clone "https://x-access-token:${{ secrets.GITOPS_PAT }}@github.com/${GITOPS_REPO}.git" gitops
+          cd gitops
+          # No downloaded binary: this rewrites one `newTag:` line, which
+          # needs no dependency. The previous step curl'd a kustomize tarball
+          # with no checksum, signature or digest and executed it in a job
+          # holding write access to the deploy repo. The script ships in the
+          # repo it edits and is unit-tested.
+          python3 scripts/bump_image_tag.py \
+            "${IMAGE}" "${{ steps.tag.outputs.tag }}"
+          git config user.name  "pantry-ci"
+          git config user.email "ci@users.noreply.github.com"
+          git commit -am "bump pantry-db-migrate to ${{ steps.tag.outputs.tag }}"
+          git push
