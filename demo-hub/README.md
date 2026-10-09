@@ -17,7 +17,7 @@ Then open **http://127.0.0.1:8090/pantry/**. Stop with `scripts/down.sh`; check 
 |---|---|---|
 | **Overview** | Architecture diagram and a 7-step guided tour | — |
 | **Planner** | Plan a pasted recipe (location, distance limit, partial plans, origin prefer/exclude), a week of dinners (budget, diet tags) or a library recipe (priced at stores near the chosen location, with a trip split). Shows the parsed lines, the per-step SQL query plan, the store split, coverage, and what could not be bought | pantry REST `/plan/nl`, `/plan/week`, `/plan/{slug}` |
-| **Assistant** | Chat with a grocery agent that plans by calling MCP tools; every call and result is shown live. Paste a recipe link or a YouTube link and the hub reads its ingredient lines before the model does; the model plans exactly those lines by their key, and pages the hub cannot read go through the gateway's fetch tool as before ([docs/recipe-import.md](docs/recipe-import.md)). Click a product in a plan's cart for its ranked alternatives, and swap it: the cart re-prices with no model call and the agent hears of it next turn ([docs/cart-alternatives.md](docs/cart-alternatives.md)) | hub agent loop (Gemini, or Ollama), MCP via ContextForge `pantry-recipes` (or direct pantry, or `pantry-sim`) |
+| **Assistant** | Chat with a grocery agent that plans by calling MCP tools; every call and result is shown live. Paste a recipe link or a YouTube link and the hub reads its ingredient lines before the model does; the model plans exactly those lines by their key, and pages the hub cannot read go through the gateway's fetch tool as before ([docs/recipe-import.md](docs/recipe-import.md)). Click a product in a plan's cart for its ranked alternatives, and swap it: the cart re-prices with no model call and the agent hears of it next turn ([docs/cart-alternatives.md](docs/cart-alternatives.md)). Ask for counted dishes over one or two weeks ("3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken briyani + 7 mango milkshakes in 2 weeks"): the hub reads the dishes in code, the model drafts the plan with `plan_meals` (or the hub does, when it makes no call), and the card applies it to the Meal plan in one undo step, with misspelt names asked about, never placed ([docs/meal-plans.md](docs/meal-plans.md)) | hub agent loop (Gemini, or Ollama), MCP via ContextForge `pantry-recipes` (or direct pantry, or `pantry-sim`) |
 | **Catalog** | The planner's own lookup (`find_product`, with direct/generic/relaxed match levels) and a product's store offers, origin and evidence | REST `/products`, MCP `find_product`, `get_product` |
 | **Provenance** | Coverage, label triage, submit a label reading (an MCP write), review queue (approve / reject), and the origin ranking changing live; one-click demo-data reset | MCP resource `pantry://origins/coverage`, tools `origin_triage`, `submit_origin_evidence`, `list_origin_submissions`, `review_origin_submission`; REST `/origins/rank` |
 | **MCP explorer** | All 15 tools (forms generated from their schemas, annotations shown), 4 resources + 1 template, 3 prompts — directly on pantry with a bearer token, anonymously (refused with 401), or through ContextForge's two virtual servers | hub `/hub/mcp/*` with the official MCP SDK |
@@ -30,7 +30,9 @@ Then open **http://127.0.0.1:8090/pantry/**. Stop with `scripts/down.sh`; check 
 browser ── :8090 demo hub ─┬─ /pantry/          the built pantry-frontend
                            ├─ /pantry/api/*     → pantry API :8000 (REST + /mcp)
                            ├─ /hub/mcp/*        → MCP: pantry :8000/mcp (bearer) | ContextForge :4444 virtual servers
-                           ├─ /hub/agent/chat   → agent loop: Gemini / Ollama  ⇄  MCP tools   (server-sent events)
+                           ├─ /hub/agent/chat   → agent loop: Gemini / Ollama  ⇄  MCP tools   (server-sent events);
+                           │                      body: message, recipe_doc, meal_plan (the console's plan, ≤ 64 KB);
+                           │                      counted dishes read first by pantry /mealplan/selection/parse
                            ├─ /hub/agent/conversations/{id}/alternatives, /swap → the cart: pantry :8000/mcp directly
                            ├─ /hub/sims/*       → mcp-sim runner :8765
                            └─ /hub/status       → every service's health
@@ -269,7 +271,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 318 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 345 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
