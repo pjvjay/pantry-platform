@@ -149,7 +149,11 @@ A web page's result also has `structured_data` (`jsonld` or `microdata`, even wh
 `imp:draft`; chat re-keys it. Errors are `{"detail": {"code", "message", ...}}`:
 400 `bad_url`, 403 `not_public` / `bad_redirect`, 413 `too_large`, 422 `no_recipe_found` /
 `not_public`, 502 (`unreachable`, `http_status`, `too_many_redirects`, `pantry_unreachable`,
-`youtube_api`), 503 `import_unavailable`, 504 `timeout`.
+`pantry_error`, `bad_upstream`, `import_error`), 503 `import_unavailable`, 504 `timeout`.
+`bad_upstream` names a line pantry read into something a RecipeDoc cannot hold (a pantry-api
+without the 1,000,000 quantity bound reads "2000000 g flour" as 2000000.0), with its
+`line_no`; `import_error` is anything the hub did not foresee, with the traceback in its log.
+An import route never answers 500.
 
 `POST /hub/recipes/import/video` with `{video_id, consent: true, duration_s?}` returns an
 ImportResult with `needs: confirm_lines`, every line `confirmed: false`, each with
