@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -29,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from demo_hub.answers import plan_for_model, plan_tables, with_tables
 from demo_hub.disclosure import (
     DISCOVER,
     DISCOVER_FUNCTION,
@@ -59,46 +61,46 @@ REASONING_CHARS = 8_000            # a step's reasoning sent to the browser and 
 # Plan-summary fields for the browser's trace views, never sent to the model.
 FOR_BROWSER = {"llm_calls", "burr_run", "pipeline"}
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
+# tools that take the shopper's location: the hub always sends it (models dropped it, typed it
+# and made it up: lat -74, lon -84; lon +123.11), and the distance for the two plan tools
+LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_week", "find_product", "get_product"}
+PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text"}
+# what the plan tools' country lists take (a 3B model sent preference ["local", "organic"])
+COUNTRY_ARGS = {
+    "exclude_origin": 'country names to leave out, e.g. ["United States"]',
+    "preference": 'country names to favour, e.g. ["Canada"]; nothing else',
+}
 
 PREAMBLE = """\
-You are a grocery-planning assistant for shoppers in Vancouver, BC. You are connected to the
-pantry MCP server through tools. Every product, price, store, distance, origin and total you
-mention must come from a tool result in this conversation; never invent or estimate one, and say
-plainly when the tools cannot answer. Tool names may carry a `pantry-` prefix with dashes
-(`pantry-plan-from-text` is the skill's `plan_from_text`). For a recipe link or a pasted recipe,
-follow the recipe-shopper procedure (below, or added to the conversation when a recipe arrives).
-If a tool you need is not in your list, ask for it with discover_tools when you have it. When
-the shopper names a dish without a recipe or
-link ("stir-fry veggies for 3 meals"), write a short recipe for it yourself (a title with the
-servings, then one "- ingredient" line each) and plan it with plan_from_text, allow_partial
-true: it picks a store near the shopper for every item. For a library recipe (list_recipes),
-call plan_recipe with the shopper's lat, lon and max_km (downtown Vancouver is 49.2827,
--123.1207; 5 km unless the shopper says otherwise): without them it chooses no stores. If a
-plan call fails or times out, call it again with the same arguments, the location included;
-never drop the location to get an answer. Never answer with a recipe alone: the answer is what
-to buy, the total, the recommended trip, and what could not be found. A line's `trip_store` and
-`trip_price` say where the recommended trip buys it; its `store` and `price` are only its
-cheapest offer in range. Name a store, a trip or a shopping location only when the result shows
-it: lines without a store and no `trip` mean the plan chose no stores, so say so. How much of a
-basket's origin is verified is the plan's own `origin_status` and `coverage`; call
-get_product_origins only with the basket's product_ids, never for the whole catalog.
+You are a grocery-planning assistant for shoppers in Vancouver, BC, connected to the pantry MCP
+server through tools. Every product, price, store, distance, origin and total you mention must
+come from a tool result in this conversation; never invent or estimate one, and say plainly when
+the tools cannot answer. Tool names may carry a `pantry-` prefix with dashes (`pantry-plan-from-text`
+is `plan_from_text`). If a tool you need is not in your list, ask for it with discover_tools.
 
-Answer a plan in Markdown, in this shape and nothing more:
-### <recipe name> (<servings>)
-| Item | Product | Store | Price | Origin |
-|---|---|---|---|---|
-(one row per line: ingredient, product, trip_store and trip_price, or store and price when there
-is no trip, and origin_country or origin_status)
-**Total:** the lines' total; with a trip, its total with travel and its stop(s)
-**Origin:** origin_status and the share verified (coverage), only when origin was asked about
-**Not found:** the not_stocked, out_of_range and skipped ingredients, or "nothing"
-No other notes, no field names, no restating the table in prose. For other questions
-(a product's price, a week of dinners, where a product comes from), call the matching tool and
-report its result.
+Plans:
+- A library recipe: call plan_recipe with its slug from list_recipes (beef_rice_bowl, not
+  beef-rice-bowl). The shopper's location and distance are added for you.
+- To see which recipes can be planned, call list_recipes.
+- A dish the shopper names that is not in list_recipes and comes without a recipe or link: write
+  a short recipe for it (a title with the servings, then one "- ingredient" line each) and plan
+  it with plan_from_text, allow_partial true.
+- A recipe link or a pasted recipe: follow the recipe-shopper procedure.
+- If a plan call fails or times out, call it again with the same arguments.
+- A line's trip_store and trip_price are where the recommended trip buys it; its store and price
+  are only its cheapest offer in range. With no trip, the plan chose no stores: say so.
+- Origin: report the plan's own origin_status and coverage; call get_product_origins only with the
+  basket's product_ids.
 
-Environment notes: you cannot run scripts or open a shell here. Read a recipe page with the
-fetch tool (markdown, max_length 20000; call again with start_index if it is truncated before the
-ingredient list). The server's default shopping location is downtown Vancouver.
+After a plan or a week plan, answer in two or three sentences: the trip's total and its store(s),
+the verified origin share when origin was asked about, and anything not found. After
+list_recipes alone, answer in one sentence. The shopper sees the plan's table, or the recipe
+list, under your answer, added automatically: do not write a table or list the lines or recipes.
+For other questions (a product's price, where it comes from), call the matching tool and report
+its result briefly.
+
+You cannot run scripts or open a shell. Read a recipe page with the fetch tool (markdown,
+max_length 20000; call again with start_index if it is cut before the ingredient list).
 """
 
 
@@ -131,12 +133,75 @@ def load_policy(spec: str) -> Policy:
     return policy
 
 
-def openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{"type": "function", "function": {
-        "name": t["name"],
-        "description": (t.get("description") or "")[:1024],
-        "parameters": t.get("inputSchema") or {"type": "object", "properties": {}},
-    }} for t in tools]
+def openai_tools(tools: list[dict[str, Any]], lean: bool = False) -> list[dict[str, Any]]:
+    """The tools as function definitions. ``lean`` (local models) drops what costs reading time
+    and tells the model nothing: docstring indentation, a schema's titles, ``anyOf [X, null]``
+    around optional fields and their null defaults; and keeps a description to its first
+    paragraphs, up to LEAN_DESCRIPTION characters (plan_recipe: 1,997 characters to about 900)."""
+    out = []
+    for t in tools:
+        description = t.get("description") or ""
+        parameters = t.get("inputSchema") or {"type": "object", "properties": {}}
+        if lean:
+            description = lean_description(description)
+            parameters = lean_schema(parameters)
+        out.append({"type": "function", "function": {
+            "name": t["name"], "description": description[:1024], "parameters": parameters}})
+    return out
+
+
+LEAN_DESCRIPTION = 600
+
+
+def lean_description(text: str, limit: int = LEAN_DESCRIPTION) -> str:
+    """Paragraphs with their lines joined and indentation gone, as many whole ones as fit in
+    ``limit`` (the first always, cut at a sentence if it is longer)."""
+    paragraphs = [" ".join(line.strip() for line in p.splitlines() if line.strip())
+                  for p in re.split(r"\n\s*\n", text.strip())]
+    paragraphs = [p for p in paragraphs if p]
+    if not paragraphs:
+        return ""
+    kept = [paragraphs[0]]
+    for p in paragraphs[1:]:
+        if len("\n".join([*kept, p])) > limit:
+            break
+        kept.append(p)
+    out = "\n".join(kept)
+    if len(out) > limit:
+        cut = out[:limit].rfind(". ")
+        out = out[:cut + 1] if cut > limit // 2 else out[:limit]
+    return out
+
+
+def lean_schema(node: Any) -> Any:
+    if isinstance(node, list):
+        return [lean_schema(x) for x in node]
+    if not isinstance(node, dict):
+        return node
+    options = node.get("anyOf")
+    if isinstance(options, list) and len(options) == 2 and {"type": "null"} in options:
+        merged = {k: v for k, v in node.items() if k != "anyOf"}
+        merged.update(next(o for o in options if o != {"type": "null"}))
+        node = merged
+    return {k: lean_schema(v) for k, v in node.items()
+            if k != "title" and not (k == "default" and v is None)}
+
+
+TOOLS_PREFIX = "More tools are now available; call them like the others"
+REPEATED_CALL = ("You already called {name} with these arguments in this turn; its result is "
+                 "above. Answer the shopper from it, or call a different tool.")
+EMPTY_REPLY_NUDGE = ("Your last reply was empty or could not be read as a tool call. Call one tool "
+                     "with valid JSON arguments, or answer the shopper.")
+
+
+def announce_tools(tools: list[dict[str, Any]], lean: bool = False) -> str:
+    """Tools offered after the first step, as a message: name, description and parameters."""
+    lines = [f"{TOOLS_PREFIX}:"]
+    for t in openai_tools(tools, lean):
+        fn = t["function"]
+        lines.append(f"- {fn['name']}: {fn['description']}\n  parameters: "
+                     f"{json.dumps(fn['parameters'], ensure_ascii=False)}")
+    return "\n".join(lines)
 
 
 def result_for_model(result: dict[str, Any], limit: int = RESULT_CHARS_FOR_MODEL) -> str:
@@ -214,6 +279,11 @@ class Conversation:
     user_texts: list[str] = field(default_factory=list)       # what the observers read
     tool_log: list[tuple[str, Any]] = field(default_factory=list)   # (tool, structured result)
     observer_calls: int = 0                                     # observer-model calls so far
+    # local_stable_tools: the tools sent with the conversation's first step, kept for every
+    # later step; tools offered after it are announced in a message instead
+    fixed_tools: list[str] | None = None
+    announced: set[str] = field(default_factory=set)
+    turn_calls: set[tuple[str, str]] = field(default_factory=set)   # (tool, arguments) this turn
 
 
 class Agent:
@@ -244,6 +314,24 @@ class Agent:
             self.conversations.popitem(last=False)
         return conv
 
+    async def warm(self, model: str, target: str, disclosure: str | None = None
+                   ) -> dict[str, Any]:
+        """Have a local model read what every conversation starts with (the instructions,
+        discover_tools and the first tools, in the order a first step sends them) before the
+        shopper asks: the first step then reads only the message and any tools observers add."""
+        mode = disclosure or self.settings.assistant_disclosure
+        resolved = await self.targets.resolve(target)
+        async with open_session(resolved) as session:
+            listed = await session.list_tools()
+        tools = [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in listed.tools]
+        d = Disclosure.start(self.policy, tools, mode,
+                             {"recipe-shopper": load_skill(self.settings.recipe_shopper_skill)})
+        system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
+                  else system_prompt(self.settings)}
+        functions = ([DISCOVER_FUNCTION] if d.discoverable else []) + openai_tools(
+            self._plan_tools(d.offered_tools(), model), lean=self._lean(model))
+        return await self.chat.warm(model, [system], functions)
+
     async def run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
         if conv.lock.locked():
             yield {"type": "error", "message": "this conversation is already answering"}
@@ -271,15 +359,30 @@ class Agent:
                         {"recipe-shopper": load_skill(self.settings.recipe_shopper_skill)})
                 yield {"type": "start", "conversation_id": conv.id, "model": conv.model,
                        "target": conv.target, "tools": list(d.offered),
-                       "available": len(tools), "disclosure": d.mode}
+                       "available": len(tools), "disclosure": d.mode,
+                       "discoverable": d.discoverable}
                 async for event in self._observe(conv, "turn"):
                     yield event
                 # Progressive: the skill joins the conversation when an observer enables it.
                 system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
                           else system_prompt(self.settings)}
+                first_result = len(conv.tool_log)        # this turn's results start here
+                nudged = False
+                conv.turn_calls.clear()
                 for steps in range(1, self.settings.agent_max_steps + 1):
-                    functions = openai_tools(d.offered_tools()) + (
-                        [DISCOVER_FUNCTION] if d.discoverable else [])
+                    # discover_tools first and the rest in the order offered: a tool an observer
+                    # adds goes last, so a local model's cached prompt holds up to it
+                    offered = self._plan_tools(d.offered_tools(), conv.model)
+                    if self._stable_tools(conv):
+                        offered, later = self._split_offered(conv, offered)
+                        if later:
+                            conv.messages.append({"role": "user", "content": announce_tools(
+                                later, lean=self._lean(conv.model))})
+                            conv.announced.update(t["name"] for t in later)
+                            yield {"type": "notice", "text": "tools announced in the conversation: "
+                                   + ", ".join(t["name"] for t in later)}
+                    functions = ([DISCOVER_FUNCTION] if d.discoverable else []) + openai_tools(
+                        offered, lean=self._lean(conv.model))
                     while True:
                         # A model call can take minutes on a local CPU model: say what is awaited.
                         yield {"type": "thinking", "step": steps, "model": conv.model}
@@ -307,20 +410,112 @@ class Agent:
                            **({"reasoning": turn.reasoning[:REASONING_CHARS]}
                               if turn.reasoning else {})}
                     conv.messages.append(turn.message)
-                    if turn.text:
-                        yield {"type": "assistant", "text": turn.text, "step": steps}
+                    text = turn.text
+                    if not turn.tool_calls:
+                        # the plan's table, built from its result: the shopper sees it under the
+                        # model's few sentences; the model's own message stays short in history
+                        text = with_tables(text, plan_tables(
+                            [r for _, r in conv.tool_log[first_result:]]))
+                    if not turn.tool_calls and not text.strip() and turn.output_tokens \
+                            and not nudged:
+                        # the model wrote something that is neither text nor a readable tool
+                        # call (a small model's malformed call): ask once, then go on
+                        nudged = True
+                        conv.messages.append({"role": "user", "content": EMPTY_REPLY_NUDGE})
+                        yield {"type": "notice", "text": "the model's reply was empty or not a "
+                               "readable tool call; asked it once more"}
+                        continue
+                    if turn.finish_reason == "length" and not turn.tool_calls:
+                        yield {"type": "notice", "text": f"the model's reply was cut at "
+                               f"{turn.output_tokens} tokens (DEMO_LOCAL_MAX_TOKENS)"}
+                    if text:
+                        yield {"type": "assistant", "text": text, "step": steps}
                     if not turn.tool_calls:
                         yield self._done(conv, steps, "answered", started)
                         return
                     for call in turn.tool_calls:
+                        sent = self._with_location(call["name"], call["arguments"])
+                        filled = sorted(k for k in sent if k not in call["arguments"])
+                        call = {**call, "arguments": sent}
                         yield {"type": "tool_call", "id": call["id"], "name": call["name"],
-                               "arguments": call["arguments"], "step": steps}
+                               "arguments": sent, "step": steps,
+                               **({"filled_by_hub": filled} if filled else {})}
                         async for event in self._tool(conv, session, call, steps):
                             yield event
+                # out of steps after the work was done (a 3B model planned, then kept calling
+                # tools): the shopper still gets the plan, drawn from its result
+                tables = plan_tables([r for _, r in conv.tool_log[first_result:]])
+                if tables:
+                    yield {"type": "assistant", "step": steps, "text": with_tables(
+                        "The model did not finish its summary; here is the plan it made.", tables)}
                 yield self._done(conv, steps, "step budget reached", started)
         except (LLMError, McpTargetError) as exc:
             yield {"type": "error", "message": str(exc)}
             yield self._done(conv, steps, "error", started)
+
+    def _lean(self, model: str) -> bool:
+        return self.settings.local_lean_tools and model.startswith("ollama:")
+
+    def _with_location(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """A location-taking tool (LOCATION_TOOLS) gets the shopper's location
+        (DEMO_SHOPPER_LOCATION) from the hub: the models never see lat/lon (``_plan_tools``), so
+        none drops it (pantry would choose no stores), types it (about 30 tokens) or makes one up
+        (a 3B model sent -74, -84; the 8B sent lon +123.11). A plan's valid max_km stands;
+        without one, or outside 0.5-100 km, the shopper's."""
+        loc = self.settings.shopper_location
+        tool = canonical(name)
+        if not loc or tool not in LOCATION_TOOLS:
+            return arguments
+        out = {**arguments, "lat": loc[0], "lon": loc[1]}
+        if tool in PLAN_LOCATION_TOOLS:
+            km = arguments.get("max_km")
+            valid = isinstance(km, (int, float)) and 0.5 <= km <= 100     # H-Tiny sent max_km 0
+            out["max_km"] = km if valid else loc[2]
+        return out
+
+    def _plan_tools(self, tools: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
+        """The tools with lat/lon taken out of every location-taking tool's parameters when the
+        hub supplies the shopper's location (pantry's stores are all in Vancouver); for a local
+        model also the plan tools' max_km (the shopper's distance stands) and verbose (the full
+        plan is for the browser): two arguments a small model got wrong (max_km 0, verbose
+        true). The country lists say what they take."""
+        if not self.settings.shopper_location:
+            return tools
+        lean = self._lean(model)
+        out = []
+        for t in tools:
+            schema = t.get("inputSchema") or {}
+            tool = canonical(t["name"])
+            hidden = {"lat", "lon"} | ({"max_km", "verbose"}
+                                       if lean and tool in PLAN_LOCATION_TOOLS else set())
+            if tool in LOCATION_TOOLS and "properties" in schema:
+                schema = {**schema,
+                          "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
+                                             if k in COUNTRY_ARGS and isinstance(v, dict) else v)
+                                         for k, v in schema["properties"].items()
+                                         if k not in hidden},
+                          **({"required": [r for r in schema["required"] if r not in hidden]}
+                             if "required" in schema else {})}
+                t = {**t, "inputSchema": schema}
+            out.append(t)
+        return out
+
+    def _stable_tools(self, conv: Conversation) -> bool:
+        return (self.settings.local_stable_tools and conv.model.startswith("ollama:")
+                and conv.disclosure is not None and conv.disclosure.mode == "progressive")
+
+    @staticmethod
+    def _split_offered(conv: Conversation, offered: list[dict[str, Any]]
+                       ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """(the tools block, the tools to announce now). The block is fixed at the first step:
+        a tool offered later is described in a message at the end of the conversation, so the
+        prompt only grows and a local model's cache (a hybrid model's checkpoints too) holds."""
+        if conv.fixed_tools is None:
+            conv.fixed_tools = [t["name"] for t in offered]
+        fixed = set(conv.fixed_tools)
+        block = [t for t in offered if t["name"] in fixed]
+        later = [t for t in offered if t["name"] not in fixed and t["name"] not in conv.announced]
+        return block, later
 
     async def _tool(self, conv: Conversation, session: Any, call: dict[str, Any],
                     step: int) -> AsyncIterator[dict[str, Any]]:
@@ -329,7 +524,15 @@ class Agent:
         d = conv.disclosure
         assert d is not None
         name, added, scope = call["name"], [], None
-        if name == DISCOVER and d.discoverable:
+        key = (name, json.dumps(call["arguments"], sort_keys=True))
+        repeated = key in conv.turn_calls
+        conv.turn_calls.add(key)
+        if repeated:
+            # the same call again in this turn (the 8B sent one plan_recipe eight times): not run
+            # again; the model is pointed at the result it already has
+            result = {"name": name, "is_error": False, "structured": None, "ms": 0.0,
+                      "truncated": False, "text": REPEATED_CALL.format(name=name)}
+        elif name == DISCOVER and d.discoverable:
             query = str(call["arguments"].get("query", ""))
             text, added = d.discover(query)
             result = {"name": name, "is_error": False, "structured": None, "text": text,
@@ -346,14 +549,20 @@ class Agent:
             except Exception as exc:  # noqa: BLE001 - the model sees the failure
                 result = {"name": name, "is_error": True, "structured": None,
                           "text": f"{type(exc).__name__}: {exc}", "ms": 0, "truncated": False}
-        limit = (self.settings.local_result_chars if conv.model.startswith("ollama:")
-                 else RESULT_CHARS_FOR_MODEL)
-        content = result_for_model(result, limit)
+        local = conv.model.startswith("ollama:")
+        limit = self.settings.local_result_chars if local else RESULT_CHARS_FOR_MODEL
+        compact = (plan_for_model(result.get("structured"))
+                   if local and self.settings.local_compact_plans and not result.get("is_error")
+                   else None)
+        content = compact or result_for_model(result, limit)
         # model_chars: how much of the result the model reads (shrunk or cut to its limit)
         yield {"type": "tool_result", "id": call["id"], **result, "step": step,
                "model_chars": len(content)}
         conv.messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
-        if scope:
+        if repeated:
+            yield {"type": "notice", "text": f"repeated call: {name} with the same arguments was "
+                   "not run again"}
+        elif scope:
             yield {"type": "notice", "text": f"scope violation: {name} ({scope})"}
         elif added:
             yield {"type": "tools_offered", "added": added, "removed": [],
@@ -422,7 +631,8 @@ class Agent:
         names: dict[str, str] = {}
         for message in conv.messages:
             role, content = message.get("role"), str(message.get("content") or "")
-            if role == "user" and not content.startswith(GOAL_PREFIX):
+            if role == "user" and not content.startswith((GOAL_PREFIX, TOOLS_PREFIX,
+                                                          EMPTY_REPLY_NUDGE)):
                 transcript.append(f"[{len(transcript) + 1}] shopper: {content[:1500]}")
             elif role == "assistant":
                 if content:

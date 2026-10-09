@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from demo_hub import bench
-from demo_hub.bench import CASES, Run, grade, money_in, summarise
+from demo_hub.bench import CASES, Run, check_known_tools, grade, money_in, summarise
 from demo_hub.llm import LLMError
 from demo_hub.settings import Settings
 
@@ -266,3 +266,27 @@ def test_a_bench_run_is_kept_as_a_tagged_trace_with_its_online_evals(tmp_path: P
     assert trace["evals"]["checks"] and run.answer_confidence == trace["evals"]["answer_confidence"]
     assert trace["model"] == "ollama:m#think=false"          # the full spec, variant included
     assert bench.record(run, [])["trace_id"] == run.trace_id
+
+
+def test_discover_tools_counts_as_offered_when_the_toolset_is_progressive() -> None:
+    events = [{"type": "start", "tools": ["pantry-list-recipes"], "discoverable": True},
+              {"type": "tool_call", "id": "c1", "name": "discover_tools", "arguments": {}},
+              {"type": "tool_result", "id": "c1", "name": "discover_tools", "is_error": False,
+               "text": "offered"},
+              {"type": "done", "stop": "answered", "seconds": 1}]
+    run = Run.from_events("m", "case", 1, events)
+    assert check_known_tools(run).passed
+    run = Run.from_events("m", "case", 1, [{**events[0], "discoverable": False}, *events[1:]])
+    assert not check_known_tools(run).passed
+
+
+def test_excluding_the_united_states_by_its_alias_counts() -> None:
+    case = next(c for c in CASES if c.id == "tomato-penne-no-us")
+    for name in ("United States", "US", "U.S.A.", "usa"):
+        events = [{"type": "start", "tools": ["plan_recipe"]},
+                  {"type": "tool_call", "id": "c", "name": "plan_recipe",
+                   "arguments": {"slug": "tomato_penne", "exclude_origin": [name]}},
+                  {"type": "tool_result", "id": "c", "name": "plan_recipe", "is_error": False,
+                   "structured": {"summary": {}}}]
+        checks = {c.name: c.passed for c in case.grade(Run.from_events("m", case.id, 1, events))}
+        assert checks["excludes the United States"], name

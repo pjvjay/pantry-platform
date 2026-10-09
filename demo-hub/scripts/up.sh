@@ -126,7 +126,8 @@ fi
     DEMO_RESET_SCRIPT=$HUB_DIR/scripts/reset-demo-data.sh HUB_PORT=$HUB_PORT \
     PANTRY_API_URL=http://127.0.0.1:$PANTRY_PORT CONTEXTFORGE_URL=http://127.0.0.1:$CF_PORT \
     FETCH_URL=http://127.0.0.1:$FETCH_PORT MCPSIM_UI_URL=http://127.0.0.1:$RUNNER_PORT \
-    DEMO_AGENT_MODEL=$AGENT_MODEL DEMO_OBSERVER_MODEL=$OBSERVER_MODEL
+    DEMO_AGENT_MODEL=$AGENT_MODEL DEMO_OBSERVER_MODEL=$OBSERVER_MODEL \
+    DEMO_BURR_DIR=$PANTRY_API_DIR/.burr BURR_URL=http://127.0.0.1:$BURR_PORT
   start_bg hub .venv/bin/python -m demo_hub.app
 )
 wait_for "demo hub" "http://127.0.0.1:$HUB_PORT/hub/mcp/targets" 30

@@ -126,8 +126,10 @@ class Disclosure:
                 if any(fnmatch.fnmatch(canonical(t["name"]), p) for p in patterns)]
 
     def offered_tools(self) -> list[dict[str, Any]]:
-        keep = set(self.offered)
-        return [t for t in self.catalog if t["name"] in keep]
+        """The offered tools in the order they were offered: one added later comes last, so a
+        model's cached prompt (the tools are rendered in order) stays valid up to it."""
+        by_name = {t["name"]: t for t in self.catalog}
+        return [by_name[name] for name in self.offered if name in by_name]
 
     def is_offered(self, name: str) -> bool:
         return name in self.offered
