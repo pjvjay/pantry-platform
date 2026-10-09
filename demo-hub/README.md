@@ -35,6 +35,7 @@ browser ── :8090 demo hub ─┬─ /pantry/          the built pantry-front
                            │                      counted dishes read first by pantry /mealplan/selection/parse
                            ├─ /hub/agent/conversations/{id}/alternatives, /swap → the cart: pantry :8000/mcp directly
                            ├─ /hub/sims/*       → mcp-sim runner :8765
+                           ├─ /hub/calendar/*   → Google Calendar sync (optional): connect, preview, apply
                            └─ /hub/status       → every service's health
 ```
 
@@ -60,6 +61,25 @@ for you; a script adds `-H 'X-Pantry-Console: 1' -H 'Content-Type: application/j
 Options: `up.sh --reset` reseeds the demo data first; `up.sh --rebuild` rebuilds the frontend.
 Logs and pid files live in `~/.pantry-demo/`. A service up.sh reuses keeps its settings: stop it
 to apply new ones.
+
+## Google Calendar sync (optional)
+
+With an OAuth client you create in your own Google Cloud project, saved as
+`~/.pantry-secrets/google_oauth_client.json`, the Meal plan's **Add to calendar** dialog can
+keep a **Pantry plan** calendar in your Google account in step with the approved plan: every
+change previewed first, your edits in Google kept unless you choose Overwrite, no attendees and
+no invitations. Scope `calendar.app.created` only; the refresh token is a mode-600 file. Setup,
+the weekly reconnect while the app is in Testing, revoking, and the manual smoke test:
+[docs/google-calendar.md](docs/google-calendar.md).
+
+| Route | What |
+|---|---|
+| `GET /hub/calendar/status` | configured, connected, reconnect-by date (booleans and labels only) |
+| `POST /hub/calendar/connect` | Google's consent URL (PKCE, state bound to a cookie) |
+| `GET /hub/calendar/oauth/callback` | Google's redirect: stores the refresh token, back to the console |
+| `POST /hub/calendar/sync/preview` | the diff for an approved schedule; writes nothing |
+| `POST /hub/calendar/sync/apply` | that exact diff, written (409 if anything changed since) |
+| `POST /hub/calendar/disconnect` | revoke, delete the token, optionally the calendar |
 
 ## Demo data
 
@@ -271,12 +291,13 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 346 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 408 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
 The tests cover the chat client (request shapes, retries, quota handling, every failure path),
 the agent loop (tool calls, failing tools, step budget, model fallback), the MCP client against a
-real MCP server over HTTP (catalog, calls, resources, prompts, 401), the runner client, and every
-HTTP route with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build`
+real MCP server over HTTP (catalog, calls, resources, prompts, 401), the runner client, the
+Google Calendar sync against a stateful fake Google (`tests/fake_google.py`: sign-in, conflicts,
+crash recovery, a lost ledger, rate limits), and every HTTP route with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build`
 type-checks it); in dev, `npm run dev` proxies `/hub` to this hub on :8090.
