@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from demo_hub.answers import plan_for_model, plan_tables, with_tables
+from demo_hub.answers import plan_cards, plan_for_model, plan_tables, strip_tables, with_tables
 from demo_hub.disclosure import (
     DISCOVER,
     DISCOVER_FUNCTION,
@@ -86,14 +86,17 @@ Plans:
   a short recipe for it (a title with the servings, then one "- ingredient" line each) and plan
   it with plan_from_text, allow_partial true.
 - A recipe link or a pasted recipe: follow the recipe-shopper procedure.
-- If a plan call fails or times out, call it again with the same arguments.
+- If a plan call fails or times out, call it again with the same arguments; if its error says
+  to retry with allow_partial=true, do that instead.
 - A line's trip_store and trip_price are where the recommended trip buys it; its store and price
   are only its cheapest offer in range. With no trip, the plan chose no stores: say so.
 - Origin: report the plan's own origin_status and coverage; call get_product_origins only with the
   basket's product_ids.
 
 After a plan or a week plan, answer in two or three sentences: the trip's total and its store(s),
-the verified origin share when origin was asked about, and anything not found. After
+the verified origin share when origin was asked about, and anything left out. For an ingredient
+left out because of an exclusion, name the swap the plan lists for it and ask whether to add it
+or relax the exclusion. After
 list_recipes alone, answer in one sentence. The shopper sees the plan's table, or the recipe
 list, under your answer, added automatically: do not write a table or list the lines or recipes.
 For other questions (a product's price, where it comes from), call the matching tool and report
@@ -411,11 +414,14 @@ class Agent:
                               if turn.reasoning else {})}
                     conv.messages.append(turn.message)
                     text = turn.text
+                    cards: list[dict[str, Any]] = []
                     if not turn.tool_calls:
                         # the plan's table, built from its result: the shopper sees it under the
-                        # model's few sentences; the model's own message stays short in history
-                        text = with_tables(text, plan_tables(
-                            [r for _, r in conv.tool_log[first_result:]]))
+                        # model's few sentences; the model's own message stays short in history.
+                        # The browser draws the plans themselves (`plans`) under `reply`.
+                        results = [r for _, r in conv.tool_log[first_result:]]
+                        cards = plan_cards(results, drop=FOR_BROWSER)
+                        text = with_tables(text, plan_tables(results))
                     if not turn.tool_calls and not text.strip() and turn.output_tokens \
                             and not nudged:
                         # the model wrote something that is neither text nor a readable tool
@@ -429,7 +435,9 @@ class Agent:
                         yield {"type": "notice", "text": f"the model's reply was cut at "
                                f"{turn.output_tokens} tokens (DEMO_LOCAL_MAX_TOKENS)"}
                     if text:
-                        yield {"type": "assistant", "text": text, "step": steps}
+                        yield {"type": "assistant", "text": text, "step": steps,
+                               **({"reply": strip_tables(turn.text), "plans": cards}
+                                  if cards else {})}
                     if not turn.tool_calls:
                         yield self._done(conv, steps, "answered", started)
                         return
@@ -444,10 +452,13 @@ class Agent:
                             yield event
                 # out of steps after the work was done (a 3B model planned, then kept calling
                 # tools): the shopper still gets the plan, drawn from its result
-                tables = plan_tables([r for _, r in conv.tool_log[first_result:]])
+                results = [r for _, r in conv.tool_log[first_result:]]
+                tables = plan_tables(results)
                 if tables:
-                    yield {"type": "assistant", "step": steps, "text": with_tables(
-                        "The model did not finish its summary; here is the plan it made.", tables)}
+                    reply = "The model did not finish its summary; here is the plan it made."
+                    cards = plan_cards(results, drop=FOR_BROWSER)
+                    yield {"type": "assistant", "step": steps, "text": with_tables(reply, tables),
+                           **({"reply": reply, "plans": cards} if cards else {})}
                 yield self._done(conv, steps, "step budget reached", started)
         except (LLMError, McpTargetError) as exc:
             yield {"type": "error", "message": str(exc)}

@@ -41,6 +41,16 @@
    "file": "demo/crushed-tomatoes-canned-796ml.jpg"
   },
   {
+   "product": "Petite Diced Tomatoes 796ml",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/petite-diced-tomatoes-796ml.jpg"
+  },
+  {
    "product": "Passata Strained Tomatoes 680ml",
    "claim_type": "product-of",
    "country": "Italy",
@@ -129,6 +139,36 @@
    "importer_only": false,
    "note": "",
    "file": "demo/red-onion.jpg"
+  },
+  {
+   "product": "Yellow Onions 3lb Bag",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/yellow-onions-3lb-bag.jpg"
+  },
+  {
+   "product": "Yellow Onions 10lb Bag",
+   "claim_type": "product-of",
+   "country": "Canada",
+   "verbatim": "Product of Canada",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/yellow-onions-10lb-bag.jpg"
+  },
+  {
+   "product": "Organic Yellow Onions 2lb Bag",
+   "claim_type": "product-of",
+   "country": "United States",
+   "verbatim": "Product of U.S.A.",
+   "confidence": "high",
+   "importer_only": false,
+   "note": "",
+   "file": "demo/organic-yellow-onions-2lb-bag.jpg"
   },
   {
    "product": "Basmati Rice 2kg",

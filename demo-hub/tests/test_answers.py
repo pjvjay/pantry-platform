@@ -7,7 +7,14 @@ import json
 from typing import Any
 
 from demo_hub.agent import Agent, result_for_model
-from demo_hub.answers import plan_for_model, plan_tables, strip_tables, with_tables
+from demo_hub.answers import (
+    options,
+    plan_cards,
+    plan_for_model,
+    plan_tables,
+    strip_tables,
+    with_tables,
+)
 from demo_hub.settings import Settings
 from tests.test_agent import (  # noqa: F401
     FakeSession,
@@ -50,7 +57,7 @@ def test_the_table_comes_from_the_plan() -> None:
     assert "**Total:** $20.26 for the trip to Pantry Mart Downtown ($20.05 basket + $0.21 travel)" \
         in table
     assert "**Origin:** 96% of the spend verified (4 of 5 lines)" in table
-    assert "**Not found:** Basil (not stocked)" in table
+    assert "**Left out:** Basil (not stocked)" in table
 
 
 def test_without_a_trip_the_table_says_no_stores_were_chosen() -> None:
@@ -60,7 +67,34 @@ def test_without_a_trip_the_table_says_no_stores_were_chosen() -> None:
     [table] = plan_tables([{"summary": summary}])
     assert "| Penne | Penne Rigate 500g | GreenLeaf Grocers Kitsilano | $1.97 | Italy |" in table
     assert "(the plan chose no trip)" in table and "**Origin:**" not in table
-    assert "**Not found:** nothing" in table
+    assert "**Left out:** nothing" in table
+
+
+ONION = {"ingredient": "Yellow Onion",
+         "reason": "all 1 candidate(s) are evidenced as coming from United States, which this "
+                   "plan excludes",
+         "suggestions": ["Yellow Onion ($0.87) — United States via ingredient_origin",
+                         "still available, not a direct match: Red Onion ($1.34, Mexico)",
+                         "still available, not a direct match: Green Onions ($1.39)"]}
+
+
+def test_an_excluded_ingredient_lists_its_swaps_and_what_could_be_allowed_back() -> None:
+    assert options(ONION) == (["Red Onion ($1.34, Mexico)", "Green Onions ($1.39)"],
+                              ["Yellow Onion ($0.87, United States)"])
+    summary = {**PLAN["summary"], "not_stocked": [], "out_of_range": [ONION]}
+    [table] = plan_tables([{"summary": summary}])
+    assert ("**Left out:** Yellow Onion (all 1 candidate(s) are evidenced as coming from United "
+            "States, which this plan excludes; swap: Red Onion ($1.34, Mexico), Green Onions "
+            "($1.39); or allow: Yellow Onion ($0.87, United States))") in table
+    assert "swap: Red Onion ($1.34, Mexico)" in (plan_for_model({"summary": summary}) or "")
+
+
+def test_plan_cards_carry_the_latest_plan_without_the_browser_only_fields() -> None:
+    older = {"summary": {**PLAN["summary"], "total_cost": 1.0}}
+    [card] = plan_cards([older, PLAN], drop={"llm_calls", "burr_run", "pipeline"})
+    assert card["kind"] == "plan" and card["summary"]["total_cost"] == PLAN["summary"]["total_cost"]
+    assert "llm_calls" not in card["summary"] and "burr_run" not in card["summary"]
+    assert plan_cards([{"result": [{"slug": "a", "name": "A"}]}]) == []
 
 
 def test_a_week_gets_its_days_and_shopping_list() -> None:
@@ -85,7 +119,7 @@ def test_a_local_model_reads_short_lines_instead_of_the_json() -> None:
     assert text is not None
     assert "- Penne: Penne Rigate 500g [51], Pantry Mart Downtown $2.51, Italy" in text
     assert "total: $20.26 for the trip to Pantry Mart Downtown" in text
-    assert "origin: 96% of the spend verified" in text and "not found: Basil" in text
+    assert "origin: 96% of the spend verified" in text and "left out: Basil" in text
     assert len(text) < len(result_for_model({"structured": PLAN})) / 2
     assert plan_for_model({"items": []}) is None and plan_for_model(None) is None
 
@@ -98,8 +132,13 @@ def test_the_answer_ends_with_the_table_and_the_history_stays_short(
         turn("Your basket is $20.26 at Pantry Mart Downtown; basil is not stocked."))
     events, conv = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "plan it",
                        model="ollama:m")
-    answer = next(e for e in events if e["type"] == "assistant")["text"]
+    event = next(e for e in events if e["type"] == "assistant")
+    answer = event["text"]
     assert answer.startswith("Your basket is $20.26") and "| Penne | Penne Rigate 500g |" in answer
+    # the browser draws the plan itself under the model's own sentences
+    assert event["reply"] == "Your basket is $20.26 at Pantry Mart Downtown; basil is not stocked."
+    assert [c["kind"] for c in event["plans"]] == ["plan"]
+    assert "llm_calls" not in event["plans"][0]["summary"]
     assert conv.messages[-1]["content"] == "Your basket is $20.26 at Pantry Mart Downtown; " \
         "basil is not stocked."                         # the table is not replayed to the model
     tool_message = next(m for m in chat.requests[1]["messages"] if m["role"] == "tool")

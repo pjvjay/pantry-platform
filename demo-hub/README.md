@@ -55,8 +55,8 @@ to apply new ones.
 ## Demo data
 
 `scripts/reset-demo-data.sh` (also the Provenance tab's **Reset demo data** button) reseeds the
-161-product catalog and 7 recipes, then loads `data/demo-labels.json` (32 label readings) and
-`data/demo-origins.json` (5 database records): 34 products resolved, garlic conflicting (a label
+165-product catalog and 7 recipes, then loads `data/demo-labels.json` (36 label readings) and
+`data/demo-origins.json` (5 database records): 38 products resolved, garlic conflicting (a label
 says Mexico, a record says China), an importer-only soy sauce label that correctly does not count
 as an origin, and enough US-origin items that excluding the United States changes baskets. It
 also empties the review queue.
@@ -214,7 +214,7 @@ its prompt and 43% writing (docs/local-models-report.md). What the hub does abou
 
 | | What | Setting |
 |---|---|---|
-| The table, by code | a plan's (or week's) table is built from the tool result and appended to the model's two or three sentences (`answers.py`); exact by construction | always |
+| The table, by code | a plan's (or week's) table is built from the tool result and appended to the model's two or three sentences (`answers.py`); exact by construction. The answer event also carries the plans as data (`plans`) and the model's own sentences (`reply`): the Assistant draws each plan as a cart, per store, with what was left out and the swaps pantry found | always |
 | Compact plans | a local model reads a plan as short lines, about a fifth of the JSON | `DEMO_LOCAL_COMPACT_PLANS` (on) |
 | Tool order | `discover_tools` first, then tools in the order offered: one added later goes last, so the cached prompt holds up to it | always |
 | Warm-up | the model reads the instructions and first tools while the shopper types (`POST /hub/agent/warm`; the Assistant calls it when a local model is chosen) | always for `ollama:` models |

@@ -387,6 +387,14 @@ def test_a_library_dish_with_a_country_left_out_gets_the_plan_tools_only() -> No
         {"list_recipes", "find_product", "get_recipe", "plan_recipe"}
 
 
+def test_a_library_dish_named_by_its_slug_words_is_in_the_library() -> None:
+    # "the chicken curry" is Simple Chicken Curry (chicken_curry), not a dish to write out
+    library = {"result": [{"slug": "chicken_curry", "name": "Simple Chicken Curry"}]}
+    offered = offered_after("Plan the chicken curry with nothing from China.", ("list_recipes",),
+                            {"list_recipes": library})
+    assert "plan_recipe" in offered and "plan_from_text" not in offered
+
+
 def test_plan_from_text_joins_only_when_the_library_cannot_serve_the_dish() -> None:
     risotto = "I'd like to cook a mushroom risotto for 4"
     assert "plan_from_text" not in offered_after(risotto)
