@@ -176,10 +176,10 @@ def test_lean_tools_drop_indentation_titles_and_null_wrappers() -> None:
 
 def test_the_hub_adds_the_shoppers_location_to_a_plan_call_without_one() -> None:
     agent = Agent(Settings(observer_model=""), FakeTargets(), ScriptedChat())
-    assert agent._with_location("pantry-plan-recipe", {"slug": "tomato_penne"}) == {
+    assert agent._with_hub_args("pantry-plan-recipe", {"slug": "tomato_penne"}) == {
         "slug": "tomato_penne", "lat": 49.2827, "lon": -123.1207, "max_km": 5.0}
     made_up = {"slug": "s", "lat": -74.08, "lon": -84.22, "max_km": 20}
-    assert agent._with_location("pantry-plan-recipe", made_up) == {
+    assert agent._with_hub_args("pantry-plan-recipe", made_up) == {
         "slug": "s", "lat": 49.2827, "lon": -123.1207, "max_km": 20}        # a distance stands
     plan = {"name": "pantry-plan-recipe", "inputSchema": {"type": "object", "required": ["slug"],
             "properties": {"slug": {}, "lat": {}, "lon": {}, "max_km": {}}}}
@@ -190,13 +190,13 @@ def test_the_hub_adds_the_shoppers_location_to_a_plan_call_without_one() -> None
     plan["inputSchema"]["properties"]["preference"] = {"type": "array"}
     [described] = agent._plan_tools([plan], "ollama:m")
     assert "country names" in described["inputSchema"]["properties"]["preference"]["description"]
-    assert agent._with_location("plan_recipe", {"slug": "s", "max_km": 0})["max_km"] == 5.0
+    assert agent._with_hub_args("plan_recipe", {"slug": "s", "max_km": 0})["max_km"] == 5.0
     # a product search gets the location too (the 8B sent lon +123.11), but no distance
-    assert agent._with_location("pantry-find-product", {"query": "x", "lon": 123.11}) == {
+    assert agent._with_hub_args("pantry-find-product", {"query": "x", "lon": 123.11}) == {
         "query": "x", "lat": 49.2827, "lon": -123.1207}
-    assert agent._with_location("pantry-list-recipes", {}) == {}
+    assert agent._with_hub_args("pantry-list-recipes", {}) == {}
     off = Agent(Settings(observer_model="", shopper_location=None), FakeTargets(), ScriptedChat())
-    assert off._with_location("plan_recipe", {"slug": "s"}) == {"slug": "s"}
+    assert off._with_hub_args("plan_recipe", {"slug": "s"}) == {"slug": "s"}
 
 
 def test_shopper_location_parses_from_the_environment() -> None:
@@ -222,3 +222,60 @@ def test_out_of_steps_after_a_plan_the_shopper_still_gets_it(session: FakeSessio
     answer = next(e for e in events if e["type"] == "assistant")["text"]
     assert answer.startswith("The model did not finish its summary") and "| Penne |" in answer
     assert events[-1]["stop"] == "step budget reached"
+
+
+WEEK: dict[str, Any] = {"summary": {
+    "days": [{"recipe_slug": "tomato_penne", "recipe_name": "Tomato Penne", "day_cost": 9.5,
+              "lines": []}],
+    "shopping_list": [{"product": "Penne Rigate 500g", "store": "S", "price": 1.97,
+                       "used_by": ["Tomato Penne"]}],
+    "total_cost": 9.5, "trip": None, "coverage": None, "overlap_savings": 0}}
+
+
+def test_every_week_card_links_to_the_meal_plan() -> None:
+    [card] = plan_cards([WEEK], start=4)
+    assert card["links"] == [{"label": "Open in Meal plan", "href": "#/mealplan?from=week"}]
+    assert "ref" not in card                     # no basis: no Options on a week card
+    cards = plan_cards([PLAN, WEEK, {"summary": {**WEEK["summary"], "total_cost": 8.0}}])
+    assert [c["kind"] for c in cards] == ["plan", "week"]
+    assert all(c["links"] for c in cards if c["kind"] == "week")
+    assert "links" not in cards[0]
+
+
+def test_a_plan_card_names_its_plan_only_when_the_hub_holds_its_basis() -> None:
+    based = {"summary": {**PLAN["summary"], "basis": {"v": 1, "pins": [
+        {"line_no": 4, "product_id": 9}, {"line_no": 2, "product_id": 9}]}}}
+    older = {"summary": {**based["summary"], "total_cost": 1.0}}
+    [card] = plan_cards([older, {"result": []}, based], drop={"basis"}, start=7)
+    assert card["ref"] == 9 and card["pinned_lines"] == [2, 4] and "basis" not in card["summary"]
+    [plain] = plan_cards([PLAN], start=7)          # a gateway that sent no basis back
+    assert "ref" not in plain and "pinned_lines" not in plain
+    assert "ref" not in plan_cards([based])[0]     # no start: the caller holds no tool_log
+
+
+def test_the_week_card_link_reaches_the_browser(session: FakeSession) -> None:  # noqa: F811
+    session.results["pantry-find-product"] = WEEK
+    chat = ScriptedChat(
+        turn(calls=[{"id": "c", "name": "pantry-find-product", "arguments": {"query": "x"}}]),
+        turn("Here is your week."))
+    events, _ = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "a week of dinners")
+    [card] = next(e for e in events if e["type"] == "assistant")["plans"]
+    assert card["kind"] == "week" and card["links"][0]["href"] == "#/mealplan?from=week"
+
+
+def test_a_cart_note_fits_and_keeps_its_figures() -> None:
+    from demo_hub.answers import CART_NOTE_CHARS, cart_note
+    note = cart_note(recipe="Spaghetti Bolognese", line_no=3, ingredient="garlic",
+                     was="Garlic Bulb 3-pack", now="Fraser Farms Garlic 200g", before=41.7,
+                     after=41.2, stores=["Pantry Mart Downtown", "GreenLeaf Grocers Kitsilano"])
+    assert note == ("[cart] The shopper changed line 3 (garlic) of Spaghetti Bolognese in the "
+                    "cart: Garlic Bulb 3-pack -> Fraser Farms Garlic 200g. Trip now $41.20 at "
+                    "Pantry Mart Downtown, GreenLeaf Grocers Kitsilano, was $41.70.")
+    long = cart_note(recipe="R" * 200, line_no=12, ingredient="i" * 200, was="W" * 200,
+                     now="N" * 200, before=123.45, after=99.99,
+                     stores=[f"Store number {i} with a long name" for i in range(5)])
+    assert len(long) <= CART_NOTE_CHARS and "$99.99" in long and "$123.45" in long
+    undo = cart_note(recipe="R", line_no=1, ingredient="beef", was="B", now="A", before=10.0,
+                     after=10.0, stores=[], undone=True)
+    assert "back to the planner's pick, A (was B)" in undo
+    assert undo.endswith("Total now $10.00 (the plan chose no trip).")

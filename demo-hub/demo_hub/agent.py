@@ -26,11 +26,24 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from demo_hub.answers import plan_cards, plan_for_model, plan_tables, strip_tables, with_tables
+from demo_hub.answers import (
+    cart_key,
+    cart_note,
+    cart_stores,
+    cart_total,
+    is_plan,
+    plan_card,
+    plan_cards,
+    plan_for_model,
+    plan_tables,
+    recipe_key,
+    strip_tables,
+    with_tables,
+)
 from demo_hub.disclosure import (
     DISCOVER,
     DISCOVER_FUNCTION,
@@ -41,6 +54,7 @@ from demo_hub.disclosure import (
     canonical,
     judge_prompt,
     parse_reports,
+    visible_tools,
 )
 from demo_hub.llm import (
     ChatClient,
@@ -50,7 +64,7 @@ from demo_hub.llm import (
     QuotaExhausted,
     parse_model,
 )
-from demo_hub.mcp_targets import McpTargetError, Targets, call_tool, open_session
+from demo_hub.mcp_targets import TEXT_LIMIT, McpTargetError, Targets, call_tool, open_session
 from demo_hub.observers import Condition, Policy, View
 from demo_hub.settings import Settings
 
@@ -58,13 +72,22 @@ MAX_CONVERSATIONS = 50
 GOAL_PREFIX = "Goal enabled by observation"
 RESULT_CHARS_FOR_MODEL = 16_000
 REASONING_CHARS = 8_000            # a step's reasoning sent to the browser and kept in its trace
-# Plan-summary fields for the browser's trace views, never sent to the model.
-FOR_BROWSER = {"llm_calls", "burr_run", "pipeline"}
+# What of a plan result the model reads (C10 in the plan). FOR_BROWSER: summary fields for the
+# browser's trace views, never sent to the model. SERVER_ONLY: kept by the hub alone (in
+# tool_log), never sent to the model nor the browser: the plan's basis, which the cart's
+# Options dialog and a swap are built from, and which no client is trusted to send back.
+# FOR_MODEL_NESTED: paths inside the summary for the browser only ("*" is every item of a list).
+FOR_BROWSER = frozenset({"llm_calls", "burr_run", "pipeline"})
+SERVER_ONLY = frozenset({"basis"})
+FOR_MODEL_NESTED = frozenset({("nutrition", "lines"), ("days", "*", "nutrition", "lines")})
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
 # tools that take the shopper's location: the hub always sends it (models dropped it, typed it
 # and made it up: lat -74, lon -84; lon +123.11), and the distance for the two plan tools
 LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_week", "find_product", "get_product"}
 PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text"}
+# plan tools that return the plan's basis when asked (basis=true): the hub always asks, when the
+# target's schema takes it, and the model never sees the argument
+BASIS_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines"}
 # what the plan tools' country lists take (a 3B model sent preference ["local", "organic"])
 COUNTRY_ARGS = {
     "exclude_origin": 'country names to leave out, e.g. ["United States"]',
@@ -92,6 +115,9 @@ Plans:
   are only its cheapest offer in range. With no trip, the plan chose no stores: say so.
 - Origin: report the plan's own origin_status and coverage; call get_product_origins only with the
   basket's product_ids.
+- A message that starts with [cart] reports a product the shopper swapped in the cart themselves:
+  use its figures for that cart from then on. Do not plan the recipe again unless asked; if you
+  do, say that a new plan drops the shopper's swaps.
 
 After a plan or a week plan, answer in two or three sentences: the trip's total and its store(s),
 the verified origin share when origin was asked about, and anything left out. For an ingredient
@@ -105,6 +131,13 @@ its result briefly.
 You cannot run scripts or open a shell. Read a recipe page with the fetch tool (markdown,
 max_length 20000; call again with start_index if it is cut before the ingredient list).
 """
+
+
+def takes_basis(tool: dict[str, Any]) -> bool:
+    """A plan tool (BASIS_TOOLS) whose listed schema has the `basis` flag."""
+    properties = (tool.get("inputSchema") or {}).get("properties")
+    return canonical(tool["name"]) in BASIS_TOOLS and isinstance(properties, dict) \
+        and "basis" in properties
 
 
 def load_skill(path: str) -> str:
@@ -207,17 +240,67 @@ def announce_tools(tools: list[dict[str, Any]], lean: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _without_path(node: Any, path: tuple[str, ...]) -> Any:
+    """``node`` without the value at ``path`` ("*" walks every item of a list); a copy only
+    where something is taken out, and unchanged where the path is absent."""
+    if not path:
+        return node
+    head, rest = path[0], path[1:]
+    if head == "*":
+        return [_without_path(x, rest) for x in node] if isinstance(node, list) else node
+    if not isinstance(node, dict) or head not in node:
+        return node
+    if not rest:
+        return {k: v for k, v in node.items() if k != head}
+    return {**node, head: _without_path(node[head], rest)}
+
+
+def without(structured: Any, keys: frozenset[str] | set[str],
+            nested: frozenset[tuple[str, ...]] = frozenset()) -> Any:
+    """A plan or week result with ``keys`` taken out of its summary and its full plan, and the
+    ``nested`` paths out of its summary. Anything else comes back as it is."""
+    if not isinstance(structured, dict):
+        return structured
+    out = structured
+    for part in ("summary", "full"):
+        body = out.get(part)
+        if isinstance(body, dict) and keys & body.keys():
+            out = {**out, part: {k: v for k, v in body.items() if k not in keys}}
+    summary = out.get("summary")
+    if isinstance(summary, dict):
+        for path in nested:
+            summary = _without_path(summary, path)
+        if summary is not out["summary"]:
+            out = {**out, "summary": summary}
+    return out
+
+
+def model_copy(structured: Any) -> Any:
+    """What the model reads of a result: no basis, nothing for the browser's views alone."""
+    return without(structured, SERVER_ONLY | FOR_BROWSER, FOR_MODEL_NESTED)
+
+
+def for_browser(result: dict[str, Any]) -> dict[str, Any]:
+    """A tool result as the browser (and the turn's trace) gets it: everything but the basis.
+    The MCP result's text is the same JSON as its structured content, basis included, so it is
+    written again from the stripped copy."""
+    body = result.get("structured")
+    stripped = without(body, SERVER_ONLY)
+    if stripped is body:
+        return result
+    text = json.dumps(stripped, ensure_ascii=False, indent=2)
+    return {**result, "structured": stripped, "text": text[:TEXT_LIMIT],
+            "truncated": len(text) > TEXT_LIMIT}
+
+
 def result_for_model(result: dict[str, Any], limit: int = RESULT_CHARS_FOR_MODEL) -> str:
     """The tool result as the model reads it: the structured content as JSON (or the text), at
     most `limit` characters. A plan summary's `llm_calls` and `burr_run` (where pantry's LLM time
-    went and its Burr trace, for the browser) are left out: the model has no use for them and pays
-    for every token. JSON over
+    went and its Burr trace, for the browser) and its basis (the hub's, for the cart) are left
+    out (``model_copy``): the model has no use for them and pays for every token. JSON over
     the limit is shrunk by shortening its longest lists, so it stays valid and says what was left
     out; only what still does not fit is cut."""
-    body = result.get("structured")
-    summary = body.get("summary") if isinstance(body, dict) else None
-    if isinstance(summary, dict) and FOR_BROWSER & summary.keys():
-        body = {**body, "summary": {k: v for k, v in summary.items() if k not in FOR_BROWSER}}
+    body = model_copy(result.get("structured"))
     if body is not None:
         text = json.dumps(body, ensure_ascii=False)
         if len(text) > limit:
@@ -264,6 +347,93 @@ def _lists(node: Any) -> list[tuple[int, list[Any]]]:
     return []
 
 
+# The cart's follow-ups (rank_alternatives, reprice_plan) always go to pantry directly: the
+# hub's own token, no gateway schema in the way, and the same database the plan used.
+CART_TARGET = "pantry"
+CART_GONE = ("This conversation is gone (the hub restarted or forgot it): ask again to "
+             "re-plan.")
+# The MCP SDK puts this before a tool's own refusal; the shopper reads pantry's reason alone.
+TOOL_ERROR_PREFIX = re.compile(r"^Error executing tool [\w.-]+: ")
+
+
+class CartError(RuntimeError):
+    """A cart route's refusal, with the HTTP status the route answers."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+@dataclass
+class PendingChange:
+    """A swap the model has not heard about yet. One per (recipe, recipe line), not per purchase:
+    a swap can merge a line into another line's purchase, and a later swap or undo made on that
+    purchase has to reach the merged line's change too. A later swap of a line replaces `now`
+    and keeps `was`, the product the model last knew, and every swap updates the cart's figures
+    on all of its recipe's changes. ``as_told`` joins the lines that went from one product to the
+    same other product into one note, as the cart shows them."""
+    recipe: str                     # answers.cart_key of the cart
+    recipe_name: str
+    line_no: int                    # the recipe line (the first of `lines` once told)
+    lines: list[int]                # [line_no]; once told, every line the note covers
+    ingredient: str
+    was: dict[str, Any]             # {id, name}: the product the model last knew
+    now: dict[str, Any]             # {id, name}: the product in the cart now
+    total_before: float | None      # the cart's total when the model last knew it
+    ref: int = 0                    # the cart's tool_log index now
+    total_after: float | None = None
+    stores_after: list[str] = field(default_factory=list)
+    undone: bool = False            # back to the planner's own pick
+    summary: dict[str, Any] = field(default_factory=dict)
+
+    def note(self) -> str:
+        return cart_note(recipe=self.recipe_name, line_no=self.line_no,
+                         ingredient=self.ingredient, was=str(self.was.get("name")),
+                         now=str(self.now.get("name")), before=self.total_before,
+                         after=self.total_after, stores=self.stores_after, undone=self.undone)
+
+    def event(self) -> dict[str, Any]:
+        """The cart_change event: what changed, the cart's figures before and after, the note
+        the model read, and the re-priced plan (``structured``, as a plan tool returns it) so
+        the turn's grounding evals know the new figures."""
+        return {"type": "cart_change", "ref": self.ref, "line_no": self.line_no,
+                "lines": list(self.lines), "recipe_name": self.recipe_name,
+                "ingredient": self.ingredient, "from": dict(self.was), "to": dict(self.now),
+                "total_before": self.total_before, "total_after": self.total_after,
+                "stores_after": list(self.stores_after), "undone": self.undone,
+                "note": self.note(), "structured": {"summary": self.summary, "full": None}}
+
+
+def as_told(changes: list[PendingChange]) -> list[PendingChange]:
+    """The pending changes as the model hears them: the lines of one cart that went from the
+    same product to the same product are one note and one event (a garlic purchase covering
+    lines 2 and 4 reads "line 2 (garlic + garlic clove)"), in the order they were first
+    changed."""
+    groups: dict[tuple[Any, ...], list[PendingChange]] = {}
+    for c in changes:
+        groups.setdefault((c.recipe, c.was.get("id"), c.now.get("id"), c.undone), []).append(c)
+    out = []
+    for same in groups.values():
+        same.sort(key=lambda c: c.line_no)
+        names = dict.fromkeys(c.ingredient for c in same if c.ingredient)
+        out.append(replace(same[0], lines=[c.line_no for c in same],
+                           ingredient=" + ".join(names)))
+    return out
+
+
+def _purchase(summary: dict[str, Any], line_no: int) -> dict[str, Any] | None:
+    """The cart line buying recipe line ``line_no`` (its own line or one of its also_lines)."""
+    for ln in summary.get("lines") or []:
+        if ln.get("line_no") == line_no or line_no in (ln.get("also_lines") or []):
+            return ln
+    return None
+
+
+def _product(ln: dict[str, Any] | None) -> dict[str, Any]:
+    return {"id": ln.get("product_id"), "name": ln.get("product")} if ln else \
+        {"id": None, "name": "nothing"}
+
+
 @dataclass
 class Conversation:
     id: str
@@ -287,6 +457,15 @@ class Conversation:
     fixed_tools: list[str] | None = None
     announced: set[str] = field(default_factory=set)
     turn_calls: set[tuple[str, str]] = field(default_factory=set)   # (tool, arguments) this turn
+    # the target's tools whose schema takes `basis` (BASIS_TOOLS), as listed this turn: only
+    # those are sent basis=true, so a gateway with an older schema is never sent an unknown
+    # argument (its plans then carry no basis, and the cart offers no Options)
+    basis_tools: set[str] = field(default_factory=set)
+    # The cart: the shopper's pins per plan (tool_log index -> line_no -> product_id), and the
+    # swaps the model has not been told about, (recipe, recipe line) -> change, told before the
+    # shopper's next message.
+    pins: dict[int, dict[int, int]] = field(default_factory=dict)
+    pending: dict[tuple[str, int], PendingChange] = field(default_factory=dict)
 
 
 class Agent:
@@ -326,7 +505,8 @@ class Agent:
         resolved = await self.targets.resolve(target)
         async with open_session(resolved) as session:
             listed = await session.list_tools()
-        tools = [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in listed.tools]
+        tools = visible_tools(self.policy, [t.model_dump(mode="json", by_alias=True,
+                                                         exclude_none=True) for t in listed.tools])
         d = Disclosure.start(self.policy, tools, mode,
                              {"recipe-shopper": load_skill(self.settings.recipe_shopper_skill)})
         system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
@@ -345,15 +525,25 @@ class Agent:
 
     async def _run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
         started = time.perf_counter()
-        conv.messages.append({"role": "user", "content": user_text})
+        # Swaps since the last turn reach the model as [cart] notes before the shopper's words
+        # (appended, so the conversation's earlier messages, and a model's cached prompt, stay
+        # as they were); the observers read only the shopper's words.
+        changes = as_told(list(conv.pending.values()))
+        conv.pending.clear()
+        notes = "\n".join(c.note() for c in changes)
+        conv.messages.append({"role": "user",
+                              "content": f"{notes}\n\n{user_text}" if notes else user_text})
         conv.user_texts.append(user_text)
         steps = 0
+        told = False
         try:
             target = await self.targets.resolve(conv.target)
             async with open_session(target) as session:
                 listed = await session.list_tools()
                 tools = [t.model_dump(mode="json", by_alias=True, exclude_none=True)
                          for t in listed.tools if conv.tools is None or t.name in conv.tools]
+                tools = visible_tools(self.policy, tools)
+                conv.basis_tools = {t["name"] for t in tools if takes_basis(t)}
                 d = conv.disclosure
                 if (d is None or d.mode != conv.disclosure_mode
                         or [t["name"] for t in d.catalog] != [t["name"] for t in tools]):
@@ -364,6 +554,9 @@ class Agent:
                        "target": conv.target, "tools": list(d.offered),
                        "available": len(tools), "disclosure": d.mode,
                        "discoverable": d.discoverable}
+                told = True
+                for change in changes:
+                    yield change.event()
                 async for event in self._observe(conv, "turn"):
                     yield event
                 # Progressive: the skill joins the conversation when an observer enables it.
@@ -420,7 +613,8 @@ class Agent:
                         # model's few sentences; the model's own message stays short in history.
                         # The browser draws the plans themselves (`plans`) under `reply`.
                         results = [r for _, r in conv.tool_log[first_result:]]
-                        cards = plan_cards(results, drop=FOR_BROWSER)
+                        cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY,
+                                           start=first_result)
                         text = with_tables(text, plan_tables(results))
                     if not turn.tool_calls and not text.strip() and turn.output_tokens \
                             and not nudged:
@@ -442,7 +636,8 @@ class Agent:
                         yield self._done(conv, steps, "answered", started)
                         return
                     for call in turn.tool_calls:
-                        sent = self._with_location(call["name"], call["arguments"])
+                        sent = self._with_hub_args(call["name"], call["arguments"],
+                                                   call["name"] in conv.basis_tools)
                         filled = sorted(k for k in sent if k not in call["arguments"])
                         call = {**call, "arguments": sent}
                         yield {"type": "tool_call", "id": call["id"], "name": call["name"],
@@ -456,28 +651,186 @@ class Agent:
                 tables = plan_tables(results)
                 if tables:
                     reply = "The model did not finish its summary; here is the plan it made."
-                    cards = plan_cards(results, drop=FOR_BROWSER)
+                    cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY,
+                                       start=first_result)
                     yield {"type": "assistant", "step": steps, "text": with_tables(reply, tables),
                            **({"reply": reply, "plans": cards} if cards else {})}
                 yield self._done(conv, steps, "step budget reached", started)
         except (LLMError, McpTargetError) as exc:
+            if not told:                # the turn failed before it started: still say so
+                for change in changes:
+                    yield change.event()
             yield {"type": "error", "message": str(exc)}
             yield self._done(conv, steps, "error", started)
+
+    # --- the cart: alternatives and swaps, no model involved ------------------------------------
+
+    def _cart(self, conversation_id: str) -> Conversation:
+        if not self.settings.cart_alternatives:
+            raise CartError("cart alternatives are off (DEMO_CART_ALTERNATIVES=0)", 404)
+        conv = self.conversations.get(conversation_id)
+        if conv is None:
+            raise CartError(CART_GONE, 404)
+        return conv
+
+    @staticmethod
+    def _plan_at(conv: Conversation, ref: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(summary, basis) of the plan at tool_log[ref]."""
+        if not 0 <= ref < len(conv.tool_log):
+            raise CartError(f"this conversation has no result {ref}", 404)
+        structured = conv.tool_log[ref][1]
+        if not is_plan(structured):
+            raise CartError(f"result {ref} is not a recipe plan", 422)
+        summary = structured["summary"]
+        basis = summary.get("basis")
+        if not isinstance(basis, dict):
+            raise CartError("this plan came back without its basis (an older gateway schema?), "
+                            "so its lines have no options; ask again to re-plan", 422)
+        return summary, basis
+
+    @staticmethod
+    def _newer(conv: Conversation, ref: int, summary: dict[str, Any]) -> bool:
+        """A later plan, or a later swap, of the same recipe (answers.cart_key): the cart at
+        ref is not the shopper's latest."""
+        key = cart_key(summary)
+        return any(is_plan(r) and cart_key(r["summary"]) == key
+                   for _, r in conv.tool_log[ref + 1:])
+
+    async def _pantry(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """One call to pantry's own MCP server; its ToolError text is the 422's detail."""
+        try:
+            target = await self.targets.resolve(CART_TARGET)
+            async with open_session(target) as session:
+                result = await call_tool(session, tool, arguments)
+        except McpTargetError as exc:
+            raise CartError(f"pantry is not reachable: {exc}", 502) from exc
+        if result.get("is_error"):
+            reason = TOOL_ERROR_PREFIX.sub("", str(result.get("text") or ""), count=1)
+            raise CartError(reason or f"{tool} failed", 422)
+        structured = result.get("structured")
+        if not isinstance(structured, dict):
+            raise CartError(f"pantry's {tool} answered without data", 502)
+        return structured
+
+    @staticmethod
+    def _basis_with_pins(basis: dict[str, Any], pins: dict[int, int]) -> dict[str, Any]:
+        return {**basis, "pins": [{"line_no": n, "product_id": p} for n, p in sorted(pins.items())]}
+
+    async def alternatives(self, conversation_id: str, ref: int, line_no: int,
+                           limit: int = 12) -> dict[str, Any]:
+        """pantry's ranking of the products that could fill one line of the cart at ``ref``,
+        from the plan's basis and the shopper's pins there. Read-only: no lock, no change to the
+        conversation or its trace, no model call."""
+        conv = self._cart(conversation_id)
+        _, basis = self._plan_at(conv, ref)
+        return await self._pantry("rank_alternatives", {
+            "basis": self._basis_with_pins(basis, conv.pins.get(ref, {})),
+            "line_no": line_no, "limit": limit})
+
+    async def swap(self, conversation_id: str, ref: int, line_no: int,
+                   product_id: int | None) -> dict[str, Any]:
+        """The shopper chose ``product_id`` for a line of the cart at ``ref`` (None: back to the
+        planner's pick). pantry re-prices the plan with the shopper's pins (no LLM); the result
+        joins tool_log as the cart's new ref, and the change waits for the model's next turn
+        (``pending``). Returns {card, note}: the redrawn cart and the note the model will read.
+        """
+        conv = self._cart(conversation_id)
+        if conv.target == "gateway-sim":
+            raise CartError("cart changes need the pantry server; this conversation plans "
+                            "through the pantry-sim gateway", 409)
+        if conv.lock.locked():
+            raise CartError("The assistant is answering; choose again when it finishes.", 409)
+        summary, basis = self._plan_at(conv, ref)
+        if self._newer(conv, ref, summary):
+            raise CartError("This cart is older than the latest plan for this recipe.", 409)
+        purchase = _purchase(summary, line_no)
+        if purchase is None:
+            raise CartError(f"line {line_no} is not in this cart", 422)
+        lines = [int(purchase["line_no"]), *(int(n) for n in purchase.get("also_lines") or [])]
+        planner = {int(b["line_no"]): b.get("product_id") for b in basis.get("lines") or []}
+        async with conv.lock:
+            # a purchase covering several recipe lines is chosen for all of them
+            pins = dict(conv.pins.get(ref, {}))
+            for n in lines:
+                if product_id is None or product_id == planner.get(n):
+                    pins.pop(n, None)
+                else:
+                    pins[n] = product_id
+            # the whole pin set, on a basis without pins: an undone pin is simply left out
+            structured = await self._pantry("reprice_plan", {
+                "basis": self._basis_with_pins(basis, {}),
+                "pins": [{"line_no": n, "product_id": p} for n, p in sorted(pins.items())]})
+            if not is_plan(structured):
+                raise CartError("pantry's reprice_plan answered without a plan", 502)
+            conv.tool_log.append(("reprice_plan", structured))
+            new_ref = len(conv.tool_log) - 1
+            new = structured["summary"]
+            new_basis = new.get("basis") if isinstance(new.get("basis"), dict) else {}
+            conv.pins[new_ref] = {int(p["line_no"]): int(p["product_id"])
+                                  for p in new_basis.get("pins") or []}
+            changes = self._queue(conv, summary, new, new_ref, basis, lines)
+        card = plan_card("plan", new, new_ref, FOR_BROWSER | SERVER_ONLY)
+        return {"card": card, "note": "\n".join(c.note() for c in changes)}
+
+    @staticmethod
+    def _queue(conv: Conversation, old: dict[str, Any], new: dict[str, Any], new_ref: int,
+               basis: dict[str, Any], lines: list[int]) -> list[PendingChange]:
+        """Record the swap for the model's next turn, coalesced per (recipe, recipe line): the
+        model hears once per line, from the product it last knew to the product the cart buys
+        for that line now, whichever purchase buys it. A line put back as the model last knew
+        it is not mentioned at all. Returns what is left to tell for the swap's lines, as the
+        model will read it (``as_told``; [] when nothing is)."""
+        recipe = cart_key(old)
+        names = {int(b["line_no"]): str(b.get("name") or "") for b in basis.get("lines") or []}
+        pinned = {int(p["line_no"]) for p in (new.get("basis") or {}).get("pins") or []}
+        same_recipe = [c for (r, _), c in conv.pending.items() if r == recipe]
+        before = same_recipe[0].total_before if same_recipe else cart_total(old)
+        for n in lines:
+            earlier = conv.pending.get((recipe, n))
+            was = earlier.was if earlier else _product(_purchase(old, n))
+            now = _product(_purchase(new, n))
+            if was.get("id") == now.get("id"):
+                conv.pending.pop((recipe, n), None)
+                continue
+            conv.pending[(recipe, n)] = PendingChange(
+                recipe=recipe, recipe_name=str(new.get("recipe_name") or recipe_key(old)),
+                line_no=n, lines=[n],
+                ingredient=names.get(n) or str((_purchase(new, n) or {}).get("ingredient") or ""),
+                was=was, now=now, total_before=before, undone=n not in pinned)
+        cleaned = {k: v for k, v in new.items() if k not in FOR_BROWSER | SERVER_ONLY}
+        for (r, _), c in conv.pending.items():     # the cart's figures are the latest swap's
+            if r == recipe:
+                c.ref, c.summary = new_ref, cleaned
+                c.total_after, c.stores_after = cart_total(new), cart_stores(new)
+        return as_told([c for (r, n), c in conv.pending.items() if r == recipe and n in lines])
 
     def _lean(self, model: str) -> bool:
         return self.settings.local_lean_tools and model.startswith("ollama:")
 
-    def _with_location(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """A location-taking tool (LOCATION_TOOLS) gets the shopper's location
+    def _with_hub_args(self, name: str, arguments: dict[str, Any],
+                       takes_basis: bool = False) -> dict[str, Any]:
+        """The arguments the hub fills in, whatever the model sent.
+
+        A location-taking tool (LOCATION_TOOLS) gets the shopper's location
         (DEMO_SHOPPER_LOCATION) from the hub: the models never see lat/lon (``_plan_tools``), so
         none drops it (pantry would choose no stores), types it (about 30 tokens) or makes one up
         (a 3B model sent -74, -84; the 8B sent lon +123.11). A plan's valid max_km stands;
-        without one, or outside 0.5-100 km, the shopper's."""
-        loc = self.settings.shopper_location
+        without one, or outside 0.5-100 km, the shopper's.
+
+        A plan tool whose schema takes it (``takes_basis``) gets basis=true while cart
+        alternatives are on (DEMO_CART_ALTERNATIVES): the plan's basis comes back for the hub to
+        keep, so the cart can rank and re-price a line without the model. The model never sees
+        the argument, and one it sends anyway is not passed on."""
         tool = canonical(name)
+        out = dict(arguments)
+        if tool in BASIS_TOOLS:
+            out.pop("basis", None)
+            if takes_basis and self.settings.cart_alternatives:
+                out["basis"] = True
+        loc = self.settings.shopper_location
         if not loc or tool not in LOCATION_TOOLS:
-            return arguments
-        out = {**arguments, "lat": loc[0], "lon": loc[1]}
+            return out
+        out.update(lat=loc[0], lon=loc[1])
         if tool in PLAN_LOCATION_TOOLS:
             km = arguments.get("max_km")
             valid = isinstance(km, (int, float)) and 0.5 <= km <= 100     # H-Tiny sent max_km 0
@@ -485,26 +838,30 @@ class Agent:
         return out
 
     def _plan_tools(self, tools: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
-        """The tools with lat/lon taken out of every location-taking tool's parameters when the
-        hub supplies the shopper's location (pantry's stores are all in Vancouver); for a local
-        model also the plan tools' max_km (the shopper's distance stands) and verbose (the full
-        plan is for the browser): two arguments a small model got wrong (max_km 0, verbose
-        true). The country lists say what they take."""
-        if not self.settings.shopper_location:
-            return tools
+        """The tools as the model sees them. A plan tool never shows `basis` (the hub sets it).
+        When the hub supplies the shopper's location (pantry's stores are all in Vancouver),
+        lat/lon are taken out of every location-taking tool's parameters, and for a local model
+        also the plan tools' max_km (the shopper's distance stands) and verbose (the full plan
+        is for the browser): two arguments a small model got wrong (max_km 0, verbose true).
+        The country lists say what they take."""
+        located = bool(self.settings.shopper_location)
         lean = self._lean(model)
         out = []
         for t in tools:
             schema = t.get("inputSchema") or {}
             tool = canonical(t["name"])
-            hidden = {"lat", "lon"} | ({"max_km", "verbose"}
-                                       if lean and tool in PLAN_LOCATION_TOOLS else set())
-            if tool in LOCATION_TOOLS and "properties" in schema:
+            hidden = {"basis"} if tool in BASIS_TOOLS else set()
+            locating = located and tool in LOCATION_TOOLS
+            if locating:
+                hidden |= {"lat", "lon"} | ({"max_km", "verbose"}
+                                            if lean and tool in PLAN_LOCATION_TOOLS else set())
+            properties = schema.get("properties")
+            if isinstance(properties, dict) and (locating or hidden & properties.keys()):
                 schema = {**schema,
                           "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
-                                             if k in COUNTRY_ARGS and isinstance(v, dict) else v)
-                                         for k, v in schema["properties"].items()
-                                         if k not in hidden},
+                                             if locating and k in COUNTRY_ARGS
+                                             and isinstance(v, dict) else v)
+                                         for k, v in properties.items() if k not in hidden},
                           **({"required": [r for r in schema["required"] if r not in hidden]}
                              if "required" in schema else {})}
                 t = {**t, "inputSchema": schema}
@@ -566,8 +923,9 @@ class Agent:
                    if local and self.settings.local_compact_plans and not result.get("is_error")
                    else None)
         content = compact or result_for_model(result, limit)
-        # model_chars: how much of the result the model reads (shrunk or cut to its limit)
-        yield {"type": "tool_result", "id": call["id"], **result, "step": step,
+        # model_chars: how much of the result the model reads (shrunk or cut to its limit). The
+        # browser and the trace get the result without its basis, which only tool_log keeps.
+        yield {"type": "tool_result", "id": call["id"], **for_browser(result), "step": step,
                "model_chars": len(content)}
         conv.messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
         if repeated:

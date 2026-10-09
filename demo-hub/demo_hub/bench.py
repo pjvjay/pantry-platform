@@ -89,6 +89,10 @@ class Run:
     seconds: float = 0.0
     trace_id: str = ""                       # the run's Assistant trace, when one was kept
     answer_confidence: float | None = None   # its online evals' share of checks passed
+    # swaps the shopper made in the cart since the last turn (cart_change events): not tool
+    # uses (the model made none of them), but facts the model was told, so the answer may
+    # quote their figures
+    shopper_changes: list[dict[str, Any]] = field(default_factory=list)
 
     @staticmethod
     def from_events(model: str, case: str, rep: int, events: Iterable[dict[str, Any]]) -> Run:
@@ -124,6 +128,9 @@ class Run:
                         float(e.get("ms") or 0),
                     )
                 )
+            elif kind == "cart_change":
+                run.shopper_changes.append(
+                    {k: v for k, v in e.items() if k not in ("type", "ts", "at")})
             elif kind == "error":
                 run.errors.append(str(e.get("message")))
             elif kind == "done":
@@ -134,9 +141,12 @@ class Run:
         return [u for u in self.tool_uses if u.name in names]
 
     def results_text(self) -> str:
+        """Everything this turn's answer may quote: its tool results, and the shopper's cart
+        changes with their re-priced plans."""
         return " ".join(
-            json.dumps(u.result) if not isinstance(u.result, str) else u.result
-            for u in self.tool_uses
+            [json.dumps(u.result) if not isinstance(u.result, str) else u.result
+             for u in self.tool_uses]
+            + [json.dumps(c) for c in self.shopper_changes]
         )
 
 
@@ -467,6 +477,7 @@ def record(run: Run, checks: list[Check]) -> dict[str, Any]:
             for u in run.tool_uses
         ],
         "llm_calls": run.llm_calls,
+        "shopper_changes": len(run.shopper_changes),
         "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 

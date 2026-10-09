@@ -9,7 +9,6 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from demo_hub import app as app_module
 from demo_hub.evals import evaluate
@@ -23,6 +22,7 @@ from demo_hub.telemetry import (
     add_gateway_spans,
     compute_metrics,
 )
+from tests.conftest import console_client
 
 PLAN = {"summary": {
     "recipe_name": "Tomato Penne", "total_cost": 20.05, "origin_status": "verified",
@@ -219,8 +219,8 @@ def test_the_store_keeps_traces_and_browser_measures_and_metrics_roll_them_up(tm
 
 
 def test_the_hub_takes_browser_telemetry_and_serves_metrics(tmp_path: Path) -> None:
-    client = TestClient(app_module.create_app(Settings(traces_dir=str(tmp_path / "t"),
-                                                       images_dir=str(tmp_path / "i"))))
+    client = console_client(app_module.create_app(Settings(traces_dir=str(tmp_path / "t"),
+                                                           images_dir=str(tmp_path / "i"))))
     assert client.post("/hub/telemetry", json={"kind": "page", "lcp_ms": 800}).status_code == 204
     assert client.post("/hub/telemetry", json={"kind": "spy"}).status_code == 422
     assert client.post("/hub/telemetry", content=b"not json").status_code == 400

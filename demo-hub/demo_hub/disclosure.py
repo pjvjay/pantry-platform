@@ -95,6 +95,14 @@ def parse_reports(text: str, conditions: list[Condition]) -> dict[str, tuple[boo
     return out
 
 
+def visible_tools(policy: Policy, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The target's tools without the policy's hidden ones (``Policy.hidden``)."""
+    if not policy.hidden:
+        return tools
+    return [t for t in tools
+            if not any(fnmatch.fnmatch(canonical(t["name"]), p) for p in policy.hidden)]
+
+
 # --- one conversation's disclosure ----------------------------------------------------------------
 
 @dataclass
@@ -112,8 +120,8 @@ class Disclosure:
               skills: dict[str, str] | None = None) -> Disclosure:
         if mode not in MODES:
             raise ValueError(f"disclosure must be one of {MODES}, got {mode!r}")
-        d = cls(policy, mode, catalog, dict(skills or {}))
-        d.offered = [t["name"] for t in catalog] if mode == "all" else d.resolve(policy.initial)
+        d = cls(policy, mode, visible_tools(policy, catalog), dict(skills or {}))
+        d.offered = [t["name"] for t in d.catalog] if mode == "all" else d.resolve(policy.initial)
         return d
 
     @property

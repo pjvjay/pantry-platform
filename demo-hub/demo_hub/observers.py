@@ -196,6 +196,9 @@ class Policy:
     initial: list[str]
     observers: list[Observer]
     discover_tool: bool = True
+    # Tools the model is never offered, in any mode, nor finds with discover_tools (globs on
+    # canonical names): the hub calls them itself, for the browser.
+    hidden: list[str] = field(default_factory=list)
 
     def conditions(self, trigger: str | None = None) -> list[Condition]:
         return [c for o in self.observers for c in o.conditions

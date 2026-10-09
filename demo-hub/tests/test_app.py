@@ -16,6 +16,7 @@ from demo_hub import mcp_targets
 from demo_hub.mcp_targets import McpTargetError
 from demo_hub.settings import Settings
 from demo_hub.sims import SimsError
+from tests.conftest import console_client
 
 SETTINGS = Settings(pantry_api_url="http://pantry.test", contextforge_url="http://cf.test",
                     fetch_url="http://fetch.test", mcpsim_ui_url="http://runner.test",
@@ -65,7 +66,7 @@ def upstream(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
 
 
 def make_client(settings: Settings = SETTINGS) -> TestClient:
-    return TestClient(app_module.create_app(settings))
+    return console_client(app_module.create_app(settings))
 
 
 def test_status_reports_every_service(upstream: list[httpx.Request]) -> None:
