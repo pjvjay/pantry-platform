@@ -115,6 +115,13 @@ else
 fi
 
 echo "== demo hub :$HUB_PORT"
+# Optional: a YouTube Data API key the user created (docs/recipe-import.md). With it the hub reads a
+# video's description for its ingredient list; without it a video gives its title and channel.
+if [ -s "$SECRETS_DIR/youtube_api_key" ]; then
+  echo "  ok    YouTube Data API key ($SECRETS_DIR/youtube_api_key)"
+else
+  echo "  info  no YouTube Data API key: YouTube links give their title and channel only"
+fi
 if [ -f "$STATE_DIR/pids/hub.pid" ] && kill -0 "$(cat "$STATE_DIR/pids/hub.pid")" 2>/dev/null; then
   kill "$(cat "$STATE_DIR/pids/hub.pid")" && sleep 1   # always restart: it is cheap and picks up new settings
 fi
@@ -127,7 +134,8 @@ fi
     PANTRY_API_URL=http://127.0.0.1:$PANTRY_PORT CONTEXTFORGE_URL=http://127.0.0.1:$CF_PORT \
     FETCH_URL=http://127.0.0.1:$FETCH_PORT MCPSIM_UI_URL=http://127.0.0.1:$RUNNER_PORT \
     DEMO_AGENT_MODEL=$AGENT_MODEL DEMO_OBSERVER_MODEL=$OBSERVER_MODEL \
-    DEMO_BURR_DIR=$PANTRY_API_DIR/.burr BURR_URL=http://127.0.0.1:$BURR_PORT
+    DEMO_BURR_DIR=$PANTRY_API_DIR/.burr BURR_URL=http://127.0.0.1:$BURR_PORT \
+    YOUTUBE_API_KEY_FILE=$SECRETS_DIR/youtube_api_key DEMO_VIDEO_IMPORT=${DEMO_VIDEO_IMPORT:-0}
   start_bg hub .venv/bin/python -m demo_hub.app
 )
 wait_for "demo hub" "http://127.0.0.1:$HUB_PORT/hub/mcp/targets" 30

@@ -10,7 +10,11 @@ expectations, only the conversation's own tool results, so they run on every ans
 - plan_table: an answer to a plan has the shopping table and names every planned product;
 - kept_location: a plan retried after a failure kept the shopping location (the agent once
   dropped it to get an answer, then described stores it never had);
-- no_scope_violation: the agent never called a tool it was not offered.
+- no_scope_violation: the agent never called a tool it was not offered;
+- import_grounded: a recipe the hub imported (or the shopper reviewed) this turn was planned
+  exactly as reviewed: plan_from_lines, and every planned line's name, quantity and unit equal
+  to the doc's (never plan_from_text, which re-reads the recipe and can change an amount); a
+  line pantry names as left out (water, a line past its cap) is not a dropped line.
 
 ``answer_confidence`` is the share of applicable checks that passed. ``plan`` summarises the
 plan's own confidence: the selector's per-line confidence, how many lines matched the ingredient
@@ -20,12 +24,13 @@ exactly, and the origin coverage.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Iterable
 from typing import Any
 
 from demo_hub.bench import COMMON, Check, Run
 
-PLAN_TOOLS = ("plan_recipe", "plan_from_text", "plan_week")
+PLAN_TOOLS = ("plan_recipe", "plan_from_text", "plan_from_lines", "plan_week")
 TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
 
 
@@ -83,6 +88,93 @@ def check_no_scope_violation(events: list[dict[str, Any]]) -> Check:
     return Check("no_scope_violation", not hits, "; ".join(hits))
 
 
+def _imported_docs(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The docs this turn imported, by doc_key, from its recipe_import events."""
+    out = {}
+    for e in events:
+        doc = ((e.get("result") or {}).get("doc") or {}) if e.get("type") == "recipe_import" \
+            else {}
+        if e.get("doc_key") and doc.get("lines"):
+            out[str(e["doc_key"])] = doc
+    return out
+
+
+def _line(ln: dict[str, Any]) -> tuple[str, float | None, str]:
+    q = ln.get("quantity")
+    return (str(ln.get("name") or ""), None if q is None else float(q),
+            str(ln.get("unit") or ""))
+
+
+def _show(t: tuple[str, float | None, str]) -> str:
+    name, q, unit = t
+    return " ".join(x for x in (f"{q:g}" if q is not None else "", unit, name) if x)
+
+
+def _named(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
+def check_import_grounded(events: list[dict[str, Any]],
+                          plans: list[dict[str, Any]] | None) -> Check | None:
+    """Every reviewed recipe planned this turn was planned as reviewed. ``plans`` are the hub's
+    own records of this turn's plans (Agent.turn_plans: tool, doc_key, the doc's reviewed lines,
+    the basis lines and the names the plan left out), since the basis never reaches the
+    events. Fails on plan_from_text in a turn that imported a recipe, a plan of a doc the hub
+    does not hold, a changed name, quantity or unit, or an added or dropped line.
+
+    A reviewed line missing from the basis is not a dropped line when the plan names it as
+    left out (``left_out``: pantry's not_stocked, out_of_range and skipped). pantry never plans
+    water or ice, nor a line past its 40-ingredient cap, and lists each one there by name
+    instead; each name accounts for one line.
+
+    Not applicable to a turn with neither an import nor a plan_from_lines call, nor to a plan
+    whose basis did not come back (a target whose schema has no ``basis``): there is nothing
+    to compare, which is not the same as a plan that differs."""
+    docs = _imported_docs(events)
+    relevant = [p for p in plans or [] if p["tool"] == "plan_from_lines"
+                or (docs and p["tool"] == "plan_from_text")]
+    if not relevant:
+        return None
+    problems: list[str] = []
+    planned = 0
+    named = 0
+    for plan in relevant:
+        if plan["tool"] == "plan_from_text":
+            problems.append("plan_from_text re-read an imported recipe instead of "
+                            "plan_from_lines")
+            reviewed = next(reversed(docs.values()))["lines"]
+        else:
+            reviewed = plan.get("reviewed") or (docs.get(str(plan.get("doc_key"))) or {}).get(
+                "lines")
+        if not reviewed:
+            problems.append(f"planned {plan.get('doc_key')}, a doc the hub does not hold")
+            continue
+        if plan.get("lines") is None:
+            continue
+        planned += 1
+        want = {int(ln["line_no"]): _line(ln) for ln in reviewed}
+        got = {int(ln["line_no"]): _line(ln) for ln in plan["lines"]}
+        left_out = Counter(_named(str(name)) for name in plan.get("left_out") or [])
+        for n in sorted(want.keys() | got.keys()):
+            if n not in got:
+                name = _named(want[n][0])
+                if left_out[name] > 0:
+                    left_out[name] -= 1
+                    named += 1
+                else:
+                    problems.append(f"line {n} ({_show(want[n])}) was not planned")
+            elif n not in want:
+                problems.append(f"line {n} ({_show(got[n])}) was added")
+            elif got[n] != want[n]:
+                problems.append(f"line {n}: planned {_show(got[n])}, reviewed {_show(want[n])}")
+    if not problems and not planned:
+        return None
+    detail = f"{planned} reviewed recipe(s) planned exactly as reviewed" + (
+        f"; {named} line(s) the plan names as left out" if named else "")
+    return Check("import_grounded", not problems, "; ".join(problems[:6]) if problems
+                 else detail)
+
+
 def plan_confidence(run: Run) -> dict[str, Any] | None:
     """The last plan's own confidence: the selector's line confidence (min and mean), the share
     of lines matched exactly, and the origin coverage, when the plan has one."""
@@ -107,12 +199,14 @@ def plan_confidence(run: Run) -> dict[str, Any] | None:
 
 
 def evaluate(events: list[dict[str, Any]], stores: Iterable[str] = (),
-             model: str = "") -> dict[str, Any]:
-    """Grade one answered turn from its events."""
+             model: str = "", plans: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Grade one answered turn from its events (and ``plans``, the hub's own record of this
+    turn's plans with their basis lines, for import_grounded)."""
     run = Run.from_events(model, "online", 0, events)
     checks: list[Check] = [check(run) for check in COMMON]
     checks.append(check_grounded_stores(run, stores))
-    for optional in (check_plan_table(run), check_kept_location(run)):
+    for optional in (check_plan_table(run), check_kept_location(run),
+                     check_import_grounded(events, plans)):
         if optional is not None:
             checks.append(optional)
     checks.append(check_no_scope_violation(events))

@@ -159,7 +159,7 @@ own plans.
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
-| `DEMO_CART_ALTERNATIVES` | hub | on | Off (`0`): plans are made without the basis, cards carry no `ref`, and both routes answer 404 |
+| `DEMO_CART_ALTERNATIVES` | hub | on | Off (`0`): plans are made without the basis (except `plan_from_lines`, whose basis the `import_grounded` eval reads), cards carry no `ref`, and both routes answer 404 |
 | `OFFERS_SYNTHETIC` | pantry-api | true | Puts the data note on every ranking. Turn it off only when offers are real. |
 
 ## Rollout

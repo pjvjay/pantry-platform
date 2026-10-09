@@ -89,6 +89,24 @@ class Settings:
     # HUB_ALLOWED_HOSTS, comma-separated host:port (Vite's dev proxy keeps the browser's Host).
     hub_port: int = 8090
     allowed_hosts: tuple[str, ...] = ("localhost:5173",)
+    # Recipe import (docs/recipe-import.md). The skill's stdlib extractor, loaded by path: its
+    # MAX_BYTES and TIMEOUT_S bound the hub's own fetch, and "" turns link import off. Default:
+    # scripts/extract_recipe.py beside RECIPE_SHOPPER_SKILL.
+    recipe_extractor: str = ""
+    # A YouTube Data API key the user created (D4): with it, a video's description and length
+    # are read (videos.list, 1 unit). "" leaves a video at its title and channel.
+    youtube_api_key: str = field(default="", repr=False)
+    # Gemini watching a public video for its ingredient lines: off unless DEMO_VIDEO_IMPORT=1,
+    # and then only on the shopper's click. Capped in video seconds a UTC day (6 h, under the
+    # free tier's 8 h), counted in usage_dir.
+    video_import_enabled: bool = False
+    video_import_model: str = "gemini-3-flash-preview"
+    video_import_daily_seconds: int = 6 * 3600
+    # USD per 1M tokens (input, output) for a video import; 0 while YouTube input is a free
+    # preview ("preview pricing" on every figure), set when Google prices it.
+    video_import_price: tuple[float, float] = (0.0, 0.0)
+    gemini_native_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    usage_dir: str = ""
 
     @staticmethod
     def from_env() -> Settings:
@@ -143,7 +161,33 @@ class Settings:
             hub_port=int(env.get("HUB_PORT", str(Settings.hub_port))),
             allowed_hosts=tuple(h.strip() for h in env.get(
                 "HUB_ALLOWED_HOSTS", ",".join(Settings.allowed_hosts)).split(",") if h.strip()),
+            recipe_extractor=env.get("RECIPE_EXTRACTOR")
+            or _beside_skill(env.get("RECIPE_SHOPPER_SKILL", "")),
+            youtube_api_key=env.get("YOUTUBE_API_KEY") or _read_secret(
+                env.get("YOUTUBE_API_KEY_FILE", "~/.pantry-secrets/youtube_api_key")),
+            video_import_enabled=env.get("DEMO_VIDEO_IMPORT", "0").lower()
+            in ("1", "true", "yes"),
+            video_import_model=env.get("DEMO_VIDEO_IMPORT_MODEL", Settings.video_import_model),
+            video_import_daily_seconds=int(env.get("DEMO_VIDEO_IMPORT_DAILY_SECONDS",
+                                                   str(Settings.video_import_daily_seconds))),
+            video_import_price=_price(env.get("DEMO_VIDEO_IMPORT_PRICE", "")),
+            gemini_native_url=env.get("GEMINI_NATIVE_URL", Settings.gemini_native_url)
+            .rstrip("/"),
+            usage_dir=env.get("DEMO_USAGE_DIR", "~/.pantry-demo/usage"),
         )
+
+
+def _beside_skill(skill: str) -> str:
+    """scripts/extract_recipe.py next to the recipe-shopper skill's SKILL.md, or ""."""
+    return str(Path(skill).expanduser().parent / "scripts" / "extract_recipe.py") if skill else ""
+
+
+def _price(value: str) -> tuple[float, float]:
+    """"input,output" USD per 1M tokens; "" is the free preview's 0, 0."""
+    parts = [float(x) for x in value.split(",") if x.strip()]
+    if not parts:
+        return 0.0, 0.0
+    return parts[0], parts[1] if len(parts) > 1 else parts[0]
 
 
 def _flag(raw: str) -> bool | None:

@@ -96,6 +96,10 @@ jobs:
         working-directory: demo-hub
     steps:
       - uses: actions/checkout@v4
+        with:
+          # recipe import loads the skill's extract_recipe.py from the pinned pantry-api, and
+          # reads its synthetic recipe pages; the tests that need them skip without them
+          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

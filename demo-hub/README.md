@@ -17,7 +17,7 @@ Then open **http://127.0.0.1:8090/pantry/**. Stop with `scripts/down.sh`; check 
 |---|---|---|
 | **Overview** | Architecture diagram and a 7-step guided tour | — |
 | **Planner** | Plan a pasted recipe (location, distance limit, partial plans, origin prefer/exclude), a week of dinners (budget, diet tags) or a library recipe (priced at stores near the chosen location, with a trip split). Shows the parsed lines, the per-step SQL query plan, the store split, coverage, and what could not be bought | pantry REST `/plan/nl`, `/plan/week`, `/plan/{slug}` |
-| **Assistant** | Chat with a grocery agent that plans by calling MCP tools; every call and result is shown live. Paste a recipe link and it reads the page through the gateway's fetch tool. Click a product in a plan's cart for its ranked alternatives, and swap it: the cart re-prices with no model call and the agent hears of it next turn ([docs/cart-alternatives.md](docs/cart-alternatives.md)) | hub agent loop (Gemini, or Ollama), MCP via ContextForge `pantry-recipes` (or direct pantry, or `pantry-sim`) |
+| **Assistant** | Chat with a grocery agent that plans by calling MCP tools; every call and result is shown live. Paste a recipe link or a YouTube link and the hub reads its ingredient lines before the model does; the model plans exactly those lines by their key, and pages the hub cannot read go through the gateway's fetch tool as before ([docs/recipe-import.md](docs/recipe-import.md)). Click a product in a plan's cart for its ranked alternatives, and swap it: the cart re-prices with no model call and the agent hears of it next turn ([docs/cart-alternatives.md](docs/cart-alternatives.md)) | hub agent loop (Gemini, or Ollama), MCP via ContextForge `pantry-recipes` (or direct pantry, or `pantry-sim`) |
 | **Catalog** | The planner's own lookup (`find_product`, with direct/generic/relaxed match levels) and a product's store offers, origin and evidence | REST `/products`, MCP `find_product`, `get_product` |
 | **Provenance** | Coverage, label triage, submit a label reading (an MCP write), review queue (approve / reject), and the origin ranking changing live; one-click demo-data reset | MCP resource `pantry://origins/coverage`, tools `origin_triage`, `submit_origin_evidence`, `list_origin_submissions`, `review_origin_submission`; REST `/origins/rank` |
 | **MCP explorer** | All 15 tools (forms generated from their schemas, annotations shown), 4 resources + 1 template, 3 prompts — directly on pantry with a bearer token, anonymously (refused with 401), or through ContextForge's two virtual servers | hub `/hub/mcp/*` with the official MCP SDK |
@@ -269,7 +269,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 210 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 318 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 

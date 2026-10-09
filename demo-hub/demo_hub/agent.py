@@ -66,6 +66,9 @@ from demo_hub.llm import (
 )
 from demo_hub.mcp_targets import TEXT_LIMIT, McpTargetError, Targets, call_tool, open_session
 from demo_hub.observers import Condition, Policy, View
+from demo_hub.recipe_import import Importer, ImportFailure, RecipeDoc, import_note
+from demo_hub.recipe_import import result as import_result
+from demo_hub.recipe_import.youtube import video_id
 from demo_hub.settings import Settings
 
 MAX_CONVERSATIONS = 50
@@ -83,10 +86,19 @@ FOR_MODEL_NESTED = frozenset({("nutrition", "lines"), ("days", "*", "nutrition",
 AGENT_TARGETS = ("gateway-recipes", "pantry", "gateway-sim")
 # tools that take the shopper's location: the hub always sends it (models dropped it, typed it
 # and made it up: lat -74, lon -84; lon +123.11), and the distance for the two plan tools
-LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_week", "find_product", "get_product"}
-PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text"}
-# plan tools that return the plan's basis when asked (basis=true): the hub always asks, when the
-# target's schema takes it, and the model never sees the argument
+LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines", "plan_week", "find_product",
+                  "get_product"}
+PLAN_LOCATION_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines"}
+# plan_from_lines' reviewed recipe: the model names it by doc_key and the hub fills these in from
+# the conversation's docs (an imported link, or the console's reviewed doc), so the model never
+# retypes a line and cannot change an amount the shopper reviewed
+DOC_ARGS = frozenset({"lines", "title", "servings"})
+# a link in the shopper's message, as link_reader's pattern finds it, without the punctuation a
+# sentence puts after it
+LINK = re.compile(r"https?://\S+")
+# plan tools that return the plan's basis when asked (basis=true). When the target's schema
+# takes it, the hub asks on plan_from_lines always (import_grounded compares that basis with the
+# reviewed doc) and on the others while cart alternatives are on; the model never sees it
 BASIS_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines"}
 # what the plan tools' country lists take (a 3B model sent preference ["local", "organic"])
 COUNTRY_ARGS = {
@@ -108,7 +120,11 @@ Plans:
 - A dish the shopper names that is not in list_recipes and comes without a recipe or link: write
   a short recipe for it (a title with the servings, then one "- ingredient" line each) and plan
   it with plan_from_text, allow_partial true.
-- A recipe link or a pasted recipe: follow the recipe-shopper procedure.
+- A message that starts with [import] holds a recipe the hub already read from the shopper's link
+  (or the shopper reviewed) as lines: plan it with plan_from_lines(doc_key=...) using the doc_key
+  it names; do not fetch the link; do not retype the lines. If it says no lines were read yet,
+  say in one sentence that the shopper can choose how to read them in the import card.
+- Any other recipe link, or a pasted recipe: follow the recipe-shopper procedure.
 - If a plan call fails or times out, call it again with the same arguments; if its error says
   to retry with allow_partial=true, do that instead.
 - A line's trip_store and trip_price are where the recommended trip buys it; its store and price
@@ -466,13 +482,29 @@ class Conversation:
     # shopper's next message.
     pins: dict[int, dict[int, int]] = field(default_factory=dict)
     pending: dict[tuple[str, int], PendingChange] = field(default_factory=dict)
+    # Recipes the hub read or the shopper reviewed, by doc_key (imp:1, imp:2, ...): what
+    # plan_from_lines plans. ``turn_import`` is what the hub settled in code this turn, before
+    # the model's first call, for the observers; ``plan_docs`` maps a plan's tool_log index to
+    # the doc it planned, and ``turn_first`` is this turn's first tool_log index (the evals).
+    docs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    imports: int = 0
+    turn_import: dict[str, Any] | None = None
+    plan_docs: dict[int, str] = field(default_factory=dict)
+    turn_first: int = 0
+
+
+def first_link(text: str) -> str | None:
+    m = LINK.search(text)
+    return m.group(0).rstrip(".,;:!?)]}>'\"") if m else None
 
 
 class Agent:
-    def __init__(self, settings: Settings, targets: Targets, chat: ChatClient) -> None:
+    def __init__(self, settings: Settings, targets: Targets, chat: ChatClient,
+                 importer: Importer | None = None) -> None:
         self.settings = settings
         self.targets = targets
         self.chat = chat
+        self.importer = importer or Importer(settings)
         self.conversations: OrderedDict[str, Conversation] = OrderedDict()
         self.policy = load_policy(settings.disclosure_policy)
 
@@ -515,15 +547,19 @@ class Agent:
             self._plan_tools(d.offered_tools(), model), lean=self._lean(model))
         return await self.chat.warm(model, [system], functions)
 
-    async def run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
+    async def run(self, conv: Conversation, user_text: str,
+                  recipe_doc: RecipeDoc | None = None) -> AsyncIterator[dict[str, Any]]:
+        """One turn. ``recipe_doc``: a recipe the shopper reviewed in the console's import
+        sheet ("Plan this now"), joined to the conversation before the model reads anything."""
         if conv.lock.locked():
             yield {"type": "error", "message": "this conversation is already answering"}
             return
         async with conv.lock:
-            async for event in self._run(conv, user_text):
+            async for event in self._run(conv, user_text, recipe_doc):
                 yield event
 
-    async def _run(self, conv: Conversation, user_text: str) -> AsyncIterator[dict[str, Any]]:
+    async def _run(self, conv: Conversation, user_text: str,
+                   recipe_doc: RecipeDoc | None = None) -> AsyncIterator[dict[str, Any]]:
         started = time.perf_counter()
         # Swaps since the last turn reach the model as [cart] notes before the shopper's words
         # (appended, so the conversation's earlier messages, and a model's cached prompt, stay
@@ -533,7 +569,9 @@ class Agent:
         notes = "\n".join(c.note() for c in changes)
         conv.messages.append({"role": "user",
                               "content": f"{notes}\n\n{user_text}" if notes else user_text})
+        message = conv.messages[-1]
         conv.user_texts.append(user_text)
+        conv.turn_import = None
         steps = 0
         told = False
         try:
@@ -557,12 +595,38 @@ class Agent:
                 told = True
                 for change in changes:
                     yield change.event()
+                # A link is read, or the console's reviewed recipe joins, in code before the
+                # model's first call: the model then names the doc instead of reading the page.
+                note = None
+                if recipe_doc is not None and not self._plans_lines(tools):
+                    # The note would name a tool this target lacks, and the model would retype
+                    # the lines into plan_from_text: the very re-reading the doc is there to stop.
+                    yield {"type": "error", "message": f"the {conv.target} target has no "
+                           "plan_from_lines, so it cannot plan a reviewed recipe as reviewed; "
+                           "choose the pantry target, or refresh the gateway's pantry tools"}
+                    yield self._done(conv, steps, "error", started)
+                    return
+                if recipe_doc is not None:
+                    note, event = self._take_doc(conv, recipe_doc)
+                    yield event
+                elif self._imports(tools):
+                    async for item in self._pre_import(conv, user_text):
+                        if isinstance(item, str):
+                            note = item
+                        else:
+                            yield item
+                if note:
+                    message["content"] = "\n\n".join(x for x in (notes, note, user_text) if x)
                 async for event in self._observe(conv, "turn"):
                     yield event
                 # Progressive: the skill joins the conversation when an observer enables it.
                 system = {"role": "system", "content": PREAMBLE if d.mode == "progressive"
                           else system_prompt(self.settings)}
                 first_result = len(conv.tool_log)        # this turn's results start here
+                conv.turn_first = first_result
+                # a card's ref is what opens the cart's Options: none while cart alternatives
+                # are off, though plan_from_lines still brings its basis back for the evals
+                refs = first_result if self.settings.cart_alternatives else None
                 nudged = False
                 conv.turn_calls.clear()
                 for steps in range(1, self.settings.agent_max_steps + 1):
@@ -614,7 +678,7 @@ class Agent:
                         # The browser draws the plans themselves (`plans`) under `reply`.
                         results = [r for _, r in conv.tool_log[first_result:]]
                         cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY,
-                                           start=first_result)
+                                           start=refs)
                         text = with_tables(text, plan_tables(results))
                     if not turn.tool_calls and not text.strip() and turn.output_tokens \
                             and not nudged:
@@ -637,7 +701,7 @@ class Agent:
                         return
                     for call in turn.tool_calls:
                         sent = self._with_hub_args(call["name"], call["arguments"],
-                                                   call["name"] in conv.basis_tools)
+                                                   call["name"] in conv.basis_tools, conv.docs)
                         filled = sorted(k for k in sent if k not in call["arguments"])
                         call = {**call, "arguments": sent}
                         yield {"type": "tool_call", "id": call["id"], "name": call["name"],
@@ -651,8 +715,7 @@ class Agent:
                 tables = plan_tables(results)
                 if tables:
                     reply = "The model did not finish its summary; here is the plan it made."
-                    cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY,
-                                       start=first_result)
+                    cards = plan_cards(results, drop=FOR_BROWSER | SERVER_ONLY, start=refs)
                     yield {"type": "assistant", "step": steps, "text": with_tables(reply, tables),
                            **({"reply": reply, "plans": cards} if cards else {})}
                 yield self._done(conv, steps, "step budget reached", started)
@@ -662,6 +725,114 @@ class Agent:
                     yield change.event()
             yield {"type": "error", "message": str(exc)}
             yield self._done(conv, steps, "error", started)
+
+    # --- recipe import: a link read, or a reviewed doc joined, before the model -----------------
+
+    def _imports(self, tools: list[dict[str, Any]]) -> bool:
+        """The hub reads links itself when it can (the skill's extractor is there) and the
+        target can plan what it reads (plan_from_lines); otherwise links go to fetch as before."""
+        return self._plans_lines(tools) and self.importer.available()[0]
+
+    @staticmethod
+    def _plans_lines(tools: list[dict[str, Any]]) -> bool:
+        return any(canonical(t["name"]) == "plan_from_lines" for t in tools)
+
+    @staticmethod
+    def _next_key(conv: Conversation) -> str:
+        conv.imports += 1
+        return f"imp:{conv.imports}"
+
+    async def _pre_import(self, conv: Conversation, user_text: str
+                          ) -> AsyncIterator[dict[str, Any] | str]:
+        """Read the first link in the shopper's message (link_reader's pattern) into a doc,
+        before the first model call. Yields the recipe_import event, then the [import] note the
+        model reads before the shopper's words (a str). On success the doc is conv.docs[imp:N]
+        and link_reader offers plan_from_lines instead of fetch; a web page that cannot be read
+        leaves the turn as before (fetch and plan_from_text). A YouTube link is never fetched:
+        without lines the shopper chooses how to read it in the import card."""
+        url = first_link(user_text)
+        if not url:
+            return
+        started = time.perf_counter()
+        youtube = video_id(url) is not None
+        key = f"imp:{conv.imports + 1}"
+        try:
+            res = await self.importer.import_url(url, key)
+        except Exception as exc:  # noqa: BLE001 - a failed import never fails the turn
+            failure = exc if isinstance(exc, ImportFailure) else ImportFailure(
+                502, "import_error", f"The hub could not read the link ({type(exc).__name__}).")
+            conv.turn_import = {"ok": False, "fallback": not youtube, "code": failure.code}
+            yield {"type": "recipe_import", "status": "failed", "url": url,
+                   "error": {"status": failure.status, **failure.body()},
+                   "fallback": not youtube, "ms": _ms_since(started)}
+            if youtube:
+                yield (f"[import] The hub could not read the YouTube link: {failure.message} "
+                       "Do not fetch the video.")
+            return
+        doc = res.get("doc")
+        if doc and doc.get("lines"):
+            self._next_key(conv)
+            conv.docs[key] = doc
+            note = import_note(key, doc)
+            conv.turn_import = {"ok": True, "doc_key": key, "lines": len(doc["lines"]),
+                                "needs": res["needs"]}
+        else:
+            video = res.get("video") or {}
+            why = (res.get("warnings") or ["no ingredient lines were found"])[0].rstrip(".")
+            note = (f"[import] {str(video.get('title') or 'A YouTube video')[:120]}, a YouTube "
+                    f"video from {str(video.get('channel') or 'an unknown channel')[:80]}: no "
+                    f"ingredient lines were read ({why}). The shopper chooses how to read them "
+                    "in the import card. Do not fetch the video.")
+            conv.turn_import = {"ok": True, "lines": 0, "needs": res["needs"]}
+        yield {"type": "recipe_import", "status": "ok", "url": url,
+               "doc_key": key if key in conv.docs else None, "result": res, "note": note,
+               "ms": _ms_since(started)}
+        yield note
+
+    def _take_doc(self, conv: Conversation, doc: RecipeDoc) -> tuple[str, dict[str, Any]]:
+        """The console's reviewed recipe ("Plan this now") as the conversation's next imp:N:
+        (the [import] note, the recipe_import event)."""
+        key = self._next_key(conv)
+        stored = doc.model_copy(update={"key": key})
+        conv.docs[key] = stored.model_dump()
+        note = import_note(key, conv.docs[key])
+        conv.turn_import = {"ok": True, "doc_key": key, "lines": len(stored.lines),
+                            "needs": "none", "via": "console"}
+        return note, {"type": "recipe_import", "status": "ok", "via": "console",
+                      "url": stored.source.url, "doc_key": key,
+                      "result": import_result(stored), "note": note, "ms": 0.0}
+
+    def turn_plans(self, conv: Conversation) -> list[dict[str, Any]]:
+        """This turn's plans as the online evals need them, from the hub's own tool_log: the
+        tool, the doc it planned (plan_from_lines) with that doc's reviewed lines, the basis
+        lines pantry planned, and the ingredients the plan names as left out (``left_out``:
+        water and ice, lines past pantry's 40-line cap, and what was not stocked or in range
+        are on those lists, not among the basis lines). The basis never reaches the browser or
+        the trace, so the evals get it here."""
+        def project(lines: Any) -> list[dict[str, Any]]:
+            return [{k: ln.get(k) for k in ("line_no", "name", "quantity", "unit")}
+                    for ln in lines or []]
+
+        def left_out(source: dict[str, Any]) -> list[str]:
+            return [str(d.get("ingredient") or "") for k in ("not_stocked", "out_of_range",
+                                                             "skipped")
+                    for d in source.get(k) or [] if isinstance(d, dict)]
+
+        out = []
+        for i, (tool, structured) in enumerate(conv.tool_log[conv.turn_first:],
+                                               start=conv.turn_first):
+            if not is_plan(structured):
+                continue
+            summary = structured["summary"]
+            basis = summary.get("basis")
+            key = conv.plan_docs.get(i)
+            out.append({"tool": tool, "doc_key": key,
+                        "reviewed": project(conv.docs[key]["lines"]) if key in conv.docs
+                        else None,
+                        "lines": project(basis.get("lines")) if isinstance(basis, dict)
+                        else None,
+                        "left_out": left_out(basis if isinstance(basis, dict) else summary)})
+        return out
 
     # --- the cart: alternatives and swaps, no model involved ------------------------------------
 
@@ -808,7 +979,8 @@ class Agent:
         return self.settings.local_lean_tools and model.startswith("ollama:")
 
     def _with_hub_args(self, name: str, arguments: dict[str, Any],
-                       takes_basis: bool = False) -> dict[str, Any]:
+                       takes_basis: bool = False,
+                       docs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
         """The arguments the hub fills in, whatever the model sent.
 
         A location-taking tool (LOCATION_TOOLS) gets the shopper's location
@@ -819,13 +991,32 @@ class Agent:
 
         A plan tool whose schema takes it (``takes_basis``) gets basis=true while cart
         alternatives are on (DEMO_CART_ALTERNATIVES): the plan's basis comes back for the hub to
-        keep, so the cart can rank and re-price a line without the model. The model never sees
-        the argument, and one it sends anyway is not passed on."""
+        keep, so the cart can rank and re-price a line without the model. plan_from_lines gets
+        it whatever that setting says: the import_grounded eval compares its basis with the
+        reviewed doc, and without one every import turn would go unchecked. The model never
+        sees the argument, and one it sends anyway is not passed on.
+
+        plan_from_lines gets the reviewed recipe the model named by ``doc_key`` from ``docs``
+        (the conversation's): its lines, title and servings, exactly as reviewed. Lines the
+        model wrote itself are never passed on; an unknown doc_key is refused in ``_tool``."""
         tool = canonical(name)
         out = dict(arguments)
+        if tool == "plan_from_lines":
+            for k in DOC_ARGS:
+                out.pop(k, None)
+            doc = (docs or {}).get(str(arguments.get("doc_key") or ""))
+            if doc:
+                out["lines"] = [{"name": ln["name"], "quantity": ln.get("quantity"),
+                                 "unit": ln.get("unit") or "", "note": ln.get("note") or "",
+                                 "text": ln.get("text") or "",
+                                 "confirmed": bool(ln.get("confirmed", True)),
+                                 "amount_basis": ln["amount_basis"]} for ln in doc["lines"]]
+                out["title"] = doc["title"]
+                if doc.get("servings"):
+                    out["servings"] = doc["servings"]
         if tool in BASIS_TOOLS:
             out.pop("basis", None)
-            if takes_basis and self.settings.cart_alternatives:
+            if takes_basis and (self.settings.cart_alternatives or tool == "plan_from_lines"):
                 out["basis"] = True
         loc = self.settings.shopper_location
         if not loc or tool not in LOCATION_TOOLS:
@@ -851,6 +1042,8 @@ class Agent:
             schema = t.get("inputSchema") or {}
             tool = canonical(t["name"])
             hidden = {"basis"} if tool in BASIS_TOOLS else set()
+            if tool == "plan_from_lines":
+                hidden |= DOC_ARGS
             locating = located and tool in LOCATION_TOOLS
             if locating:
                 hidden |= {"lat", "lon"} | ({"max_km", "verbose"}
@@ -905,6 +1098,14 @@ class Agent:
             text, added = d.discover(query)
             result = {"name": name, "is_error": False, "structured": None, "text": text,
                       "ms": 0.0, "truncated": False}
+        elif canonical(name) == "plan_from_lines" and d.is_offered(name) \
+                and str(call["arguments"].get("doc_key")) not in conv.docs:
+            known = ", ".join(conv.docs) or "none yet"
+            result = {"name": name, "is_error": True, "structured": None, "ms": 0.0,
+                      "truncated": False,
+                      "text": f"Unknown doc_key {call['arguments'].get('doc_key')!r}: "
+                              f"plan_from_lines plans a recipe the hub holds, named in an "
+                              f"[import] note. Known doc_keys: {known}."}
         elif not d.is_offered(name):
             scope = "not disclosed" if any(t["name"] == name for t in d.catalog) else "not allowed"
             hint = " Ask for it with discover_tools." if d.discoverable and scope == "not disclosed" else ""
@@ -938,6 +1139,8 @@ class Agent:
                    "reason": f"discover_tools:{query}"}
         elif name != DISCOVER:
             conv.tool_log.append((canonical(name), result.get("structured")))
+            if canonical(name) == "plan_from_lines" and not result.get("is_error"):
+                conv.plan_docs[len(conv.tool_log) - 1] = str(call["arguments"].get("doc_key"))
             async for event in self._observe(conv, "tool_result"):
                 yield event
 
@@ -1017,7 +1220,8 @@ class Agent:
                                   f"returned: {content[:300]}")
         return View(user_messages=list(conv.user_texts), tool_calls=[n for n, _ in conv.tool_log],
                     results={n: r for n, r in conv.tool_log if isinstance(r, dict)},
-                    transcript=transcript)
+                    transcript=transcript,
+                    hub={"import": conv.turn_import} if conv.turn_import else {})
 
     async def _call_model(self, conv: Conversation, system: dict[str, Any],
                           functions: list[dict[str, Any]], step: int
@@ -1063,3 +1267,7 @@ class Agent:
         return {"type": "done", "steps": steps, "stop": stop,
                 "seconds": round(time.perf_counter() - started, 1),
                 "input_tokens": conv.input_tokens, "output_tokens": conv.output_tokens}
+
+
+def _ms_since(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 1)

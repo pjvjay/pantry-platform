@@ -59,6 +59,9 @@ class View:
     tool_calls: list[str] = field(default_factory=list)      # canonical tool names, in order
     results: dict[str, Any] = field(default_factory=dict)    # canonical name -> last structured
     transcript: list[str] = field(default_factory=list)      # "[n] shopper: ..." lines for LLMs
+    # What the hub settled in code this turn, before the model's first call: {"import": {ok,
+    # lines, needs, fallback, ...}} once it read the shopper's link (recipe_import).
+    hub: dict[str, Any] = field(default_factory=dict)
 
     @property
     def last_message(self) -> str:
