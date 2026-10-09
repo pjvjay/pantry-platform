@@ -211,3 +211,35 @@ def test_the_bench_grades_the_sentence_and_counts_argument_errors() -> None:
     refused = meal_arguments(bench_run({"name": "plan_meals", "asked": {}, "error": True}))
     assert refused is not None and refused["refused"] == 1 and refused["argument_error"]
     assert meal_arguments(bench_run()) is None
+
+
+def test_a_hidden_arguments_types_leave_the_schema_with_it() -> None:
+    from demo_hub.agent import Agent, used_defs
+    from demo_hub.settings import Settings
+    from tests.test_agent import FakeTargets
+
+    ref = {"$ref": "#/$defs/RecipeDoc"}
+    tool = {"name": "plan_meals", "description": "Plan meals.", "inputSchema": {
+        "type": "object",
+        "properties": {
+            "dishes": {"type": "array", "items": {"$ref": "#/$defs/DishIn"}},
+            "days": {"type": "integer"},
+            "current": {"$ref": "#/$defs/MealPlanContext"},
+            "my_recipe_docs": {"type": "array", "items": ref},
+            "proposed": {"type": "array", "items": {"$ref": "#/$defs/ProposedDish"}},
+            "lat": {"type": "number"}},
+        "$defs": {"DishIn": {"type": "object", "properties": {"slot": {"$ref": "#/$defs/Slot"}}},
+                  "Slot": {"enum": ["dinner", "snack"]},
+                  "MealPlanContext": {"type": "object", "properties": {
+                      "meals": {"type": "array", "items": {"$ref": "#/$defs/Meal"}}}},
+                  "Meal": {"type": "object"}, "RecipeDoc": {"type": "object"},
+                  "ProposedDish": {"type": "object"}}}}
+    shown = Agent(Settings(observer_model=""), FakeTargets(), None)._plan_tools(
+        [tool], "ollama:granite4.2:8b")[0]["inputSchema"]
+    assert set(shown["properties"]) == {"dishes", "days"}
+    assert set(shown["$defs"]) == {"DishIn", "Slot"}          # reached through dishes only
+    plain = {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}},
+             "$defs": {"A": {"type": "object"}}}
+    assert used_defs(plain) is plain
+    assert "$defs" not in used_defs({"type": "object", "properties": {},
+                                     "$defs": {"A": {"type": "object"}}})

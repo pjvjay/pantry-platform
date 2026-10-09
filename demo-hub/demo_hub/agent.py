@@ -237,6 +237,44 @@ def lean_description(text: str, limit: int = LEAN_DESCRIPTION) -> str:
     return out
 
 
+DEFS = "#/$defs/"
+
+
+def _refs(node: Any, found: set[str]) -> None:
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith(DEFS):
+            found.add(ref[len(DEFS):])
+        for value in node.values():
+            _refs(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _refs(value, found)
+
+
+def used_defs(schema: dict[str, Any]) -> dict[str, Any]:
+    """``schema`` with only the ``$defs`` its properties still reach. A hidden argument's types
+    stay behind otherwise: plan_meals' hidden ``current`` and ``my_recipe_docs`` carried a
+    RecipeDoc, a meal plan and their parts, about 2,000 tokens a local model read for nothing."""
+    defs = schema.get("$defs")
+    if not isinstance(defs, dict):
+        return schema
+    keep: set[str] = set()
+    todo: set[str] = set()
+    _refs({k: v for k, v in schema.items() if k != "$defs"}, todo)
+    while todo:
+        name = todo.pop()
+        if name not in keep and name in defs:
+            keep.add(name)
+            _refs(defs[name], todo)
+    if keep == set(defs):
+        return schema
+    out = {k: v for k, v in schema.items() if k != "$defs"}
+    if keep:
+        out["$defs"] = {k: v for k, v in defs.items() if k in keep}
+    return out
+
+
 def lean_schema(node: Any) -> Any:
     if isinstance(node, list):
         return [lean_schema(x) for x in node]
@@ -1174,13 +1212,14 @@ class Agent:
                                             if lean and tool in PLAN_LOCATION_TOOLS else set())
             properties = schema.get("properties")
             if isinstance(properties, dict) and (locating or hidden & properties.keys()):
-                schema = {**schema,
-                          "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
-                                             if locating and k in COUNTRY_ARGS
-                                             and isinstance(v, dict) else v)
-                                         for k, v in properties.items() if k not in hidden},
-                          **({"required": [r for r in schema["required"] if r not in hidden]}
-                             if "required" in schema else {})}
+                schema = used_defs({
+                    **schema,
+                    "properties": {k: ({**v, "description": COUNTRY_ARGS[k]}
+                                       if locating and k in COUNTRY_ARGS
+                                       and isinstance(v, dict) else v)
+                                   for k, v in properties.items() if k not in hidden},
+                    **({"required": [r for r in schema["required"] if r not in hidden]}
+                       if "required" in schema else {})})
                 t = {**t, "inputSchema": schema}
             out.append(t)
         return out
