@@ -91,6 +91,10 @@ def test_the_link_route_and_status(tmp_path: Path) -> None:
     assert stored["spans"][0]["attrs"]["url"] == "https://blog.example/dal"       # no query
     assert stored["spans"][0]["attrs"]["host"] == "blog.example"
     assert "abc" not in json.dumps(stored)
+    r = client.post("/hub/recipes/import", json={"url": "https://bob:s3cret@blog.example/dal"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_url"
+    refused = app.state.traces.get(app.state.traces.list(1)[0]["id"])
+    assert refused["message"] == "https://blog.example/dal" and "s3cret" not in json.dumps(refused)
     r = client.post("/hub/recipes/import", json={"url": "http://127.0.0.1:8090/hub/status"})
     assert r.status_code == 403 and r.json()["detail"]["code"] == "not_public"
     r = client.post("/hub/recipes/import", json={"url": "https://nothing.example/"})

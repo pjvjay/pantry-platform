@@ -245,7 +245,8 @@ Quota: about 1 unit per import of the default 10,000 a day (from memory, not re-
 ## Telemetry
 
 Each import is an `import` span: method, host, line count, what it needs next, time, and a
-video's tokens and cost. The URL is recorded without its query string or fragment. In chat the
+video's tokens and cost. The URL is recorded without its user name, password, query string or
+fragment. In chat the
 span sits on the turn (the turn's own `message` is still the shopper's text as typed); an import
 from the console's sheet is a trace of its own with `source: "import"`. Metrics roll them up
 under `imports`.

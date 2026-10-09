@@ -197,6 +197,10 @@ def test_bad_links_are_refused() -> None:
 
 def test_a_url_in_a_trace_has_no_query() -> None:
     assert without_query("https://blog.example/r?token=abc#step-2") == "https://blog.example/r"
+    # nor a user name and password, though the import refuses such a link (400 bad_url)
+    assert without_query("https://bob:s3cret@blog.example:8443/dal?token=abc") == \
+        "https://blog.example:8443/dal"
+    assert without_query("https://bob@blog.example/dal") == "https://blog.example/dal"
 
 
 def test_the_page_is_parsed_off_the_event_loop(tmp_path: Path) -> None:

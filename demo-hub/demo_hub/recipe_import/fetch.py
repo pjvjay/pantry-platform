@@ -284,9 +284,10 @@ async def _fetch(url: str, limits: Limits, resolver: Resolver,
 
 
 def without_query(url: str) -> str:
-    """``url`` with no query string or fragment, for traces (a query can carry a token)."""
+    """``url`` with no user name, password, query string or fragment, for traces and logs: a
+    query can carry a token, and a link the hub refuses for its password is still traced."""
     try:
         parsed = httpx.URL(url)
     except httpx.InvalidURL:
         return ""
-    return str(parsed.copy_with(query=None, fragment=None))
+    return str(parsed.copy_with(username=None, password=None, query=None, fragment=None))
