@@ -553,6 +553,7 @@ def record(run: Run, checks: list[Check]) -> dict[str, Any]:
         "llm_calls": run.llm_calls,
         "shopper_changes": len(run.shopper_changes),
         "meal_arguments": meal_arguments(run),
+        "plan_calls": run.plan_calls,
         "first_token_s": first_token_s(run),
         "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
