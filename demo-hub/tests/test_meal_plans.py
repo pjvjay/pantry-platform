@@ -153,3 +153,61 @@ def test_evaluate_runs_both_checks_on_a_meal_plan_turn() -> None:
                          "days in the fridge.", copy.deepcopy(result()))
     checks = {c["name"]: c for c in evaluate(events)["checks"]}
     assert checks["grounded_nutrition"]["passed"] and checks["no_invented_shelf_life"]["passed"]
+
+
+# --- the bench's meal-plan case -------------------------------------------------------------------------
+
+def bench_run(*calls: dict[str, Any]) -> Run:
+    """A meal-plan run: each call {name, asked?, by_hub?, error?}, plan_meals answering with
+    the draft of the user's sentence."""
+    from demo_hub.bench import Run as BenchRun
+
+    events: list[dict[str, Any]] = [{"type": "start", "tools": ["plan_meals", "plan_week"]},
+                                    {"type": "llm_call", "step": 1, "wall_s": 50.0,
+                                     "gen_s": 12.0}]
+    for i, c in enumerate(calls):
+        events.append({"type": "tool_call", "id": f"c{i}", "name": c["name"], "arguments": {},
+                       **({"asked": c["asked"]} if "asked" in c else {}),
+                       **({"by_hub": True} if c.get("by_hub") else {})})
+        events.append({"type": "tool_result", "id": f"c{i}", "name": c["name"],
+                       "is_error": bool(c.get("error")),
+                       "structured": None if c.get("error") or c["name"] != "plan_meals"
+                       else result(added=[
+                           {"title": t, "count": n, "recipe_key": k} for t, n, k in (
+                               ("Pepperoni Pizza", 3, "starter:pepperoni_pizza"),
+                               ("Chicken Fried Rice", 2, "starter:chicken_fried_rice"),
+                               ("Mango Milkshake", 7, "starter:mango_milkshake"))]),
+                       "ms": 1})
+    events += [{"type": "assistant", "text": "Planned."},
+               {"type": "done", "stop": "answered", "seconds": 60}]
+    return BenchRun.from_events("ollama:granite4.2:8b", "meal-plan-fortnight", 1, events)
+
+
+def test_the_bench_grades_the_sentence_and_counts_argument_errors() -> None:
+    from demo_hub.bench import CASES, first_token_s, meal_arguments, meal_plan_fortnight
+
+    case = next(c for c in CASES if c.id == "meal-plan-fortnight")
+    assert case.message == ("3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken briyani + "
+                            "7 mango milkshakes in 2 weeks")
+    empty = bench_run({"name": "plan_meals", "asked": {}})
+    assert all(c.passed for c in meal_plan_fortnight(empty)), meal_plan_fortnight(empty)
+    assert meal_arguments(empty) == {"model_calls": 1, "dishes": ["empty"], "wrong_tool": [],
+                                     "refused": 0, "hub_drafted": False,
+                                     "argument_error": False}
+    assert first_token_s(empty) == 38.0
+    given = meal_arguments(bench_run({"name": "plan_meals", "asked": {
+        "dishes": [{"recipe": "Pepperoni Pizza", "count": 3}]}}))
+    assert given is not None and given["dishes"] == ["given"] and not given["argument_error"]
+    for bad in ({"dishes": "3 pizza"}, {"dishes": [{"recipe": "", "count": 3}]},
+                {"dishes": [{"recipe": "Pizza", "count": "3"}]}):
+        out = meal_arguments(bench_run({"name": "plan_meals", "asked": bad}))
+        assert out is not None and out["dishes"] == ["malformed"] and out["argument_error"]
+    wrong = meal_arguments(bench_run({"name": "plan_week", "asked": {"days": 14}},
+                                     {"name": "plan_meals", "by_hub": True}))
+    assert wrong is not None and wrong["wrong_tool"] == ["plan_week"] and wrong["hub_drafted"]
+    assert wrong["model_calls"] == 0 and wrong["argument_error"]
+    hub = meal_arguments(bench_run({"name": "plan_meals", "by_hub": True}))
+    assert hub is not None and hub["hub_drafted"] and not hub["argument_error"]
+    refused = meal_arguments(bench_run({"name": "plan_meals", "asked": {}, "error": True}))
+    assert refused is not None and refused["refused"] == 1 and refused["argument_error"]
+    assert meal_arguments(bench_run()) is None

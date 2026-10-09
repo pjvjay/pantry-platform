@@ -93,6 +93,9 @@ class Run:
     # uses (the model made none of them), but facts the model was told, so the answer may
     # quote their figures
     shopper_changes: list[dict[str, Any]] = field(default_factory=list)
+    # every plan tool call: {name, by_hub, asked} (asked: plan_meals' arguments as the model
+    # wrote them, before the hub filled in the dishes), for the meal-plan argument rates
+    plan_calls: list[dict[str, Any]] = field(default_factory=list)
 
     @staticmethod
     def from_events(model: str, case: str, rep: int, events: Iterable[dict[str, Any]]) -> Run:
@@ -116,6 +119,10 @@ class Run:
                 run.answer = str(e.get("text") or "")  # the last text is the answer
             elif kind == "tool_call":
                 pending[str(e.get("id"))] = e
+                if canonical_tool(str(e.get("name"))).startswith("plan_"):
+                    run.plan_calls.append({"name": canonical_tool(str(e.get("name"))),
+                                           "by_hub": bool(e.get("by_hub")),
+                                           "asked": e.get("asked", e.get("arguments"))})
             elif kind == "tool_result":
                 call = pending.pop(str(e.get("id")), {})
                 result = e.get("structured") if e.get("structured") is not None else e.get("text")
@@ -362,6 +369,72 @@ def out_of_scope(run: Run) -> list[Check]:
     ]
 
 
+MEAL_SENTENCE = ("3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken briyani + 7 mango "
+                 "milkshakes in 2 weeks")
+MEAL_COUNTS = {"Pepperoni Pizza": 3, "Chicken Fried Rice": 2, "Mango Milkshake": 7}
+
+
+def meal_plan_fortnight(run: Run) -> list[Check]:
+    """The user's sentence: a draft whose placed dishes are the three exact or plural ones
+    with their counts, and Chicken Biryani (written "briyani") proposed, never placed."""
+    plans = [u.result["summary"] for u in run.used("plan_meals")
+             if not u.is_error and isinstance(u.result, dict)
+             and isinstance(u.result.get("summary"), dict)]
+    checks = [Check("drafted the plan", bool(plans), "plan_meals, by the model or the hub")]
+    if plans:
+        s = plans[-1]
+        counts = {a.get("title"): a.get("count") for a in s.get("added") or []}
+        checks.append(Check("placed 3/2/7", counts == MEAL_COUNTS, json.dumps(counts)))
+        placed = {str(m.get("recipe_key")) for m in s.get("meals") or []}
+        proposed = {str(p.get("recipe_key")) for p in s.get("proposals") or []}
+        checks.append(Check("briyani proposed, not placed",
+                            any("biryani" in k for k in proposed)
+                            and not any("biryani" in k for k in placed),
+                            f"proposed {sorted(proposed)}"))
+    return checks
+
+
+def meal_arguments(run: Run) -> dict[str, Any] | None:
+    """How the model handled plan_meals' arguments on a meal-plan run: its own plan_meals
+    calls, their dishes (given: a list of {recipe, count}; empty: none, so the hub's parse
+    filled them, as the instructions ask; malformed: anything else), other plan tools called
+    instead (wrong tool), plan_meals calls the server refused, and whether the hub drafted the
+    plan because the model made no call. An argument error is a malformed dishes value, a
+    wrong tool or a refused call. None for a run with no meal plan."""
+    calls = [c for c in run.plan_calls if not c["by_hub"]]
+    meals = [c for c in calls if c["name"] == "plan_meals"]
+    hub = any(c["by_hub"] for c in run.plan_calls)
+    if not meals and not hub and not run.used("plan_meals"):
+        return None
+    dishes = []
+    for c in meals:
+        value = (c.get("asked") or {}).get("dishes")
+        if value in (None, []):
+            dishes.append("empty")
+        elif isinstance(value, list) and all(
+                isinstance(d, dict) and str(d.get("recipe") or "").strip()
+                and isinstance(d.get("count"), int) and 1 <= d["count"] <= 28 for d in value):
+            dishes.append("given")
+        else:
+            dishes.append("malformed")
+    wrong = sorted({c["name"] for c in calls if c["name"] != "plan_meals"})
+    refused = sum(u.is_error for u in run.used("plan_meals"))
+    return {"model_calls": len(meals), "dishes": dishes, "wrong_tool": wrong,
+            "refused": refused, "hub_drafted": hub,
+            "argument_error": "malformed" in dishes or bool(wrong) or refused > 0}
+
+
+def first_token_s(run: Run) -> float | None:
+    """Seconds before the first model call began writing: its wall time less its writing
+    time (loading, queueing and reading the prompt)."""
+    if not run.llm_calls:
+        return None
+    first = run.llm_calls[0]
+    wall = first.get("wall_s")
+    return None if wall is None else round(max(0.0, float(wall) - float(first.get("gen_s") or 0)),
+                                           1)
+
+
 @dataclass(frozen=True)
 class Case:
     id: str
@@ -391,6 +464,7 @@ CASES: tuple[Case, ...] = (
         out_of_scope,
         "negative",
     ),
+    Case("meal-plan-fortnight", MEAL_SENTENCE, meal_plan_fortnight),
 )
 
 
@@ -478,6 +552,8 @@ def record(run: Run, checks: list[Check]) -> dict[str, Any]:
         ],
         "llm_calls": run.llm_calls,
         "shopper_changes": len(run.shopper_changes),
+        "meal_arguments": meal_arguments(run),
+        "first_token_s": first_token_s(run),
         "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
@@ -614,7 +690,22 @@ def summarise(records: list[dict[str, Any]], models: list[str]) -> dict[str, Any
             "output_tokens_median": _median([c.get("output_tokens", 0) for c in calls]),
             "thinking_chars": sum(c.get("thinking_chars", 0) for c in calls),
             "load_s_max": max((c.get("load_s", 0) for c in calls), default=None),
+            "first_token_s_median": _median([r["first_token_s"] for r in rows
+                                             if r.get("first_token_s") is not None]),
         }
+        meal = [r["meal_arguments"] for r in rows if r.get("meal_arguments")]
+        if meal:
+            out["models"][model]["meal_plans"] = {
+                "runs": len(meal),
+                "model_plan_meals_calls": sum(m["model_calls"] for m in meal),
+                "dishes_given": sum(m["dishes"].count("given") for m in meal),
+                "dishes_empty_filled_by_hub": sum(m["dishes"].count("empty") for m in meal),
+                "dishes_malformed": sum(m["dishes"].count("malformed") for m in meal),
+                "runs_with_wrong_tool": sum(bool(m["wrong_tool"]) for m in meal),
+                "runs_hub_drafted": sum(m["hub_drafted"] for m in meal),
+                "argument_error_rate": round(sum(m["argument_error"] for m in meal)
+                                             / len(meal), 2),
+            }
     for case in {r["case"] for r in records}:
         for model in models:
             rows = [r for r in records if r["case"] == case and r["model"] == model]
@@ -707,6 +798,25 @@ def report(summary: dict[str, Any], meta: dict[str, Any], records: list[dict[str
         row("thinking characters (all calls)", "thinking_chars"),
         row("longest model load", "load_s_max", " s"),
     ]
+    lines.append(row("seconds to the first token, first call (median)",
+                     "first_token_s_median", " s"))
+    meal_models = [m for m in models if summary["models"][m].get("meal_plans")]
+    if meal_models:
+        lines += ["\n## Meal-plan arguments (plan_meals)\n\n",
+                  "| | " + " | ".join(f"`{m}`" for m in meal_models) + " |\n|---|"
+                  + "---|" * len(meal_models) + "\n"]
+        for key, label in (("runs", "meal-plan runs"),
+                           ("model_plan_meals_calls", "plan_meals calls by the model"),
+                           ("dishes_given", "... with dishes it wrote"),
+                           ("dishes_empty_filled_by_hub",
+                            "... with no dishes (the hub's parse filled them, as asked)"),
+                           ("dishes_malformed", "... with malformed dishes"),
+                           ("runs_with_wrong_tool", "runs calling another plan tool"),
+                           ("runs_hub_drafted", "runs the hub drafted (no model call)"),
+                           ("argument_error_rate", "tool-argument error rate")):
+            lines.append(f"| {label} | " + " | ".join(
+                _fmt(summary["models"][m]["meal_plans"].get(key)) for m in meal_models)
+                + " |\n")
     for m in models:
         info = meta["model_info"].get(m, {})
         lines.append(
