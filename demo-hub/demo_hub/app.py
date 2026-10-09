@@ -42,7 +42,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from demo_hub import mcp_targets, pricing
+from demo_hub import mcp_targets, meal_plans, pricing
 from demo_hub.agent import AGENT_TARGETS, Agent, CartError
 from demo_hub.evals import evaluate
 from demo_hub.guard import Guard
@@ -110,6 +110,9 @@ class ChatBody(BaseModel):
     # A RecipeDoc the shopper reviewed in the import sheet ("Plan this now"): it becomes the
     # conversation's next imp:N and the model plans it with plan_from_lines. At most 64 KB.
     recipe_doc: dict[str, Any] | None = None
+    # The console's Meal plan in brief (meal_plans.MealPlanBody), sent with every message: what
+    # plan_meals drafts against. At most 64 KB, kept in memory with the conversation only.
+    meal_plan: dict[str, Any] | None = None
 
 
 class ImportBody(BaseModel):
@@ -341,6 +344,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def agent_chat(body: ChatBody) -> StreamingResponse:
         doc = _reviewed_doc(body.recipe_doc) if body.recipe_doc is not None else None
         try:
+            meal_plan = (meal_plans.meal_plan_body(body.meal_plan)
+                         if body.meal_plan is not None else None)
+        except meal_plans.MealPlanRefused as exc:
+            raise HTTPException(exc.status, exc.detail) from exc
+        try:
             conv = agent.conversation(body.conversation_id, body.model
                                       or settings.default_agent_model, body.target,
                                       body.disclosure)
@@ -359,7 +367,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # answer's evals arrive just before "done". The trace is kept even when the browser
             # goes away mid-answer, and ContextForge's spans join it once the turn is over.
             try:
-                async for event in agent.run(conv, body.message, doc):
+                async for event in agent.run(conv, body.message, doc,
+                                             **({"meal_plan": meal_plan} if meal_plan else {})):
                     if event.get("type") == "done":     # graded with the turn's end in view
                         recorder.evals = evaluate([*recorder.events, event],
                                                   await known_stores(), conv.model,
