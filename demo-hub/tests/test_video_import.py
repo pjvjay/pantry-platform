@@ -167,6 +167,52 @@ def test_a_refused_youtube_key_does_not_stop_a_transcription(tmp_path: Path) -> 
     assert imp.usage.read()["seconds"] == 755.0            # the length unknown: tokens / 100
 
 
+def test_calls_started_together_cannot_pass_the_cap_between_them(tmp_path: Path) -> None:
+    """The length is held when it is checked, under one lock: a second call that starts while
+    the first is still with Gemini sees the first's seconds."""
+    usage = VideoUsage(tmp_path, 3600)
+
+    async def two_calls() -> None:
+        first = await usage.reserve(3000)
+        with pytest.raises(ImportFailure) as err:
+            await usage.reserve(3000)                    # the first has not been counted yet
+        assert err.value.code == "daily_video_limit" and err.value.body()["seconds_used"] == 3000
+        await usage.settle(first, 3000, 0)
+        usage.release(first)                             # nothing once settled
+        assert usage.read()["seconds"] == 3000.0
+        ticket = await usage.reserve(600)
+        usage.release(ticket)                            # failed before Gemini read the video
+        await usage.reserve(600)
+
+    asyncio.run(two_calls())
+    assert usage.read()["seconds"] == 3000.0 and usage.read()["calls"] == 1
+
+
+def test_a_length_is_needed_when_the_hub_cannot_read_it(tmp_path: Path) -> None:
+    net = Net()
+    net.video(VID)
+    net.gemini_answer = gemini_says(LINES[:2])
+    imp = importer(tmp_path, net, youtube_api_key="")
+    err = refused(imp)                                   # no key and no estimate
+    assert (err.status, err.code) == (422, "needs_duration")
+    net.youtube_status = 403                             # a key the API refuses: the same
+    (tmp_path / "b").mkdir()
+    assert refused(importer(tmp_path / "b", net)).code == "needs_duration"
+    assert net.gemini == [] and imp.usage.read()["calls"] == 0
+    assert watched(imp, duration_estimate_s=600)["needs"] == "confirm_lines"
+
+
+def test_a_failed_call_lets_its_hold_go(tmp_path: Path) -> None:
+    net = Net()
+    net.video(VID, duration="PT50M")
+    net.gemini_answer = lambda r: httpx.Response(500, json={"error": {"message": "boom"}})
+    imp = importer(tmp_path, net, video_import_daily_seconds=3600)
+    assert refused(imp).code == "gemini_error"
+    assert imp.usage.read()["seconds"] == 0              # never read: nothing counted, nor held
+    net.gemini_answer = gemini_says(LINES[:2])
+    assert watched(imp)["needs"] == "confirm_lines"      # the 50 minutes still fit
+
+
 def test_no_gemini_key_and_switched_off_are_409(tmp_path: Path) -> None:
     net = Net()
     net.video(VID)

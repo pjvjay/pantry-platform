@@ -44,6 +44,14 @@ def test_the_video_route_needs_consent(tmp_path: Path) -> None:
     r = client.post("/hub/recipes/import/video", json={"video_id": VID, "consent": True})
     assert r.status_code == 200 and r.json()["needs"] == "confirm_lines"
     assert len(net.gemini) == 1
+    (tmp_path / "nokey").mkdir()                          # the hub cannot read the length
+    nokey, _ = route_client(tmp_path / "nokey", net, youtube_api_key="")
+    r = nokey.post("/hub/recipes/import/video", json={"video_id": VID, "consent": True})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "needs_duration"
+    assert len(net.gemini) == 1
+    r = nokey.post("/hub/recipes/import/video", json={"video_id": VID, "consent": True,
+                                                      "duration_s": 600})
+    assert r.status_code == 200 and len(net.gemini) == 2
     (tmp_path / "off").mkdir()
     off, _ = route_client(tmp_path / "off", net, gemini_api_key="")
     r = off.post("/hub/recipes/import/video", json={"video_id": VID, "consent": True})

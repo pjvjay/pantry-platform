@@ -6,10 +6,13 @@ Assistant's own Gemini calls share. The count lives in ``<usage_dir>/video-<UTC 
 so it survives a restart; a day's file is never rewritten after that day.
 
 Before a call, the video's length (from the YouTube Data API, or the estimate the shopper
-confirmed on the button) is checked against what is left: over the cap is 429
-daily_video_limit, with the seconds used and the limit. After a call the length is added, or,
-when it is unknown, the tokens Gemini counted divided by 100 (about 100 tokens a second at low
-media resolution).
+confirmed on the button) is checked against what is left and held for that call, in one step
+under a lock: a Gemini call can take minutes, and calls started together must not each pass
+the check before any of them is counted. Over the cap is 429 daily_video_limit, with the
+seconds used (counted, plus held by calls still running) and the limit. After a call the hold
+is let go and the length is counted, or, when it is unknown, the tokens Gemini counted divided
+by 100 (about 100 tokens a second at low media resolution). A call that fails before Gemini
+reads the video lets its hold go uncounted.
 """
 
 from __future__ import annotations
@@ -35,6 +38,9 @@ class VideoUsage:
         self.dir = Path(directory).expanduser()
         self.limit_s = limit_s
         self._lock = asyncio.Lock()
+        # seconds held for calls still running, by ticket; in memory, since a restart ends them
+        self._held: dict[int, float] = {}
+        self._tickets = 0
 
     def _path(self, day: str) -> Path:
         return self.dir / f"video-{day}.json"
@@ -48,23 +54,29 @@ class VideoUsage:
         return {"date": day, "seconds": float(data.get("seconds") or 0),
                 "calls": int(data.get("calls") or 0), "limit_s": self.limit_s}
 
-    def check(self, seconds: float | None) -> dict[str, Any]:
-        """Raise 429 when ``seconds`` more (0 when unknown) would pass today's cap, or the cap
-        is already reached; otherwise today's usage."""
-        used = self.read()
-        if used["seconds"] >= self.limit_s or used["seconds"] + (seconds or 0) > self.limit_s:
-            raise ImportFailure(
-                429, "daily_video_limit",
-                f"Video imports have used {used['seconds'] / 3600:.1f} h of the "
-                f"{self.limit_s / 3600:g} h a day the hub allows; try again tomorrow (UTC) or "
-                "paste the ingredient list.", seconds_used=round(used["seconds"]),
-                limit_s=self.limit_s, video_s=seconds)
-        return used
+    async def reserve(self, seconds: float) -> int:
+        """Hold ``seconds`` of today's cap for one call and return its ticket. 429 when what is
+        counted, plus what running calls hold, plus ``seconds`` would pass the cap, or the cap
+        is already reached."""
+        async with self._lock:
+            used = self.read()["seconds"] + sum(self._held.values())
+            if used >= self.limit_s or used + seconds > self.limit_s:
+                raise ImportFailure(
+                    429, "daily_video_limit",
+                    f"Video imports have used {used / 3600:.1f} h of the "
+                    f"{self.limit_s / 3600:g} h a day the hub allows; try again tomorrow (UTC) "
+                    "or paste the ingredient list.", seconds_used=round(used),
+                    limit_s=self.limit_s, video_s=seconds)
+            self._tickets += 1
+            self._held[self._tickets] = seconds
+            return self._tickets
 
-    async def add(self, seconds: float | None, tokens: int) -> dict[str, Any]:
-        """Count one call: its length, or tokens / 100 when the length is unknown."""
+    async def settle(self, ticket: int, seconds: float | None, tokens: int) -> dict[str, Any]:
+        """Count the call ``ticket`` held for, and let its hold go: its length, or tokens / 100
+        when the length is unknown."""
         spent = seconds if seconds else tokens / TOKENS_PER_SECOND
         async with self._lock:
+            self._held.pop(ticket, None)
             used = self.read()
             used["seconds"] = round(used["seconds"] + spent, 1)
             used["calls"] += 1
@@ -75,3 +87,8 @@ class VideoUsage:
                            encoding="utf-8")
             os.replace(tmp, path)
         return used
+
+    def release(self, ticket: int) -> None:
+        """Let a hold go uncounted (the call failed before Gemini read the video); nothing
+        once the call is settled."""
+        self._held.pop(ticket, None)

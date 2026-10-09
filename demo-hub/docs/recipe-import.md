@@ -165,8 +165,10 @@ An import route never answers 500.
 `POST /hub/recipes/import/video` with `{video_id, consent: true, duration_s?}` returns an
 ImportResult with `needs: confirm_lines`, every line `confirmed: false`, each with
 `evidence: {quote, at: "mm:ss"}`, plus `usage` (tokens and cost) and `video.daily`. Errors: 422
-without `consent: true`; 409 `video_import_disabled` or `no_gemini_key`; 429
-`daily_video_limit` (with `seconds_used` and `limit_s`); 422 `not_public`; 502.
+without `consent: true`; 422 `needs_duration` when the hub cannot read the length (no YouTube
+key, or the API refused it) and the body has no `duration_s`; 409 `video_import_disabled` or
+`no_gemini_key`; 429 `daily_video_limit` (with `seconds_used` and `limit_s`); 422 `not_public`;
+502. The console always sends the length it shows (the API's, or the shopper's estimate).
 
 `GET /hub/status` gains `recipe_import: {links, youtube_description, reason?}`,
 `video_import: {enabled, reason, model?, daily?}` and `keys.youtube`.
@@ -199,10 +201,12 @@ endpoint documents no video input).
   "at no charge"; every figure says "preview pricing"). It goes on the import span and into
   Metrics (`imports.video_tokens`, `imports.video_cost_usd`).
 - **Daily cap.** `~/.pantry-demo/usage/video-<UTC date>.json` counts seconds of video. Before a
-  call the length (from the Data API, or the shopper's estimate) is checked against
-  `DEMO_VIDEO_IMPORT_DAILY_SECONDS` (6 h, under the free tier's 8 h); after it, the length is
-  added, or tokens / 100 when it is unknown. A failed call that Gemini already read still
-  counts.
+  call the length (from the Data API, or the shopper's estimate, which is then required) is
+  checked against `DEMO_VIDEO_IMPORT_DAILY_SECONDS` (6 h, under the free tier's 8 h) and held
+  for the call in the same step, under a lock, so transcriptions started together cannot pass
+  the cap between them. After the call the hold goes and the length is counted, or tokens / 100
+  when it is unknown. A failed call that Gemini already read still counts; one that failed
+  before lets its hold go.
 - **Availability.** Off unless `DEMO_VIDEO_IMPORT=1`. With no Gemini key (Ollama only) the
   button is disabled: "Needs a Gemini API key; not available with local models only." The chat
   never transcribes a video; only the route does, on a click.

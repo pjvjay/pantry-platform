@@ -118,7 +118,9 @@ class ImportBody(BaseModel):
 
 class VideoImportBody(BaseModel):
     """Gemini watches a video only on the shopper's click: ``consent`` must be true. The
-    length, when the hub cannot read it (no YouTube key), is the estimate the button showed."""
+    length, when the hub cannot read it (no YouTube key, or the API refused it), is the estimate
+    the button showed, and is then required (422 needs_duration): the daily cap is checked in
+    seconds of video before the call."""
     video_id: str = Field(pattern=r"^[A-Za-z0-9_-]{11}$")
     consent: Literal[True]
     duration_s: int | None = Field(default=None, ge=1, le=12 * 3600)

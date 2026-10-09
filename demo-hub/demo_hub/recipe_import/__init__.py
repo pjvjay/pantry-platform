@@ -267,18 +267,29 @@ class Importer:
                                        "and your estimate was used")
                    if s.youtube_api_key else None)
         duration = details["duration_s"] if details else None
-        self.usage.check(duration or duration_estimate_s)
+        length = duration or duration_estimate_s
+        if not length:
+            # the daily cap is counted in seconds of video, checked before Gemini watches it
+            raise ImportFailure(422, "needs_duration", "Say about how long the video is: the "
+                                "hub cannot read its length, and video imports are capped by "
+                                "the seconds of video watched each day.")
+        ticket = await self.usage.reserve(length)
         try:
-            answer = await gemini_video.transcribe(
-                vid, api_key=s.gemini_api_key, model=s.video_import_model,
-                base_url=s.gemini_native_url, duration_s=duration, transport=self.transport)
-        except ImportFailure as exc:
-            spent = exc.detail.pop("usage", None)
-            if spent:              # Gemini read the video and then failed: it still counts
-                await self.usage.add(duration, int(spent.get("totalTokenCount") or 0))
-            raise
-        cost = pricing.video_import(s.video_import_model, answer["usage"], s.video_import_price)
-        daily = await self.usage.add(duration, cost["total_tokens"])
+            try:
+                answer = await gemini_video.transcribe(
+                    vid, api_key=s.gemini_api_key, model=s.video_import_model,
+                    base_url=s.gemini_native_url, duration_s=duration, transport=self.transport)
+            except ImportFailure as exc:
+                spent = exc.detail.pop("usage", None)
+                if spent:          # Gemini read the video and then failed: it still counts
+                    await self.usage.settle(ticket, duration,
+                                            int(spent.get("totalTokenCount") or 0))
+                raise
+            cost = pricing.video_import(s.video_import_model, answer["usage"],
+                                        s.video_import_price)
+            daily = await self.usage.settle(ticket, duration, cost["total_tokens"])
+        finally:
+            self.usage.release(ticket)     # a call that failed before Gemini read the video
         video = {"id": vid, "url": youtube.watch_url(vid), **meta, "duration_s": duration,
                  "description_read": duration is not None, "transcribe": self.video_status(),
                  "daily": daily}
