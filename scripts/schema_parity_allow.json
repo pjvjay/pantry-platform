@@ -103,7 +103,11 @@
         "table recipe_line_amounts: foreign key (recipe_slug, line_no) -> recipe_ingredients (recipe_slug, line_no) on delete cascade: only in mig",
         "table reviews: foreign key (product_id) -> products (id) on delete cascade: only in mig",
         "table store_products: foreign key (product_id) -> products (id) on delete cascade: only in mig",
-        "table store_products: foreign key (store_id) -> stores (id) on delete cascade: only in mig"
+        "table store_products: foreign key (store_id) -> stores (id) on delete cascade: only in mig",
+        "table ingredient_nutrient_map: foreign key (ref_id) -> nutrient_foods (ref_id): only in mig",
+        "table nutrient_amounts: foreign key (ref_id) -> nutrient_foods (ref_id) on delete cascade: only in mig",
+        "table nutrient_foods: foreign key (source) -> nutrient_sources (source): only in mig",
+        "table nutrient_measures: foreign key (ref_id) -> nutrient_foods (ref_id) on delete cascade: only in mig"
       ]
     },
     {
@@ -112,7 +116,13 @@
         "table origin_submissions: check confidence = ANY (ARRAY['high', 'medium', 'low']): only in mig",
         "table origin_submissions: check status = ANY (ARRAY['pending', 'approved', 'rejected']): only in mig",
         "table product_origin_evidence: check confidence = ANY (ARRAY['high', 'medium', 'low']): only in mig",
-        "table reviews: check rating >= 1 AND rating <= 5: only in mig"
+        "table reviews: check rating >= 1 AND rating <= 5: only in mig",
+        "table ingredient_nutrient_map: check (match_kind = 'none') = (ref_id IS NULL): only in mig",
+        "table ingredient_nutrient_map: check match_kind = ANY (ARRAY['generic', 'close', 'none']): only in mig",
+        "table nutrient_amounts: check nutrient = ANY (ARRAY['energy_kcal', 'protein_g', 'fat_g', 'satfat_g', 'carbohydrate_g', 'fibre_g', 'sugars_g', 'sodium_mg']): only in mig",
+        "table nutrient_amounts: check per_100g >= 0::double precision: only in mig",
+        "table nutrient_measures: check grams > 0::double precision: only in mig",
+        "table nutrient_measures: check volume_ml IS NULL OR volume_ml > 0::double precision: only in mig"
       ]
     }
   ]
