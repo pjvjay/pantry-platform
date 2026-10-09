@@ -291,7 +291,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 408 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 410 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
