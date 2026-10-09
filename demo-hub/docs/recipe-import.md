@@ -230,7 +230,7 @@ method text, the page's prose, its images and a video's description are never st
 
 | Variable | Default | What |
 |---|---|---|
-| `RECIPE_EXTRACTOR` | `scripts/extract_recipe.py` beside `RECIPE_SHOPPER_SKILL` | The extractor; empty or missing turns link import off (503, and chat reads links as before) |
+| `RECIPE_EXTRACTOR` | `scripts/extract_recipe.py` beside `RECIPE_SHOPPER_SKILL` | The extractor; empty, missing or older than 1.0.0 (no `__version__`; it does not say which markup it read) turns link import off (503 `import_unavailable`, `/hub/status` `recipe_import.links` false with the reason, and chat reads links as before) |
 | `YOUTUBE_API_KEY` / `YOUTUBE_API_KEY_FILE` | `~/.pantry-secrets/youtube_api_key` | A YouTube Data API key you create (D4); never created by the assistant |
 | `DEMO_VIDEO_IMPORT` | `0` | `1` allows Gemini video transcription, on a click |
 | `DEMO_VIDEO_IMPORT_MODEL` | `gemini-3-flash-preview` | The model that watches |

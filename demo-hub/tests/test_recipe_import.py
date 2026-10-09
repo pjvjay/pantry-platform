@@ -19,6 +19,7 @@ from demo_hub.recipe_import.youtube import duration_seconds, video_id
 from tests.import_fakes import (
     REAL_EXTRACTOR,
     Net,
+    fake_extractor,
     make_importer,
     real_extractor_reason,
     recipe_page,
@@ -40,6 +41,12 @@ def failure(importer: Importer, url: str) -> ImportFailure:
     with pytest.raises(ImportFailure) as err:
         run(importer, url)
     return err.value
+
+
+def dal_page() -> Net:
+    net = Net()
+    net.serve("https://blog.example/dal", recipe_page("Dal", DAL))
+    return net
 
 
 # --- web pages ------------------------------------------------------------------------------------
@@ -154,6 +161,20 @@ def test_import_is_unavailable_without_the_extractor(tmp_path: Path) -> None:
     assert importer.available()[0] is False
     assert importer.status()["links"] is False and "not at" in importer.status()["reason"]
     assert failure(importer, "https://blog.example/").status == 503
+
+
+@pytest.mark.parametrize("version", ["0.9.2", "", "dev"])
+def test_an_extractor_older_than_1_0_0_turns_link_import_off(tmp_path: Path,
+                                                             version: str) -> None:
+    """It loads, but never says which markup held the recipe, so every page would fail: the
+    console is not offered a Link tab that cannot work, and chat reads links as before."""
+    (tmp_path / "old").mkdir()
+    old = fake_extractor(tmp_path / "old", version=version)
+    importer = make_importer(tmp_path, dal_page(), extractor=old)
+    status = importer.status()
+    assert status["links"] is False and "predates 1.0.0" in status["reason"]
+    err = failure(importer, "https://blog.example/dal")
+    assert (err.status, err.code) == (503, "import_unavailable")
 
 
 def test_the_import_note_is_the_lines_and_nothing_else() -> None:

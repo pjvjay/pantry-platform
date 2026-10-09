@@ -51,6 +51,9 @@ __all__ = ["DRAFT_KEY", "ImportFailure", "Importer", "RecipeDoc", "import_note",
 # The key of a doc imported outside a conversation (the console's import sheet). Chat keeps its
 # own docs as imp:1, imp:2, ... and re-keys a doc the console sends (ChatBody.recipe_doc).
 DRAFT_KEY = "imp:draft"
+# the first extract_recipe.py that says which markup held the recipe (JSON-LD or microdata),
+# which web.extract needs; an older one loads, and then refuses every page
+MIN_EXTRACTOR = (1, 0, 0)
 MAX_NOTE = 8_000
 LINKED_MEMORY = 64
 
@@ -137,7 +140,14 @@ class Importer:
     # --- availability ----------------------------------------------------------------------------
 
     def extractor(self) -> ModuleType:
-        return load_extractor(self.settings.recipe_extractor)
+        """The skill's extractor, 1.0.0 or later; 503 import_unavailable otherwise, so link
+        import is off (and the chat reads links as before) rather than failing on each page."""
+        module = load_extractor(self.settings.recipe_extractor)
+        if _version(module) < MIN_EXTRACTOR:
+            raise ImportFailure(503, "import_unavailable", "This extract_recipe.py predates "
+                                "1.0.0 and does not say which markup held the recipe; update "
+                                "pantry-api's recipe-shopper skill.")
+        return module
 
     def available(self) -> tuple[bool, str]:
         try:
@@ -266,7 +276,8 @@ class Importer:
                                 "with local models only.")
         if not youtube.ID.match(vid):
             raise ImportFailure(400, "bad_video_id", "That is not a YouTube video id.")
-        limits = limits_of(self.extractor())
+        # only the fetch limits: watching a video reads no page
+        limits = limits_of(load_extractor(s.recipe_extractor))
         meta = await youtube.oembed(vid, limits=limits, resolver=self.resolver,
                                     transport=self.transport)
         notes: list[str] = []          # without a key the estimate is the only length there is
@@ -320,6 +331,15 @@ class Importer:
                                   evidence=_evidence(answer["lines"], parsed),
                                   amount_basis="transcribed_confirmed_by_you", confirmed=False)
         return result(doc, video=video, usage=cost)
+
+
+def _version(module: ModuleType) -> tuple[int, ...]:
+    """``__version__`` as numbers ("1.0.0" -> (1, 0, 0)); (0,) when it has none or another
+    shape."""
+    try:
+        return tuple(int(p) for p in str(getattr(module, "__version__", "")).split(".")[:3])
+    except ValueError:
+        return (0,)
 
 
 def _evidence(lines: list[dict[str, str]], parsed: dict[str, Any]) -> list[LineEvidence | None]:

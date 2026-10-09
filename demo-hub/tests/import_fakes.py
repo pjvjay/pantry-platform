@@ -42,7 +42,7 @@ import json
 import re
 import threading
 
-__version__ = "0.0.1"
+__version__ = "{version}"
 MAX_BYTES = {max_bytes}
 TIMEOUT_S = {timeout_s}
 CALLS = []
@@ -94,11 +94,11 @@ def extract(page):
 
 
 def fake_extractor(directory: Path, *, max_bytes: int = 5 * 1024 * 1024,
-                   timeout_s: float = 20, slow_s: float = 0) -> Path:
+                   timeout_s: float = 20, slow_s: float = 0, version: str = "1.0.0") -> Path:
     path = directory / "extract_recipe.py"
     slow = f"import time; time.sleep({slow_s})" if slow_s else "pass"
-    path.write_text(FAKE_EXTRACTOR.format(max_bytes=max_bytes, timeout_s=timeout_s, slow=slow),
-                    encoding="utf-8")
+    path.write_text(FAKE_EXTRACTOR.format(max_bytes=max_bytes, timeout_s=timeout_s, slow=slow,
+                                          version=version), encoding="utf-8")
     return path
 
 
