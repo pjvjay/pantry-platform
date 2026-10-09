@@ -4,7 +4,11 @@ oEmbed and Data API, Gemini, and a small stand-in for the skill's extractor.
 
 The real extractor lives in pantry-api (skills/recipe-shopper/scripts/extract_recipe.py), which
 the hub-tests job checks out at the pinned submodule; ``REAL_EXTRACTOR`` is used where it is
-there and new enough, and the tests that need it skip with the reason where it is not.
+there and new enough, and the tests that need it skip with the reason where it is not. A pin
+from before recipe import merged in pantry-api has no skills/ directory at all (not an older
+extractor), so in CI those tests skip as "not checked out" until the pin moves to a merged
+commit with extractor 1.0.0 and plan_from_lines; at such a pin the hub's chat import does not
+run either, since the target has no plan_from_lines.
 """
 
 from __future__ import annotations
