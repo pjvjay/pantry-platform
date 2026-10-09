@@ -7,7 +7,8 @@ Methods, in the order a link is tried:
   (``web.py``), read by the guarded fetch (``fetch.py``);
 - a YouTube video: its title and channel (oEmbed), then, with a YouTube Data API key, the
   description's ingredient list and the recipe pages it links (``youtube.py``,
-  ``description.py``); without a key, or with no list there, the shopper chooses how to go on
+  ``description.py``); without a key, when the API refuses the key, or with no list there,
+  the shopper chooses how to go on
   (``needs: choose_method``): a linked page, a paste, or, on a click, Gemini watching the video
   (``gemini_video.py``, capped per day by ``usage.py``).
 
@@ -193,10 +194,8 @@ class Importer:
         warnings: list[str] = []
         lines: list[str] = []
         links: list[dict[str, str]] = []
-        if self.settings.youtube_api_key:
-            details = await youtube.video_details(vid, self.settings.youtube_api_key,
-                                                  timeout_s=limits.timeout_s,
-                                                  transport=self.transport)
+        details = await self._details(vid, limits, warnings, "the description was not read")
+        if details is not None:
             video.update(duration_s=details["duration_s"], description_read=True,
                          title=video["title"] or details["title"],
                          channel=video["channel"] or details["channel"])
@@ -207,8 +206,6 @@ class Importer:
             if len(lines) < MIN_DESCRIPTION_LINES:
                 warnings.append("The description has no ingredient list.")
                 lines = []
-        else:
-            warnings.append("No YouTube Data API key is set, so the description was not read.")
         if not lines:
             return result(None, linked_pages=links, video=video, warnings=warnings)
         bounded, cut = web.bounded(lines)
@@ -222,6 +219,26 @@ class Importer:
                               retrieved_at=web.now_iso())
         doc = web.doc_from_parsed(key, str(video["title"]), "", parsed, source, cut)
         return result(doc, linked_pages=links, video=video)
+
+    async def _details(self, vid: str, limits: Limits, warnings: list[str],
+                       unread: str) -> dict[str, Any] | None:
+        """videos.list for ``vid``, or None when there is no key, or the YouTube Data API
+        refuses it or cannot be reached (a bad key, a spent quota, the API not enabled for the
+        key). The import then goes on as it does without a key, with the title and channel
+        oEmbed already gave, and ``warnings`` says why (``unread``: what that leaves out), as
+        the recipe-shopper skill does. A video the API says is not public is still 422."""
+        if not self.settings.youtube_api_key:
+            warnings.append(f"No YouTube Data API key is set, so {unread}.")
+            return None
+        try:
+            return await youtube.video_details(vid, self.settings.youtube_api_key,
+                                               timeout_s=limits.timeout_s,
+                                               transport=self.transport)
+        except ImportFailure as exc:
+            if exc.code == "not_public":
+                raise
+            warnings.append(f"{exc.message.rstrip('.')}, so {unread}.")
+            return None
 
     def _remember(self, url: str, vid: str, channel: str) -> None:
         self._linked[url] = (vid, channel)
@@ -247,11 +264,11 @@ class Importer:
         limits = limits_of(self.extractor())
         meta = await youtube.oembed(vid, limits=limits, resolver=self.resolver,
                                     transport=self.transport)
-        duration = None
-        if s.youtube_api_key:
-            duration = (await youtube.video_details(vid, s.youtube_api_key,
-                                                    timeout_s=limits.timeout_s,
-                                                    transport=self.transport))["duration_s"]
+        notes: list[str] = []          # without a key the estimate is the only length there is
+        details = (await self._details(vid, limits, notes, "the video's length was not read "
+                                       "and your estimate was used")
+                   if s.youtube_api_key else None)
+        duration = details["duration_s"] if details else None
         self.usage.check(duration or duration_estimate_s)
         try:
             answer = await gemini_video.transcribe(
@@ -269,7 +286,7 @@ class Importer:
                  "daily": daily}
         dropped = (f"{answer['dropped']} line(s) without a valid time in the video were left "
                    "out")
-        warnings = [dropped] if answer["dropped"] else []
+        warnings = [*notes, *([dropped] if answer["dropped"] else [])]
         if not answer["lines"]:
             return result(None, video=video, usage=cost,
                           warnings=[*warnings, "Gemini found no ingredient lines in the video."])

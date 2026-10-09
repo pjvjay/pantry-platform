@@ -148,6 +148,25 @@ def test_the_daily_cap(tmp_path: Path) -> None:
     assert again.read()["seconds"] == 755.0
 
 
+def test_a_refused_youtube_key_does_not_stop_a_transcription(tmp_path: Path) -> None:
+    """The Data API refuses the key (a spent quota): Gemini still watches the video, on the
+    shopper's estimate of its length, and the result says why the length was not read."""
+    net = Net()
+    net.video(VID)
+    net.youtube_status = 403
+    net.gemini_answer = gemini_says(LINES[:2])
+    imp = importer(tmp_path, net, video_import_daily_seconds=1000)
+    assert refused(imp, duration_estimate_s=1200).code == "daily_video_limit"
+    assert net.gemini == []
+    out = watched(imp, duration_estimate_s=600)
+    assert out["needs"] == "confirm_lines" and len(net.gemini) == 1
+    assert out["video"]["duration_s"] is None and out["video"]["title"] == "Weeknight Dal"
+    assert out["warnings"][0] == ("The YouTube Data API refused the key (quota spent, or the "
+                                  "API not enabled for it), so the video's length was not read "
+                                  "and your estimate was used.")
+    assert imp.usage.read()["seconds"] == 755.0            # the length unknown: tokens / 100
+
+
 def test_no_gemini_key_and_switched_off_are_409(tmp_path: Path) -> None:
     net = Net()
     net.video(VID)

@@ -109,10 +109,18 @@ async def video_details(vid: str, api_key: str, *, timeout_s: float = 20,
     if r.status_code == 403:
         raise ImportFailure(502, "youtube_api", "The YouTube Data API refused the key (quota "
                             "spent, or the API not enabled for it).")
+    if r.status_code == 400:                       # what the API answers a key it does not know
+        raise ImportFailure(502, "youtube_api", "The YouTube Data API refused the key (not a "
+                            "valid API key).")
     if r.status_code != 200:
         raise ImportFailure(502, "youtube_api", f"The YouTube Data API answered HTTP "
                             f"{r.status_code}.")
-    items = (r.json() or {}).get("items") or []
+    try:
+        body = r.json()
+    except ValueError as exc:
+        raise ImportFailure(502, "youtube_api", "The YouTube Data API's answer was not "
+                            "JSON.") from exc
+    items = (body.get("items") if isinstance(body, dict) else None) or []
     if not items:
         raise ImportFailure(422, "not_public", "YouTube has no public video at that link.")
     snippet = items[0].get("snippet") or {}

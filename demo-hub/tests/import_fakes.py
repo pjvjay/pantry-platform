@@ -150,6 +150,7 @@ class Net:
         self.peer: dict[str, str] = {}               # host -> the peer the socket reports
         self.parsed: list[dict[str, Any]] = []       # parse-lines bodies
         self.youtube: dict[str, dict[str, Any]] = {}  # video id -> videos.list item
+        self.youtube_status = 200                    # 403: a refused key or a spent quota
         self.gemini: list[httpx.Request] = []
         self.gemini_answer: Callable[[httpx.Request], httpx.Response] | None = None
 
@@ -195,6 +196,10 @@ class Net:
         if host == "pantry.test" and path == "/recipes/parse-lines":
             return self._parse_lines(request)
         if host == "www.googleapis.com" and path == "/youtube/v3/videos":
+            if self.youtube_status != 200:
+                return httpx.Response(self.youtube_status, json={"error": {
+                    "code": self.youtube_status, "message": "The request cannot be completed "
+                    "because you have exceeded your quota."}})
             vid = request.url.params.get("id")
             items = [self.youtube[vid]] if vid in self.youtube else []
             return httpx.Response(200, json={"items": items})

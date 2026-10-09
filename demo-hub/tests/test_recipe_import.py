@@ -244,6 +244,32 @@ def test_a_description_with_a_list_becomes_a_doc(tmp_path: Path) -> None:
     assert linked["doc"]["source"]["channel"] == "Home Cook"
 
 
+@pytest.mark.parametrize("status,why", [
+    (403, "The YouTube Data API refused the key (quota spent, or the API not enabled for it)"),
+    (400, "The YouTube Data API refused the key (not a valid API key)"),
+    (500, "The YouTube Data API answered HTTP 500")])
+def test_a_refused_youtube_key_keeps_the_video_and_offers_a_choice(
+        tmp_path: Path, status: int, why: str) -> None:
+    """A bad key, a spent quota or an API that is down: the title and channel oEmbed gave are
+    kept and the shopper chooses how to go on, as with no key (the skill does the same)."""
+    net = Net()
+    net.video(VID, description="Ingredients\n- 200 g lentils\n- 1 onion\n- 2 tomatoes")
+    net.youtube_status = status
+    result = run(make_importer(tmp_path, net, youtube_api_key="yt-key"), f"https://youtu.be/{VID}")
+    assert result["doc"] is None and result["needs"] == "choose_method"
+    assert result["video"]["title"] == "Weeknight Dal" and result["video"]["channel"] == "Home Cook"
+    assert result["video"]["description_read"] is False and result["video"]["duration_s"] is None
+    assert result["warnings"] == [f"{why}, so the description was not read."]
+
+
+def test_a_video_the_data_api_does_not_list_is_not_public(tmp_path: Path) -> None:
+    net = Net()
+    net.video(VID)
+    del net.youtube[VID]                                  # videos.list answers no items
+    err = failure(make_importer(tmp_path, net, youtube_api_key="yt-key"), f"https://youtu.be/{VID}")
+    assert (err.status, err.code) == (422, "not_public")
+
+
 def test_an_oembed_404_is_not_public(tmp_path: Path) -> None:
     net = Net()
     net.video(VID, oembed=404)

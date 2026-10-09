@@ -48,6 +48,11 @@ says "Reading links needs the local demo hub".
      channel kept on the source.
    - Without a key, or with no list in the description: `doc: null`, `needs: choose_method`.
      The shopper picks a linked page, pastes the list, or (if enabled) clicks Transcribe.
+   - When the Data API refuses the key (not valid, quota spent, the API not enabled for it) or
+     cannot be reached, the import goes on as without a key: the oEmbed title and channel,
+     `needs: choose_method`, and a warning saying why the description was not read. A
+     transcription goes on too, on the shopper's estimate of the length. Only a video the API
+     does not list is 422 `not_public`. The recipe-shopper skill does the same.
 3. **Gemini watching the video** (only on the shopper's click, off by default). See below.
 
 ## The guarantee: reviewed lines are planned as reviewed
