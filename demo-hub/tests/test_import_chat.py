@@ -38,20 +38,41 @@ CATALOG = [_tool("list_recipes"), _tool("find_product", "query", "lat", "lon"),
            _tool("fetch-fetch", "url", "max_length")]
 
 
-def planned(name: str, lines: list[dict[str, Any]]) -> dict[str, Any]:
-    """A plan as pantry returns it, its basis lines as given."""
-    basis = [{"line_no": i, "name": ln["name"], "quantity": ln.get("quantity"),
-              "unit": ln.get("unit"), "product_id": 10 + i} for i, ln in enumerate(lines, 1)]
+# pantry's own rules for lines it never plans (units.NON_PURCHASES, planner.MAX_INGREDIENTS):
+# such a line is not among the basis lines but on `skipped`, by name, as the real one does it
+NEVER_BOUGHT = {"water", "hot water", "boiling water", "cold water", "ice", "ice cubes"}
+MAX_PLANNED = 40
+
+
+def planned(name: str, lines: list[dict[str, Any]], basis: bool = True) -> dict[str, Any]:
+    """A plan as pantry returns it: its basis lines as given, except water and ice and the
+    lines past the 40-ingredient cap, which pantry lists on `skipped` instead. The basis comes
+    back only when asked for (``basis``)."""
+    skipped = []
+    kept = []
+    for i, ln in enumerate(lines[:MAX_PLANNED], 1):
+        if ln["name"].lower() in NEVER_BOUGHT:
+            skipped.append({"ingredient": ln["name"], "suggestions": [],
+                            "reason": "not bought: water and ice are never priced"})
+        else:
+            kept.append({"line_no": i, "name": ln["name"], "quantity": ln.get("quantity"),
+                         "unit": ln.get("unit"), "product_id": 10 + i})
+    skipped += [{"ingredient": ln["name"], "suggestions": [],
+                 "reason": "over the 40-ingredient cap: not planned"}
+                for ln in lines[MAX_PLANNED:]]
     items = [{"line_no": b["line_no"], "ingredient": b["name"], "product_id": b["product_id"],
               "product": f"{b['name'].title()} 1kg", "price": 2.5, "store": "Pantry Mart",
               "trip_store": "Pantry Mart", "trip_price": 2.5, "confidence": 0.9,
-              "match": "exact", "also_lines": []} for b in basis]
-    return {"summary": {"recipe_slug": None, "recipe_name": name, "total_cost": 2.5 * len(items),
-                        "lines": items, "trip": {"stores": ["Pantry Mart"], "items": []},
-                        "notes": [], "not_stocked": [], "out_of_range": [], "skipped": [],
-                        "basis": {"v": 1, "path": "spec", "recipe_slug": "", "recipe_name": name,
-                                  "lines": basis, "pins": []}},
-            "full": None}
+              "match": "exact", "also_lines": []} for b in kept]
+    summary: dict[str, Any] = {
+        "recipe_slug": None, "recipe_name": name, "total_cost": 2.5 * len(items),
+        "lines": items, "trip": {"stores": ["Pantry Mart"], "items": []}, "notes": [],
+        "not_stocked": [], "out_of_range": [], "skipped": skipped}
+    if basis:
+        summary["basis"] = {"v": 1, "path": "spec", "recipe_slug": "", "recipe_name": name,
+                            "lines": kept, "pins": [], "not_stocked": [], "out_of_range": [],
+                            "skipped": skipped}
+    return {"summary": summary, "full": None}
 
 
 @pytest.fixture
@@ -72,13 +93,15 @@ def pantry(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
         calls.append((name, copy.deepcopy(arguments)))
         structured: Any = None
         if name == "plan_from_lines":
-            structured = planned(arguments["title"], arguments["lines"])
+            structured = planned(arguments["title"], arguments["lines"],
+                                 basis=bool(arguments.get("basis")))
         elif name == "plan_from_text":
             # the LLM parser read the recipe again, and read 500 g where the page said 400 g
             structured = planned("Red Lentil Dal", [
                 {"name": "red lentils", "quantity": 500.0, "unit": "g"},
                 {"name": "cumin seeds", "quantity": 1.0, "unit": "tbsp"},
-                {"name": "garlic", "quantity": 2.0, "unit": "cloves"}])
+                {"name": "garlic", "quantity": 2.0, "unit": "cloves"}],
+                basis=bool(arguments.get("basis")))
         return {"name": name, "is_error": False, "structured": structured,
                 "text": json.dumps(structured), "ms": 1.0, "truncated": False}
 
@@ -267,6 +290,78 @@ def test_import_grounded_catches_changed_and_added_lines() -> None:
     assert not check_import_grounded([], earlier).passed
     assert check_import_grounded([], [{**same[0], "reviewed": doc["lines"]}]).passed
     assert check_import_grounded([], [{"tool": "plan_recipe", "lines": []}]) is None
+
+
+def test_import_grounded_counts_the_lines_pantry_names_as_left_out(pantry: Any,
+                                                                    tmp_path: Path) -> None:
+    """pantry never plans water, nor a line past its 40-ingredient cap: it names them on
+    `skipped` instead. A recipe with both, planned exactly as reviewed, passes."""
+    lines = ["500 g penne", "2 cups water", "1 tsp salt", "2 cloves garlic",
+             *(f"{n} g spice {n}" for n in range(5, 43))]
+    net = Net()
+    net.serve("https://blog.example/penne", recipe_page("Penne", lines))
+    agent, _ = make_agent(tmp_path, net, turn(calls=[PLAN_LINES]), turn("Planned."))
+    events, conv = chat(agent, "plan https://blog.example/penne")
+    assert len(conv.docs["imp:1"]["lines"]) == 42
+    plans = agent.turn_plans(conv)
+    assert len(plans[0]["lines"]) == 39 and 2 not in {ln["line_no"] for ln in plans[0]["lines"]}
+    assert plans[0]["left_out"] == ["water", "spice 41", "spice 42"]
+    report = evaluate(events, [], "gemini:m", plans=plans)
+    check = next(c for c in report["checks"] if c["name"] == "import_grounded")
+    assert check["passed"], check
+    assert check["detail"] == ("1 reviewed recipe(s) planned exactly as reviewed; 3 line(s) "
+                               "the plan names as left out")
+
+
+def test_a_left_out_name_accounts_for_one_line_only() -> None:
+    doc = {"lines": [{"line_no": 1, "name": "water", "quantity": 1.0, "unit": "cup"},
+                     {"line_no": 2, "name": "Water", "quantity": 2.0, "unit": "cups"},
+                     {"line_no": 3, "name": "rice", "quantity": 200.0, "unit": "g"}]}
+    events = [{"type": "recipe_import", "doc_key": "imp:1", "result": {"doc": doc}}]
+    plan = {"tool": "plan_from_lines", "doc_key": "imp:1", "lines": [doc["lines"][2]]}
+    check = check_import_grounded(events, [{**plan, "left_out": ["water", "water"]}])
+    assert check is not None and check.passed
+    check = check_import_grounded(events, [{**plan, "left_out": ["water"]}])
+    assert check is not None and not check.passed
+    assert check.detail == "line 2 (2 cups Water) was not planned"
+    # a line dropped with no word from pantry is still a dropped line
+    assert not check_import_grounded(events, [plan]).passed
+
+
+def test_plan_from_lines_asks_for_its_basis_with_cart_alternatives_off(pantry: Any,
+                                                                       tmp_path: Path) -> None:
+    """The basis is what import_grounded compares; it is asked for even when the cart's
+    Options are off (DEMO_CART_ALTERNATIVES=0)."""
+    chat_ = ScriptedChat(turn(calls=[PLAN_LINES]), turn("Planned."))
+    agent = Agent(Settings(observer_model="", cart_alternatives=False), FakeTargets(), chat_,
+                  importer=make_importer(tmp_path, dal_net()))
+    events, conv = chat(agent, "plan https://blog.example/dal")
+    [(name, sent)] = pantry
+    assert name == "plan_from_lines" and sent["basis"] is True
+    report = evaluate(events, [], "gemini:m", plans=agent.turn_plans(conv))
+    check = next(c for c in report["checks"] if c["name"] == "import_grounded")
+    assert check["passed"], check
+
+
+def test_import_grounded_does_not_apply_to_a_plan_without_its_basis(
+        pantry: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A gateway whose plan_from_lines schema has no `basis` is never sent one, and its plans
+    come back without it: nothing to compare is not a failed comparison."""
+    monkeypatch.setitem(globals(), "CATALOG", [
+        _tool("plan_from_lines", "doc_key", "lines", "title", "servings", "lat", "lon")
+        if t["name"] == "plan_from_lines" else t for t in CATALOG])
+    agent, _ = make_agent(tmp_path, dal_net(), turn(calls=[PLAN_LINES]), turn("Planned."))
+    events, conv = chat(agent, "plan https://blog.example/dal")
+    [(_, sent)] = pantry
+    assert "basis" not in sent
+    assert agent.turn_plans(conv)[0]["lines"] is None
+    report = evaluate(events, [], "gemini:m", plans=agent.turn_plans(conv))
+    assert "import_grounded" not in [c["name"] for c in report["checks"]]
+    # plan_from_text for an imported recipe is still a failure, basis or not
+    events = [{"type": "recipe_import", "doc_key": "imp:1",
+               "result": {"doc": {"lines": [{"line_no": 1, "name": "rice"}]}}}]
+    check = check_import_grounded(events, [{"tool": "plan_from_text", "lines": None}])
+    assert check is not None and not check.passed
 
 
 # --- the console's reviewed doc (ChatBody.recipe_doc) ---------------------------------------------

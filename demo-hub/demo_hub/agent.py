@@ -96,8 +96,9 @@ DOC_ARGS = frozenset({"lines", "title", "servings"})
 # a link in the shopper's message, as link_reader's pattern finds it, without the punctuation a
 # sentence puts after it
 LINK = re.compile(r"https?://\S+")
-# plan tools that return the plan's basis when asked (basis=true): the hub always asks, when the
-# target's schema takes it, and the model never sees the argument
+# plan tools that return the plan's basis when asked (basis=true). When the target's schema
+# takes it, the hub asks on plan_from_lines always (import_grounded compares that basis with the
+# reviewed doc) and on the others while cart alternatives are on; the model never sees it
 BASIS_TOOLS = {"plan_recipe", "plan_from_text", "plan_from_lines"}
 # what the plan tools' country lists take (a 3B model sent preference ["local", "organic"])
 COUNTRY_ARGS = {
@@ -801,25 +802,34 @@ class Agent:
 
     def turn_plans(self, conv: Conversation) -> list[dict[str, Any]]:
         """This turn's plans as the online evals need them, from the hub's own tool_log: the
-        tool, the doc it planned (plan_from_lines) with that doc's reviewed lines, and the
-        basis lines pantry planned. The basis never reaches the browser or the trace, so the
-        evals get it here."""
+        tool, the doc it planned (plan_from_lines) with that doc's reviewed lines, the basis
+        lines pantry planned, and the ingredients the plan names as left out (``left_out``:
+        water and ice, lines past pantry's 40-line cap, and what was not stocked or in range
+        are on those lists, not among the basis lines). The basis never reaches the browser or
+        the trace, so the evals get it here."""
         def project(lines: Any) -> list[dict[str, Any]]:
             return [{k: ln.get(k) for k in ("line_no", "name", "quantity", "unit")}
                     for ln in lines or []]
+
+        def left_out(source: dict[str, Any]) -> list[str]:
+            return [str(d.get("ingredient") or "") for k in ("not_stocked", "out_of_range",
+                                                             "skipped")
+                    for d in source.get(k) or [] if isinstance(d, dict)]
 
         out = []
         for i, (tool, structured) in enumerate(conv.tool_log[conv.turn_first:],
                                                start=conv.turn_first):
             if not is_plan(structured):
                 continue
-            basis = structured["summary"].get("basis")
+            summary = structured["summary"]
+            basis = summary.get("basis")
             key = conv.plan_docs.get(i)
             out.append({"tool": tool, "doc_key": key,
                         "reviewed": project(conv.docs[key]["lines"]) if key in conv.docs
                         else None,
                         "lines": project(basis.get("lines")) if isinstance(basis, dict)
-                        else None})
+                        else None,
+                        "left_out": left_out(basis if isinstance(basis, dict) else summary)})
         return out
 
     # --- the cart: alternatives and swaps, no model involved ------------------------------------
@@ -979,8 +989,10 @@ class Agent:
 
         A plan tool whose schema takes it (``takes_basis``) gets basis=true while cart
         alternatives are on (DEMO_CART_ALTERNATIVES): the plan's basis comes back for the hub to
-        keep, so the cart can rank and re-price a line without the model. The model never sees
-        the argument, and one it sends anyway is not passed on.
+        keep, so the cart can rank and re-price a line without the model. plan_from_lines gets
+        it whatever that setting says: the import_grounded eval compares its basis with the
+        reviewed doc, and without one every import turn would go unchecked. The model never
+        sees the argument, and one it sends anyway is not passed on.
 
         plan_from_lines gets the reviewed recipe the model named by ``doc_key`` from ``docs``
         (the conversation's): its lines, title and servings, exactly as reviewed. Lines the
@@ -1002,7 +1014,7 @@ class Agent:
                     out["servings"] = doc["servings"]
         if tool in BASIS_TOOLS:
             out.pop("basis", None)
-            if takes_basis and self.settings.cart_alternatives:
+            if takes_basis and (self.settings.cart_alternatives or tool == "plan_from_lines"):
                 out["basis"] = True
         loc = self.settings.shopper_location
         if not loc or tool not in LOCATION_TOOLS:

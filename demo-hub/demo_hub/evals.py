@@ -13,7 +13,8 @@ expectations, only the conversation's own tool results, so they run on every ans
 - no_scope_violation: the agent never called a tool it was not offered;
 - import_grounded: a recipe the hub imported (or the shopper reviewed) this turn was planned
   exactly as reviewed: plan_from_lines, and every planned line's name, quantity and unit equal
-  to the doc's (never plan_from_text, which re-reads the recipe and can change an amount).
+  to the doc's (never plan_from_text, which re-reads the recipe and can change an amount); a
+  line pantry names as left out (water, a line past its cap) is not a dropped line.
 
 ``answer_confidence`` is the share of applicable checks that passed. ``plan`` summarises the
 plan's own confidence: the selector's per-line confidence, how many lines matched the ingredient
@@ -23,6 +24,7 @@ exactly, and the origin coverage.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Iterable
 from typing import Any
 
@@ -108,14 +110,26 @@ def _show(t: tuple[str, float | None, str]) -> str:
     return " ".join(x for x in (f"{q:g}" if q is not None else "", unit, name) if x)
 
 
+def _named(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
 def check_import_grounded(events: list[dict[str, Any]],
                           plans: list[dict[str, Any]] | None) -> Check | None:
     """Every reviewed recipe planned this turn was planned as reviewed. ``plans`` are the hub's
     own records of this turn's plans (Agent.turn_plans: tool, doc_key, the doc's reviewed lines,
-    the basis lines), since the basis never reaches the events. Fails on plan_from_text in a
-    turn that imported a recipe, a plan of a doc the hub does not hold, a changed name,
-    quantity or unit, or an added or dropped line. Not applicable to a turn with neither an
-    import nor a plan_from_lines call."""
+    the basis lines and the names the plan left out), since the basis never reaches the
+    events. Fails on plan_from_text in a turn that imported a recipe, a plan of a doc the hub
+    does not hold, a changed name, quantity or unit, or an added or dropped line.
+
+    A reviewed line missing from the basis is not a dropped line when the plan names it as
+    left out (``left_out``: pantry's not_stocked, out_of_range and skipped). pantry never plans
+    water or ice, nor a line past its 40-ingredient cap, and lists each one there by name
+    instead; each name accounts for one line.
+
+    Not applicable to a turn with neither an import nor a plan_from_lines call, nor to a plan
+    whose basis did not come back (a target whose schema has no ``basis``): there is nothing
+    to compare, which is not the same as a plan that differs."""
     docs = _imported_docs(events)
     relevant = [p for p in plans or [] if p["tool"] == "plan_from_lines"
                 or (docs and p["tool"] == "plan_from_text")]
@@ -123,6 +137,7 @@ def check_import_grounded(events: list[dict[str, Any]],
         return None
     problems: list[str] = []
     planned = 0
+    named = 0
     for plan in relevant:
         if plan["tool"] == "plan_from_text":
             problems.append("plan_from_text re-read an imported recipe instead of "
@@ -135,22 +150,29 @@ def check_import_grounded(events: list[dict[str, Any]],
             problems.append(f"planned {plan.get('doc_key')}, a doc the hub does not hold")
             continue
         if plan.get("lines") is None:
-            problems.append("the plan came back without its basis, so its lines cannot be "
-                            "compared")
             continue
         planned += 1
         want = {int(ln["line_no"]): _line(ln) for ln in reviewed}
         got = {int(ln["line_no"]): _line(ln) for ln in plan["lines"]}
+        left_out = Counter(_named(str(name)) for name in plan.get("left_out") or [])
         for n in sorted(want.keys() | got.keys()):
             if n not in got:
-                problems.append(f"line {n} ({_show(want[n])}) was not planned")
+                name = _named(want[n][0])
+                if left_out[name] > 0:
+                    left_out[name] -= 1
+                    named += 1
+                else:
+                    problems.append(f"line {n} ({_show(want[n])}) was not planned")
             elif n not in want:
                 problems.append(f"line {n} ({_show(got[n])}) was added")
             elif got[n] != want[n]:
                 problems.append(f"line {n}: planned {_show(got[n])}, reviewed {_show(want[n])}")
-    return Check("import_grounded", not problems,
-                 "; ".join(problems[:6]) if problems
-                 else f"{planned} reviewed recipe(s) planned exactly as reviewed")
+    if not problems and not planned:
+        return None
+    detail = f"{planned} reviewed recipe(s) planned exactly as reviewed" + (
+        f"; {named} line(s) the plan names as left out" if named else "")
+    return Check("import_grounded", not problems, "; ".join(problems[:6]) if problems
+                 else detail)
 
 
 def plan_confidence(run: Run) -> dict[str, Any] | None:
