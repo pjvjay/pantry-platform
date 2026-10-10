@@ -60,6 +60,11 @@ def watch_url(vid: str) -> str:
     return f"https://www.youtube.com/watch?v={vid}"
 
 
+def thumbnail_url(vid: str) -> str:
+    """The video's own preview image (YouTube's 480 x 360 thumbnail), kept as a link."""
+    return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+
+
 def duration_seconds(iso: str) -> int | None:
     """``PT1H2M3S`` -> 3723; None when it is not an ISO 8601 duration (a live stream's P0D is
     0, which is not a length either)."""

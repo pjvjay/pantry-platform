@@ -98,6 +98,7 @@ def test_lines_are_checked_unconfirmed_and_timestamped(tmp_path: Path) -> None:
                for ln in doc.lines)
     assert doc.servings == 4 and doc.source.model == "gemini-3-flash-preview"
     assert doc.source.label == "transcribed by Gemini: check every line"
+    assert doc.source.image_url == f"https://i.ytimg.com/vi/{VID}/hqdefault.jpg"
     assert "2 line(s) without a valid time" in result["warnings"][0]
     assert net.parsed[-1]["lines"] == [ln.text for ln in doc.lines]
 

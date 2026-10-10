@@ -15,11 +15,14 @@ Methods, in the order a link is tried:
 Every result is an ImportResult: ``{doc, method, linked_pages, video, needs, warnings}`` where
 ``needs`` is ``none``, ``confirm_lines`` (a video transcription: tick every line),
 ``choose_method`` (no lines yet; ``doc`` is null) or ``needs_servings`` (the source states no
-servings count). Every line keeps its verbatim text, its parsed amount and its source.
+servings count). Every line keeps its verbatim text, its parsed amount and its source; the
+source keeps the link to the page's own preview image (``image_url``: a page's Recipe image or
+og:image, a video's thumbnail), never the image.
 """
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -189,6 +192,7 @@ class Importer:
         page = await fetch_page(url, limits=limits, resolver=self.resolver,
                                 transport=self.transport)
         found = await web.read_recipe(extractor, page)
+        image = await asyncio.to_thread(web.preview_image, page.text, found["method"])
         lines, warnings = web.bounded(found["ingredients"])
         parsed = await web.parse_lines(self.settings.pantry_api_url, lines, title=found["name"],
                                        yield_text=found["yield"], origin="page",
@@ -198,7 +202,7 @@ class Importer:
             kind="web", method="youtube_linked_page" if linked else found["method"],
             url=page.url, site=web.site_of(page.url), page_title=found["name"][:300] or None,
             channel=(linked[1] or None) if linked else None, retrieved_at=web.now_iso(),
-            extractor=web.extractor_label(extractor))
+            extractor=web.extractor_label(extractor), image_url=image)
         doc = web.doc_from_parsed(key, found["name"], found["yield"], parsed, source, warnings)
         return result(doc, structured_data=found["method"])
 
@@ -231,7 +235,7 @@ class Importer:
                               url=youtube.watch_url(vid), site="youtube.com",
                               page_title=str(video["title"])[:300] or None,
                               channel=str(video["channel"])[:200] or None,
-                              retrieved_at=web.now_iso())
+                              retrieved_at=web.now_iso(), image_url=youtube.thumbnail_url(vid))
         doc = web.doc_from_parsed(key, str(video["title"]), "", parsed, source, cut)
         return result(doc, linked_pages=links, video=video)
 
@@ -324,7 +328,8 @@ class Importer:
                               site="youtube.com", page_title=str(meta["title"])[:300] or None,
                               channel=str(meta["channel"])[:200] or None,
                               retrieved_at=web.now_iso(), model=s.video_import_model,
-                              label="transcribed by Gemini: check every line")
+                              label="transcribed by Gemini: check every line",
+                              image_url=youtube.thumbnail_url(vid))
         if answer["servings"] is not None:
             parsed = {**parsed, "servings": answer["servings"]}
         doc = web.doc_from_parsed(key, str(meta["title"]), "", parsed, source, warnings,
