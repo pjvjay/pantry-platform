@@ -24,8 +24,8 @@ An event of this plan that is no longer planned is a delete (a conflict when it 
 Google). The hash covers the title, description, location, start and end (a timed event by the
 moment it is, not by how Google writes the offset), free or busy, and the reminders; so a new
 time or reminder is an update, worded "time" or "reminders". ``preview_token`` hashes the plan,
-its revision and every operation; apply recomputes the diff and refuses (409 preview_stale)
-unless it is exactly the one the shopper reviewed.
+its revision and every operation; apply recomputes the diff, from the same ``timing``, and
+refuses (409 preview_stale) unless it is exactly the one the shopper reviewed.
 
 **Apply** runs one at a time under a lock (409 sync_in_progress), creates the calendar on first
 use, writes each operation with If-Match where an event exists and ``sendUpdates=none``, and saves
@@ -38,12 +38,14 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import httpx
 
@@ -80,6 +82,9 @@ CALENDAR_DESCRIPTION = ("Made by the pantry demo hub from your approved meal pla
                         "changes only events it created here.")
 MAX_SCHEDULE_BYTES = 512 * 1024
 PROPERTY_VERSION = "1"
+MAX_REMINDER_MIN = 40320             # four weeks, Google's limit for a reminder
+MAX_REMINDERS = 5                    # Google's limit of overrides on an event
+CLOCK = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"          # HH:MM, 24-hour
 
 OpKind = Literal["create", "update", "delete", "conflict", "deleted_in_google", "noop", "skip"]
 Choice = Literal["keep", "overwrite", "restore"]
@@ -112,8 +117,38 @@ def event_id(key: str, item_id: str, gen: int) -> str:
     return "pp1" + hashlib.sha256(f"{key}/{item_id}/{gen}".encode()).hexdigest()[:40]
 
 
+@cache
+def _zones() -> frozenset[str]:
+    return frozenset(available_timezones())
+
+
+def valid_zone(name: object) -> bool:
+    """An IANA time zone name, spelled as the database does (America/Vancouver)."""
+    return isinstance(name, str) and name in _zones()
+
+
 def _timed(ev: dict[str, Any]) -> bool:
     return ev.get("all_day", True) is False
+
+
+def _event_ok(e: Any) -> bool:
+    """One of pantry-api's events as the hub can write it: the keys every event has; for a timed
+    one (all_day false) its date, clock times and zone; and its reminders, if any, as minutes
+    Google accepts. An event with none of the newer fields is an all-day one with no reminders."""
+    if not isinstance(e, dict) or not {"item_id", "date", "end", "title"} <= e.keys():
+        return False
+    minutes = e.get("reminders_min") or []
+    if not isinstance(minutes, list) or len(minutes) > MAX_REMINDERS or not all(
+            type(m) is int and 0 <= m <= MAX_REMINDER_MIN for m in minutes):
+        return False
+    if not _timed(e):
+        return True
+    try:
+        dt.date.fromisoformat(e["date"])
+    except (TypeError, ValueError):
+        return False
+    return all(isinstance(e.get(k), str) and re.fullmatch(CLOCK, e[k])
+               for k in ("start_time", "end_time")) and valid_zone(e.get("timezone"))
 
 
 def _instant(value: dict[str, Any]) -> str:
@@ -675,14 +710,19 @@ class CalendarSync:
 
     # the diff
 
-    async def _events(self, schedule: dict[str, Any], include: list[str]) -> list[dict[str, Any]]:
-        """pantry-api's events for the schedule: the one builder."""
+    async def _events(self, schedule: dict[str, Any], include: list[str],
+                      timing: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """pantry-api's events for the schedule: the one builder. ``timing`` (times and
+        reminders, as pantry-api reads it) is sent only when there is one, so without it the
+        request is the one an older pantry-api knows."""
+        request: dict[str, Any] = {"schedule": schedule, "include": include}
+        if timing is not None:
+            request["timing"] = timing
         try:
             async with httpx.AsyncClient(base_url=self.settings.pantry_api_url, timeout=60,
                                          transport=self.pantry_transport,
                                          trust_env=False) as http:
-                r = await http.post("/calendar/preview",
-                                    json={"schedule": schedule, "include": include})
+                r = await http.post("/calendar/preview", json=request)
         except httpx.HTTPError as exc:
             raise SyncRefused(502, "pantry_unavailable", "pantry-api could not be reached "
                               f"({type(exc).__name__}).") from exc
@@ -706,11 +746,12 @@ class CalendarSync:
             raise SyncRefused(502, "pantry_unavailable",
                               f"pantry-api answered {r.status_code}.")
         events = body.get("events") if isinstance(body, dict) else None
-        if not isinstance(events, list) or not all(
-                isinstance(e, dict) and {"item_id", "date", "end", "title"} <= e.keys()
-                for e in events):
+        if not isinstance(events, list) or not all(_event_ok(e) for e in events):
             raise SyncRefused(502, "pantry_refused", "pantry-api's preview was not a list of "
                               "calendar events.")
+        if timing is not None and _timing_ignored(timing, events):
+            raise SyncRefused(502, "pantry_too_old", "This pantry-api did not apply the times "
+                              "and reminders asked for (the timing of POST /calendar/preview).")
         return events
 
     def _ready(self) -> Connection:
@@ -721,9 +762,10 @@ class CalendarSync:
                              + TESTING_NOTE)
         return conn
 
-    async def _diff(self, schedule: dict[str, Any], include: list[str]) -> tuple[Diff, Ledger]:
+    async def _diff(self, schedule: dict[str, Any], include: list[str],
+                    timing: dict[str, Any] | None = None) -> tuple[Diff, Ledger]:
         conn = self._ready()
-        desired = await self._events(schedule, include)
+        desired = await self._events(schedule, include, timing)
         ledger = self.ledger()
         key = plan_key(schedule)
         rev = int(schedule.get("rev") or 0)
@@ -745,19 +787,21 @@ class CalendarSync:
         diff.token = diff_token(key, rev, calendar, ops)
         return diff, ledger
 
-    async def preview(self, schedule: dict[str, Any], include: list[str]) -> dict[str, Any]:
+    async def preview(self, schedule: dict[str, Any], include: list[str],
+                      timing: dict[str, Any] | None = None) -> dict[str, Any]:
         """The diff; nothing is written, in Google or in the ledger."""
-        diff, _ = await self._diff(schedule, include)
+        diff, _ = await self._diff(schedule, include, timing)
         return diff.public()
 
     # apply
 
     async def apply(self, schedule: dict[str, Any], include: list[str], preview_token: str,
-                    choices: dict[str, Choice]) -> dict[str, Any]:
+                    choices: dict[str, Choice],
+                    timing: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.lock.locked():
             raise SyncRefused(409, "sync_in_progress", "A sync is already running.")
         async with self.lock:
-            diff, ledger = await self._diff(schedule, include)
+            diff, ledger = await self._diff(schedule, include, timing)
             if diff.token != preview_token:
                 raise SyncRefused(409, "preview_stale", "The plan or the Pantry plan calendar "
                                   "changed since you reviewed it: review the changes again.")
@@ -988,6 +1032,24 @@ def _check_choices(ops: list[Op], choices: dict[str, Choice]) -> None:
     if missing:
         raise SyncRefused(422, "choice_needed", "Choose Keep or Overwrite for every event "
                           "edited in Google Calendar.", items=missing)
+
+
+_TIMED_KINDS = {"trips": ("trip",), "cooks": ("cook",), "reminders": ("freeze", "thaw")}
+
+
+def _timing_ignored(timing: dict[str, Any], events: list[dict[str, Any]]) -> bool:
+    """True when pantry-api answered a ``timing`` as if it had none: for some kind of event the
+    timing sets a time or reminders for, events came back, and none of them is timed or has a
+    reminder. An older pantry-api ignores the field and sends all-day events, which the hub
+    would otherwise write while the shopper thinks they have times and reminders."""
+    reminders = timing.get("reminders") or {}
+    for group, kinds in _TIMED_KINDS.items():
+        window = timing.get(group) if group != "reminders" else None
+        asked = bool(window or reminders.get(group))
+        mine = [e for e in events if e.get("kind") in kinds]
+        if asked and mine and not any(_timed(e) or e.get("reminders_min") for e in mine):
+            return True
+    return False
 
 
 def schedule_size_ok(schedule: dict[str, Any]) -> bool:
