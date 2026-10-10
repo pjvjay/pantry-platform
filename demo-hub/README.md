@@ -89,17 +89,23 @@ The Meal plan's **Where you shop** takes an address. The console sends it to the
 [Nominatim](https://nominatim.org/), OpenStreetMap's public search, for up to five places:
 
 ```json
-{"results": [{"label": "…", "lat": 49.28, "lon": -123.12}],
+{"results": [{"label": "Vancouver Art Gallery, 750 Hornby Street, Vancouver",
+              "full": "Vancouver Art Gallery, 750, Hornby Street, Financial District, …, Canada",
+              "lat": 49.28, "lon": -123.12}],
  "attribution": "© OpenStreetMap contributors", "source": "OpenStreetMap Nominatim"}
 ```
 
+`full` is Nominatim's whole `display_name`. `label` is the short form for a list: the place's name
+when it has one (and it is not just the house number or the road), then the house number and
+road (or the road alone), then the city, town, village or municipality; a missing part is
+skipped, a repeat dropped, and with nothing left it is the first three parts of `full`.
 `results` is `[]` when nothing matches. Show the attribution wherever the places are shown.
 Refusals are `{detail: {code, message}}`: 400 `bad_query` (under 3 or over 200 characters),
 429 `rate_limited`, 502 `geocoder_unavailable` (an error, or no answer in 10 s), 503
 `geocoder_off`. `/hub/status` has `"geocoder": true|false`.
 
 **What is sent where.** Only the address text goes to `nominatim.openstreetmap.org` (over HTTPS,
-with `format=jsonv2&limit=5&addressdetails=0&accept-language=en`) and a User-Agent naming the app,
+with `format=jsonv2&limit=5&addressdetails=1&accept-language=en`) and a User-Agent naming the app,
 `pantry-planner-demo-hub/1.0 (local demo)`: no email, no cookie, no location of yours. Nothing
 else leaves the machine for this. The hub keeps Nominatim's usage policy for you: one request a
 second for the whole process (searches queue for up to 3 s, then 429), a stop of a minute after
@@ -324,7 +330,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 515 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 534 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 

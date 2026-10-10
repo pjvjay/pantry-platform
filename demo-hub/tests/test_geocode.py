@@ -26,13 +26,24 @@ from tests.conftest import console_client
 URL = "https://geo.test/search"
 ADDRESS = "742 Evergreen Terrace, Springfield"
 ENCODED = "742%20Evergreen%20Terrace"
-PLACE = {"place_id": 1, "lat": "49.2827291", "lon": "-123.1207375",
-         "display_name": "Vancouver, British Columbia, Canada", "category": "boundary"}
+PLACE = {"place_id": 1, "lat": "49.2827291", "lon": "-123.1207375", "name": "Vancouver",
+         "display_name": "Vancouver, British Columbia, Canada", "category": "boundary",
+         "address": {"city": "Vancouver", "state": "British Columbia", "country": "Canada"}}
+GALLERY = {
+    "place_id": 2, "lat": "49.2829", "lon": "-123.1208", "name": "Vancouver Art Gallery",
+    "display_name": "Vancouver Art Gallery, 750, Hornby Street, Financial District, Downtown, "
+                    "Vancouver, Metro Vancouver Regional District, British Columbia, V6Z 2H7, "
+                    "Canada",
+    "address": {"tourism": "Vancouver Art Gallery", "house_number": "750",
+                "road": "Hornby Street", "neighbourhood": "Financial District",
+                "suburb": "Downtown", "city": "Vancouver", "state": "British Columbia",
+                "postcode": "V6Z 2H7", "country": "Canada"}}
 
 
 def places(n: int) -> list[dict[str, Any]]:
-    return [{**PLACE, "place_id": i, "display_name": f"Place {i}, Canada",
-             "lat": str(49 + i / 100), "lon": str(-123 - i / 100)} for i in range(n)]
+    return [{**PLACE, "place_id": i, "name": "", "display_name": f"Place {i}, Canada",
+             "address": {}, "lat": str(49 + i / 100), "lon": str(-123 - i / 100)}
+            for i in range(n)]
 
 
 @dataclass
@@ -101,10 +112,65 @@ def test_places_come_back_as_label_lat_lon_with_the_attribution(env: Env) -> Non
     r = env.get()
     assert r.status_code == 200
     assert r.json() == {
-        "results": [{"label": "Vancouver, British Columbia, Canada", "lat": 49.2827291,
-                     "lon": -123.1207375}],
+        "results": [{"label": "Vancouver", "full": "Vancouver, British Columbia, Canada",
+                     "lat": 49.2827291, "lon": -123.1207375}],
         "attribution": "© OpenStreetMap contributors", "source": "OpenStreetMap Nominatim"}
     assert r.headers["cache-control"] == "no-store" and r.headers["referrer-policy"] == "no-referrer"
+
+
+def test_a_long_display_name_gets_a_short_label_and_stays_whole_as_full(env: Env) -> None:
+    env.nominatim.json([GALLERY])
+    [place] = env.get("vancouver art gallery").json()["results"]
+    assert place == {"label": "Vancouver Art Gallery, 750 Hornby Street, Vancouver",
+                     "full": GALLERY["display_name"], "lat": 49.2829, "lon": -123.1208}
+    assert list(place) == ["label", "full", "lat", "lon"]
+
+
+@pytest.mark.parametrize(("name", "address", "label"), [
+    # the name, the street (number and road), the city: each only when it is there
+    ("Vancouver Art Gallery", {"house_number": "750", "road": "Hornby Street", "city": "Vancouver"},
+     "Vancouver Art Gallery, 750 Hornby Street, Vancouver"),
+    ("", {"house_number": "750", "road": "Hornby Street", "city": "Vancouver"},
+     "750 Hornby Street, Vancouver"),
+    ("Vancouver Art Gallery", {"road": "Hornby Street", "city": "Vancouver"},
+     "Vancouver Art Gallery, Hornby Street, Vancouver"),
+    ("Vancouver Art Gallery", {"house_number": "750", "road": "Hornby Street"},
+     "Vancouver Art Gallery, 750 Hornby Street"),
+    ("Vancouver Art Gallery", {"city": "Vancouver"}, "Vancouver Art Gallery, Vancouver"),
+    # a name that is only the house number or the road is not a name
+    ("750", {"house_number": "750", "road": "Hornby Street", "city": "Vancouver"},
+     "750 Hornby Street, Vancouver"),
+    ("Hornby Street", {"road": "Hornby Street", "city": "Vancouver"}, "Hornby Street, Vancouver"),
+    # a number with no road is no address; a repeat is dropped, whatever its case
+    ("Gallery", {"house_number": "750", "city": "Vancouver"}, "Gallery, Vancouver"),
+    ("Vancouver", {"city": "Vancouver"}, "Vancouver"),
+    ("VANCOUVER", {"road": "vancouver", "city": "Vancouver"}, "VANCOUVER"),
+    # city, else town, else village, else municipality
+    ("", {"town": "Hope", "village": "Yale", "municipality": "FVRD"}, "Hope"),
+    ("", {"village": "Yale", "municipality": "FVRD"}, "Yale"),
+    ("", {"municipality": "Squamish-Lillooet"}, "Squamish-Lillooet"),
+    ("", {"city": " ", "town": "Hope"}, "Hope"),
+    # nothing usable: the first three parts of the full name
+    ("", {}, "Aa, Bb, Cc"),
+    ("", {"state": "British Columbia", "country": "Canada"}, "Aa, Bb, Cc"),
+    ("", {"road": 5, "city": None}, "Aa, Bb, Cc"),
+])
+def test_the_short_label(name: str, address: dict[str, Any], label: str) -> None:
+    item = {"lat": "1", "lon": "2", "name": name, "address": address,
+            "display_name": "Aa, Bb, Cc, Dd, Ee"}
+    assert geocode._place(item) == {"label": label, "full": "Aa, Bb, Cc, Dd, Ee", "lat": 1.0,
+                                    "lon": 2.0}
+
+
+def test_a_result_without_name_or_address_details_still_has_a_label() -> None:
+    def label(**over: Any) -> str:
+        place = geocode._place({"lat": "1", "lon": "2", "display_name": "Aa, Bb, Cc, Dd", **over})
+        assert place is not None
+        return place["label"]
+
+    assert label() == "Aa, Bb, Cc"
+    assert label(address="text", name=None) == "Aa, Bb, Cc"
+    assert label(display_name="Solo") == "Solo"
 
 
 def test_at_most_five_and_only_places_that_can_be_used(env: Env) -> None:
@@ -117,7 +183,8 @@ def test_at_most_five_and_only_places_that_can_be_used(env: Env) -> None:
     env.nominatim.json([*junk, *places(8)])
     results = env.get().json()["results"]
     assert [r["label"] for r in results] == [f"Place {i}, Canada" for i in range(5)]
-    assert results[0] == {"label": "Place 0, Canada", "lat": 49.0, "lon": -123.0}
+    assert results[0] == {"label": "Place 0, Canada", "full": "Place 0, Canada", "lat": 49.0,
+                          "lon": -123.0}
 
 
 def test_nothing_found_is_an_empty_list_not_an_error(env: Env) -> None:
@@ -132,7 +199,7 @@ def test_nominatim_is_asked_as_its_policy_says(env: Env) -> None:
     [sent] = env.nominatim.requests
     assert sent.method == "GET" and str(sent.url).startswith(URL + "?")
     assert dict(sent.url.params.multi_items()) == {
-        "q": ADDRESS, "format": "jsonv2", "limit": "5", "addressdetails": "0",
+        "q": ADDRESS, "format": "jsonv2", "limit": "5", "addressdetails": "1",
         "accept-language": "en"}
     # an app name, never the shopper: no email, no cookie, no referer, no auth
     assert sent.headers["user-agent"] == "pantry-planner-demo-hub/1.0 (local demo)"

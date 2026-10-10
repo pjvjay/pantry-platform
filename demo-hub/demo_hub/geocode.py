@@ -1,5 +1,7 @@
 """``GET /hub/geocode?q=<address>``: the wizard's "Where you shop" looks an address up in
-OpenStreetMap's Nominatim and gets back up to five places to choose from (docs in README.md).
+OpenStreetMap's Nominatim and gets back up to five places to choose from (docs in README.md),
+each with a short ``label`` for the list ("Vancouver Art Gallery, 750 Hornby Street, Vancouver")
+and Nominatim's whole ``display_name`` as ``full``.
 
 An address is personal data, so the hub keeps it to what the lookup needs. ``q`` goes to
 Nominatim and nowhere else: it is not logged (the access log shows ``q=***``, and httpx's log of
@@ -58,19 +60,41 @@ class GeocodeRefused(Exception):
         self.status, self.code, self.message = status, code, message
 
 
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _short(item: dict[str, Any], full: str) -> str:
+    """A result's short label: its name when it has one (and it is not just the house number or
+    the road), then "<house number> <road>" or the road alone, then the city (or town, village,
+    municipality). Parts that are missing are skipped and repeats dropped; with nothing left, the
+    first three parts of the full name."""
+    address = item.get("address") if isinstance(item.get("address"), dict) else {}
+    number, road = _text(address.get("house_number")), _text(address.get("road"))
+    name = _text(item.get("name"))
+    place = next((t for k in ("city", "town", "village", "municipality")
+                  if (t := _text(address.get(k)))), "")
+    parts: list[str] = []
+    for part in (name if name not in (number, road) else "",
+                 f"{number} {road}".strip() if road else "", place):
+        if part and part.casefold() not in (p.casefold() for p in parts):
+            parts.append(part)
+    return ", ".join(parts) or ", ".join(full.split(", ")[:3])
+
+
 def _place(item: Any) -> dict[str, Any] | None:
-    """One Nominatim result as {label, lat, lon}, or None when it has no usable place."""
+    """One Nominatim result as {label, full, lat, lon}, or None when it has no usable place."""
     if not isinstance(item, dict) or not isinstance(item.get("display_name"), str):
         return None
     try:
         lat, lon = float(item["lat"]), float(item["lon"])
     except (KeyError, TypeError, ValueError):
         return None
-    label = item["display_name"].strip()
-    if not label or not (math.isfinite(lat) and math.isfinite(lon)
-                         and -90 <= lat <= 90 and -180 <= lon <= 180):
+    full = item["display_name"].strip()
+    if not full or not (math.isfinite(lat) and math.isfinite(lon)
+                        and -90 <= lat <= 90 and -180 <= lon <= 180):
         return None
-    return {"label": label[:300], "lat": lat, "lon": lon}
+    return {"label": _short(item, full)[:300], "full": full[:500], "lat": lat, "lon": lon}
 
 
 class Geocoder:
@@ -161,7 +185,7 @@ class Geocoder:
                     timeout=self.timeout_s, transport=self.transport,
                     headers={"User-Agent": USER_AGENT, "Accept": "application/json"}) as http:
                 r = await http.get(self.url, params={
-                    "q": text, "format": "jsonv2", "limit": MAX_RESULTS, "addressdetails": 0,
+                    "q": text, "format": "jsonv2", "limit": MAX_RESULTS, "addressdetails": 1,
                     "accept-language": "en"})
         except (httpx.HTTPError, TimeoutError):
             raise unavailable from None
