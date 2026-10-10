@@ -266,7 +266,11 @@ time to paint. So a slow page shows up as the browser, the hub, the model, the g
 **Pictures**: plan tool calls show a card per purchase with the ingredient's photo (its Wikipedia
 thumbnail, `GET /hub/images/ingredient?name=`), where the trip buys it, the price, origin and
 confidence; a fetched recipe page shows the photos it holds (`GET /hub/images/remote?url=`,
-public http(s) hosts only, raster images up to 3 MB). The hub fetches each once and serves it from
+public http(s) hosts only, raster images up to 3 MB). The Meal plan's recipes show theirs: a demo
+recipe the lead image of the Wikipedia article pantry names for it (`GET /hub/images/wiki?title=`,
+320 px, that article only, never a search; 404 when it has none, 502 when Wikipedia does not
+answer), and an imported recipe its page's own preview image through the same remote route,
+credited to the site and linked back. The hub fetches each once and serves it from
 `~/.pantry-demo/images/`, so the browser never calls a third party.
 
 ContextForge records the gateway traces with `OBSERVABILITY_ENABLED=true` in its `.env`, but the
