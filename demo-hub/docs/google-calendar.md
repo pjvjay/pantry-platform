@@ -10,7 +10,9 @@ nothing is written until you click it.
   to events it created there. It cannot see your other calendars (the scope below).
 - **What the shopper reviews is what gets written.** pantry-api builds every event
   (`POST /calendar/preview`, the same builder as the `.ics`); the hub previews the difference
-  with what is in Google, and applies that exact difference or nothing (`preview_stale`).
+  with what is in Google, and applies that exact difference or nothing (`preview_stale`). That
+  includes the times and reminders: a new time or reminder is a "Change" row, and is written
+  only if the request still carries the same ones.
 - **Your edits in Google win unless you say otherwise.** An event you edited in Google is shown
   as "Edited in Google" with **Keep** chosen. One you deleted there is shown as "Deleted in
   Google" and comes back only if you tick **Restore**.
@@ -115,13 +117,14 @@ Each event's Google id is `pp1` + the first 40 hex digits of `sha256("<plan>/<it
 event and a repeated or interrupted apply cannot duplicate it. `gen` starts at 0 and goes up only
 when Google refuses to restore an event that was deleted there.
 
-The event is all-day (`start.date`/`end.date`, the end exclusive, as in the `.ics`), marked free,
-with pantry-api's title, description and location word for word, no reminders (the `.ics` has
-none either), and private properties `pantry_v`, `pantry_schedule`, `pantry_item`, `pantry_kind`,
-`pantry_rev`, `pantry_gen` and `pantry_hash` (a hash of the title, description, location, dates
-and free/busy). **The Google event body is built in the hub** (`gcal_sync.google_body`) from the
-events pantry-api's `/calendar/preview` returns: pantry-api stays the one builder of what an event
-says, and the hub adds only the sync identity, which depends on its ledger.
+The event is all-day (`start.date`/`end.date`, the end exclusive, as in the `.ics`) unless the
+shopper set times (below), marked free, with pantry-api's title, description and location word
+for word, and private properties `pantry_v`, `pantry_schedule`, `pantry_item`, `pantry_kind`,
+`pantry_rev`, `pantry_gen` and `pantry_hash` (a hash of the title, description, location, start
+and end, free/busy and reminders). **The Google event body is built in the hub**
+(`gcal_sync.google_body`) from the events pantry-api's `/calendar/preview` returns: pantry-api
+stays the one builder of what an event says, and the hub adds only the sync identity, which
+depends on its ledger.
 
 | Operation | When | What apply does |
 |---|---|---|
@@ -146,6 +149,30 @@ use, and saves the ledger after each successful write. Rate limits (429, or 403
 A failure that stops the run (quota, rate limit, the connection ended, the calendar gone) marks
 the remaining writes "Not tried". Writes are spaced at least 0.2 s apart.
 
+### Times and reminders
+
+Without `timing` every event is all-day with `reminders: {useDefault: false}`: no reminders at
+all, not the calendar's defaults, exactly as before times existed (a test pins the body and its
+hash, so events already in Google are not seen as changed). With `timing` pantry-api sends the
+events it applies it to as timed (`all_day: false`, `start_time`, `end_time`, `timezone`) and
+with `reminders_min`, minutes before, and the hub writes them as:
+
+- `start` and `end` as `{dateTime: "2026-10-12T18:00:00", timeZone: "America/Vancouver"}`: the
+  wall-clock time the shopper chose, with its zone, so Google applies that day's offset. The end
+  is on the event's own date, or the next day when `end_time` is before `start_time` (a meal that
+  runs past midnight); `end` from pantry-api is the all-day end and is not read for a timed
+  event. Reminder events (freeze, thaw) stay all-day.
+- `reminders: {useDefault: false, overrides: [{method: "popup", minutes: n}, ...]}`, one per
+  distinct `reminders_min`, for timed and all-day events alike (an all-day event counts back from
+  midnight, as Google does). No `reminders_min`, no overrides.
+
+The hub hashes a timed start or end by the moment it is (the UTC instant), because it writes a
+wall-clock time and a zone name and Google answers with an offset (`-07:00`); the reminders are
+hashed sorted, only when there are any (the calendar's own defaults do not count). A difference
+shows in the review's `changes` as `time` (a time of day, or all-day to timed and back),
+`date` and `reminders`, next to `title`, `description`, `location` and `busy or free`. The same
+words apply to an event edited in Google: a changed time or reminder there is "Edited in Google".
+
 ## The routes
 
 All `POST`s are behind the hub's guard (docs/hub-security.md): the hub's own Host, the console's
@@ -156,16 +183,38 @@ Origin, `X-Pantry-Console: 1` and JSON. The sign-in adds its own checks on top.
 | `GET /hub/calendar/status` | | `{configured, client_type, connected, needs_reconnect, reconnect_by, can_connect_here, connect_url, calendar: {summary} or null, scope, all_day, testing_note, last_sync, problem}`: booleans and labels, never a token, client id or secret |
 | `POST /hub/calendar/connect` | `{return_to?: "#/mealplan"}` | `{auth_url}` and the `pantry_oauth` cookie; 409 `not_configured` or `origin_not_registered` |
 | `GET /hub/calendar/oauth/callback` | `?code&state` or `?error&state` from Google | 303 to `/pantry/#/mealplan?calendar=connected`, `=denied&reason=access_denied` or `=error&reason=<word>`; 400 (nothing stored) for an unknown, expired or reused state, or a missing or wrong cookie. `Cache-Control: no-store`, `Referrer-Policy: no-referrer` |
-| `POST /hub/calendar/sync/preview` | `{schedule, include?}` (the Meal plan's `approved_schedule`, as for `/calendar/preview`) | `{preview_token, calendar_action: create or existing, calendar, plan, rev, counts, ops[{item_id, op, kind, title, date, changes, origin?, unverified?, note?}]}`. Writes nothing |
-| `POST /hub/calendar/sync/apply` | `{schedule, include?, preview_token, choices: {item_id: keep, overwrite or restore}}` | `{status: ok, partial or failed, results[{item_id, op, ok, error_code?, message?}], calendar}` |
+| `POST /hub/calendar/sync/preview` | `{schedule, include?, timing?}` (the Meal plan's `approved_schedule`, as for `/calendar/preview`) | `{preview_token, calendar_action: create or existing, calendar, plan, rev, counts, ops[{item_id, op, kind, title, date, changes, origin?, unverified?, note?}]}`. Writes nothing |
+| `POST /hub/calendar/sync/apply` | `{schedule, include?, timing?, preview_token, choices: {item_id: keep, overwrite or restore}}` | `{status: ok, partial or failed, results[{item_id, op, ok, error_code?, message?}], calendar}` |
 | `POST /hub/calendar/disconnect` | `{delete_calendar: bool}` | `{revoked, calendar_deleted, note}` |
+
+`all_day` in the status is `true`: events are all-day unless a request carries a `timing`, which
+the status cannot know.
+
+**`timing`** is optional, the same shape pantry-api's `/calendar/preview` takes, and goes to it as
+it is (and only when present, so without it pantry-api is asked exactly as before):
+
+```json
+{"timezone": "America/Vancouver",
+ "trips": {"start": "09:30", "minutes": 90},
+ "cooks": {"start": "18:00", "minutes": 45},
+ "reminders": {"trips": [60, 10], "cooks": [30], "reminders": [720]}}
+```
+
+`timezone` is required and must be an IANA name exactly as the tz database spells it; `trips` and
+`cooks` are a 24-hour `HH:MM` and a length in minutes (0 to 40320), or `null`; each list of
+reminders has at most 3 numbers of minutes before, 0 to 40320 (Google's four-week limit), and
+`reminders` covers the freeze and thaw events. An unknown key is a 422, not ignored. Preview and
+apply must send the same `timing`: with another, the diff differs and apply is `preview_stale`.
 
 Refusals are `{detail: {code, message}}`: 409 `not_configured`, `not_connected`,
 `needs_reconnect`, `token_file`, `calendar_missing`, `preview_stale`, `sync_in_progress`, and
 pantry-api's own `not_approved`, `needs_review`, `no_longer_stocked`; 422 `choice_needed` (every
-"Edited in Google" row needs Keep or Overwrite) or `bad_choice`; 413 for a plan over 512 KB; 429
-`quota_exceeded`/`rate_limited`; 502 `pantry_unavailable`, `pantry_too_old` or
-`google_unavailable`. `/hub/status` reports `keys.google_calendar_client` and
+"Edited in Google" row needs Keep or Overwrite) or `bad_choice`, and FastAPI's list of errors for a
+`timing` that cannot be read; 413 for a plan over 512 KB; 429 `quota_exceeded`/`rate_limited`;
+502 `pantry_unavailable`, `pantry_refused` (also a timed event without valid clock times or zone,
+or with reminders Google would refuse), `pantry_too_old` (also a pantry-api that answers a
+`timing` with all-day events and no reminders because it does not know the field: nothing is
+written) or `google_unavailable`. `/hub/status` reports `keys.google_calendar_client` and
 `keys.google_calendar_connected` (booleans).
 
 ## The sign-in, and keeping secrets out of logs
@@ -210,12 +259,16 @@ check that nothing else of yours is in a calendar named Pantry plan.
    `ls -l ~/.pantry-secrets/google_calendar_token.json` shows `-rw-------`.
 4. **Review changes**: the button reads "Create the Pantry plan calendar and add N events".
    Apply. Every row says Added.
-5. In Google Calendar (web) a calendar **Pantry plan** has N all-day events on the plan's dates;
-   open one and compare its text with the dialog's "What the event says". No guests, no
-   invitation email.
+5. In Google Calendar (web) a calendar **Pantry plan** has N events on the plan's dates (all-day
+   unless times are set); open one and compare its text with the dialog's "What the event says".
+   No guests, no invitation email.
 6. **Review changes** again: "Nothing to change" (N unchanged).
 7. Move a dinner to another day on the board, then Review: one "Change" row (date). Apply; the
    event moves in Google.
+   With a start time and a reminder set for dinners and trips, Review: a "Change" row per trip and
+   dinner (time, reminders). Apply; in Google each one starts at that time, in your time zone,
+   with only the pop-up reminders you set and no default notification. Review again: quiet.
+   Remove the times: the events are all-day again, with no reminders.
 8. In Google, edit one event's title. Review: it is under "Edited in Google" with Keep chosen.
    Apply: your title stays. Review again: quiet. Then edit another, choose Overwrite, apply: the
    plan's title is back.
@@ -247,5 +300,10 @@ check that nothing else of yours is in a calendar named Pantry plan.
 - Whether Google returns an event's description exactly as written: the hub's "untouched since
   written" check compares the text; if Google changed it, such events show as "Edited in Google"
   (Keep by default), never overwritten. Normal syncs rely on etags and are not affected.
+- How Google writes a timed event back: the hub sends `dateTime` without an offset and a
+  `timeZone`, and expects an offset in the answer (in the event's zone, or the calendar's). It
+  compares moments, not text, so either reads as the same event; FakeGoogle answers both ways
+  (tested), the real API has not been called. If Google changed the moment or the reminders it
+  was given, such events would show as "Edited in Google" (Keep by default), never overwritten.
 - Whether `calendar.app.created` is listed in every console's scope picker: it is requested by
   the hub regardless; a narrower or wider scope would need your explicit decision.

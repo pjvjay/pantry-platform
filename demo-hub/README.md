@@ -77,7 +77,7 @@ the weekly reconnect while the app is in Testing, revoking, and the manual smoke
 | `GET /hub/calendar/status` | configured, connected, reconnect-by date (booleans and labels only) |
 | `POST /hub/calendar/connect` | Google's consent URL (PKCE, state bound to a cookie) |
 | `GET /hub/calendar/oauth/callback` | Google's redirect: stores the refresh token, back to the console |
-| `POST /hub/calendar/sync/preview` | the diff for an approved schedule; writes nothing |
+| `POST /hub/calendar/sync/preview` | the diff for an approved schedule, with optional times and reminders; writes nothing |
 | `POST /hub/calendar/sync/apply` | that exact diff, written (409 if anything changed since) |
 | `POST /hub/calendar/disconnect` | revoke, delete the token, optionally the calendar |
 
@@ -291,7 +291,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 410 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 475 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
@@ -299,5 +299,6 @@ The tests cover the chat client (request shapes, retries, quota handling, every 
 the agent loop (tool calls, failing tools, step budget, model fallback), the MCP client against a
 real MCP server over HTTP (catalog, calls, resources, prompts, 401), the runner client, the
 Google Calendar sync against a stateful fake Google (`tests/fake_google.py`: sign-in, conflicts,
-crash recovery, a lost ledger, rate limits), and every HTTP route with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build`
-type-checks it); in dev, `npm run dev` proxies `/hub` to this hub on :8090.
+crash recovery, a lost ledger, rate limits, timed events and reminders), and every HTTP route with
+its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks it); in
+dev, `npm run dev` proxies `/hub` to this hub on :8090.
