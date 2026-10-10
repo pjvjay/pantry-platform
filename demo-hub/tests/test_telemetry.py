@@ -218,6 +218,19 @@ def test_the_store_keeps_traces_and_browser_measures_and_metrics_roll_them_up(tm
     assert store.get(rec2.id) is not None                         # seen without a restart
 
 
+def test_a_browser_measure_keeps_an_api_path_without_its_query(tmp_path: Path) -> None:
+    """The console reports a path only, but the hub does not rely on it: a query (an address
+    searched for) never reaches memory or the disk."""
+    store = TraceStore(tmp_path)
+    store.add_browser({"kind": "api", "entries": [
+        {"path": "/hub/geocode?q=742%20Evergreen%20Terrace", "ms": 300, "server_ms": 290,
+         "status": 200}, {"path": "/hub/status", "ms": 5, "server_ms": 2, "status": 200}, "odd"]})
+    kept = store.frontend[-1]["entries"]
+    assert [e["path"] for e in kept if isinstance(e, dict)] == ["/hub/geocode", "/hub/status"]
+    written = "".join(p.read_text() for p in tmp_path.glob("browser-*.jsonl"))
+    assert "Evergreen" not in written and "/hub/geocode" in written
+
+
 def test_the_hub_takes_browser_telemetry_and_serves_metrics(tmp_path: Path) -> None:
     client = console_client(app_module.create_app(Settings(traces_dir=str(tmp_path / "t"),
                                                            images_dir=str(tmp_path / "i"))))

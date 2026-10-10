@@ -9,6 +9,7 @@ import types
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from demo_hub import app as app_module
@@ -115,3 +116,20 @@ def test_main_installs_the_redaction_on_uvicorns_access_log(
     assert isinstance(seen["config"][1], int)
     assert redact.install() is redact.install()       # installing twice adds one filter
     assert sum(isinstance(f, RedactQuery) for f in access.filters) == 1
+
+
+def test_redact_query_masks_an_address_in_q_and_an_httpx_url(
+        caplog: pytest.LogCaptureFixture) -> None:
+    """The geocoder's `q` is a person's address: masked in the access log's path, and in the URL
+    object httpx logs for a request (an argument that is not text)."""
+    assert redact_query("/hub/geocode?q=742%20Evergreen%20Terrace&x=1") == \
+        "/hub/geocode?q=***&x=1"
+    assert redact_query("/hub/images/remote?url=a&q=b") == "/hub/images/remote?url=a&q=***"
+    assert redact_query("/pantry/api/search?freq=1") == "/pantry/api/search?freq=1"   # not `q`
+    logger = logging.getLogger("httpx.test")
+    logger.addFilter(RedactQuery())
+    url = httpx.URL("https://geo.test/search?q=742%20Evergreen%20Terrace&format=jsonv2")
+    with caplog.at_level(logging.INFO, logger="httpx.test"):
+        logger.info('HTTP Request: %s %s "%s %d %s"', "GET", url, "HTTP/1.1", 200, "OK")
+    assert "Evergreen" not in caplog.text
+    assert 'GET https://geo.test/search?q=***&format=jsonv2 "HTTP/1.1 200 OK"' in caplog.text
