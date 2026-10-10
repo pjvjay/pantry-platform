@@ -9,13 +9,18 @@ httpx.MockTransport, with state and fault injection. No test ever calls Google.
   showDeleted, pagination), insert (409 for an id already used, cancelled ones included), get,
   update (If-Match, 412) and delete (If-Match, a cancelled tombstone). Every write must carry
   sendUpdates=none and no attendees.
+* Event times and reminders as Google reads them: a start and an end that are both dates or
+  both dateTimes (a wall-clock dateTime needs a timeZone, an end before its start is refused),
+  answered with the offset the zone has on that day, as the real API does; reminders either the
+  calendar's defaults or up to five overrides, popup or email, 0 to 40320 minutes before.
 * The shopper in Google: ``user_edit``, ``user_delete``, ``user_add``.
 * Faults: ``fail(...)`` answers the next matching requests with a status (429 with Retry-After,
   403 rate or quota, 503); ``crash_after_writes = N`` applies the Nth write and then raises
   Crash instead of answering, like a hub killed mid-apply.
 
-FakePantry is pantry-api's POST /calendar/preview for a small schedule: one all-day event per
-trip, cook and reminder, in the shape pantry-api sends.
+FakePantry is pantry-api's POST /calendar/preview for a small schedule: one event per trip, cook
+and reminder, in the shape pantry-api sends: all-day, or with the times and reminders of a
+``timing`` (``timing()`` is one).
 """
 
 from __future__ import annotations
@@ -26,9 +31,12 @@ import hashlib
 import itertools
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo, available_timezones
 
 import httpx
 
@@ -71,6 +79,80 @@ def _error(status: int, reason: str, message: str = "",
         "errors": [{"domain": "calendar", "reason": reason, "message": message or reason}]}})
 
 
+@cache
+def _zones() -> frozenset[str]:
+    return frozenset(available_timezones())
+
+
+def _read_when(name: str, when: Any) -> tuple[dt.date | None, httpx.Response | None]:
+    """A start or end as Google reads it: a date, or an aware datetime (an offset, or a zone to
+    put on a wall-clock time)."""
+    if not isinstance(when, dict) or ("date" in when) == ("dateTime" in when):
+        return None, _error(400, "required", f"Missing {name} time.")
+    if "date" in when:
+        try:
+            return dt.date.fromisoformat(when["date"]), None
+        except (TypeError, ValueError):
+            return None, _error(400, "invalid", f"Invalid value for: {name} date")
+    zone = None
+    if "timeZone" in when:
+        if when["timeZone"] not in _zones():
+            return None, _error(400, "invalid", f"Invalid time zone definition for {name} time.")
+        zone = ZoneInfo(when["timeZone"])
+    try:
+        moment = dt.datetime.fromisoformat(when["dateTime"])
+    except (TypeError, ValueError):
+        return None, _error(400, "invalid", f"Invalid value for: {name} time")
+    if moment.tzinfo is None:
+        if zone is None:
+            return None, _error(400, "required", f"Missing time zone definition for {name} time.")
+        moment = moment.replace(tzinfo=zone)
+    return moment, None
+
+
+def _check_reminders(reminders: Any) -> httpx.Response | None:
+    if reminders is None:
+        return None
+    overrides = reminders.get("overrides") or []
+    if reminders.get("useDefault") and overrides:
+        return _error(400, "cannotUseDefaultRemindersAndSpecifyOverride",
+                      "Cannot specify both default reminders and overrides at the same time.")
+    if len(overrides) > 5:
+        return _error(400, "invalid", "The number of reminder overrides exceeds the limit.")
+    for o in overrides:
+        if o.get("method") not in ("email", "popup"):
+            return _error(400, "invalid", "Invalid reminder method.")
+        if type(o.get("minutes")) is not int or not 0 <= o["minutes"] <= 40320:
+            return _error(400, "invalid", "Invalid reminder delta.")
+    return None
+
+
+def accept_event(body: dict[str, Any], render_zone: str | None = None
+                 ) -> tuple[dict[str, Any], httpx.Response | None]:
+    """An event body as Google stores it, or its refusal. A timed start or end comes back with
+    the offset its zone has on that day (and keeps its timeZone), as the real API answers; with
+    ``render_zone`` the offset is that zone's instead, the way an event in another zone than its
+    calendar's may be read back."""
+    out = dict(body)
+    moments: list[Any] = []
+    for name in ("start", "end"):
+        moment, refusal = _read_when(name, body.get(name))
+        if refusal is not None:
+            return out, refusal
+        moments.append(moment)
+        if isinstance(moment, dt.datetime):
+            zone = render_zone or body[name].get("timeZone")
+            out[name] = {**body[name], "dateTime": moment.astimezone(
+                ZoneInfo(zone) if zone else moment.tzinfo).isoformat()}
+    start, end = moments
+    if isinstance(start, dt.datetime) != isinstance(end, dt.datetime):
+        return out, _error(400, "invalid", "Start and end times must either both be date or "
+                           "both be dateTime.")
+    if end < start or (end == start and not isinstance(start, dt.datetime)):
+        return out, _error(400, "timeRangeEmpty", "The specified time range is empty.")
+    return out, _check_reminders(body.get("reminders"))
+
+
 @dataclass
 class FakeGoogle:
     AUTH_URL = "https://accounts.fake/o/oauth2/v2/auth"
@@ -84,6 +166,7 @@ class FakeGoogle:
     invalid_grant: bool = False
     revoke_fails: bool = False
     refuse_restore: bool = False
+    render_zone: str | None = None
     crash_after_writes: int | None = None
     codes: dict[str, dict[str, str]] = field(default_factory=dict)
     refresh_tokens: set[str] = field(default_factory=set)
@@ -258,6 +341,9 @@ class FakeGoogle:
                 body = json.loads(request.content)
                 if body.get("attendees"):
                     return _error(400, "attendeesNotAllowed")
+                body, refusal = accept_event(body, self.render_zone)
+                if refusal is not None:
+                    return refusal
                 eid = body.get("id", "")
                 if not re.fullmatch(r"[a-v0-9]{5,1024}", eid):
                     return _error(400, "invalid", "bad event id")
@@ -279,6 +365,9 @@ class FakeGoogle:
             body = json.loads(request.content)
             if body.get("attendees"):
                 return _error(400, "attendeesNotAllowed")
+            body, refusal = accept_event(body, self.render_zone)
+            if refusal is not None:
+                return refusal
             if ev.get("status") == "cancelled" and self.refuse_restore:
                 return _error(403, "forbidden", "cannot restore a deleted event")
             store[event_id] = {**body, "id": event_id,
@@ -329,11 +418,27 @@ def schedule(plan_id: str = "plan-abc", rev: int = 1, start: str = "2026-10-12")
             "reminders": [{"item_id": "thaw-m2-7", "date": day(1), "product": "Chicken"}]}
 
 
+def timing(**changes: Any) -> dict[str, Any]:
+    """A ``timing`` as the console sends it: trips at 09:30 for 90 minutes, dinners at 18:00 for
+    45, and reminders before each kind. ``changes`` replace whole keys."""
+    return {"timezone": "America/Vancouver", "trips": {"start": "09:30", "minutes": 90},
+            "cooks": {"start": "18:00", "minutes": 45},
+            "reminders": {"trips": [60, 10], "cooks": [30], "reminders": [720]}, **changes}
+
+
 @dataclass
 class FakePantry:
-    """pantry-api's POST /calendar/preview: all-day events from the schedule, word for word."""
+    """pantry-api's POST /calendar/preview: events from the schedule, word for word. Without a
+    ``timing`` they are all-day and carry none of the time fields, as before; with one, the times
+    and reminders it asks for. ``ignores_timing`` is an older pantry-api (the field is unknown),
+    ``newer`` one that sends the time fields even for all-day events, ``alter`` changes each
+    event before it is sent. ``requests`` keeps what the hub sent."""
     calls: int = 0
     refuse: tuple[int, dict[str, Any]] | None = None
+    ignores_timing: bool = False
+    newer: bool = False
+    alter: Callable[[dict[str, Any]], None] | None = None
+    requests: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.transport = httpx.MockTransport(self.handle)
@@ -344,21 +449,45 @@ class FakePantry:
         if self.refuse:
             return httpx.Response(self.refuse[0], json={"detail": self.refuse[1]})
         body = json.loads(request.content)
-        return httpx.Response(200, json=preview(body["schedule"], body.get("include")))
+        self.requests.append(body)
+        events = preview(body["schedule"], body.get("include"),
+                         None if self.ignores_timing else body.get("timing"), newer=self.newer)
+        for event in events["events"]:
+            if self.alter:
+                self.alter(event)
+        return httpx.Response(200, json=events)
 
 
-def preview(s: dict[str, Any], include: list[str] | None = None) -> dict[str, Any]:
+_TIMING_KEY = {"trip": "trips", "cook": "cooks", "freeze": "reminders", "thaw": "reminders"}
+
+
+def preview(s: dict[str, Any], include: list[str] | None = None,
+            timing: dict[str, Any] | None = None, *, newer: bool = False) -> dict[str, Any]:
     include = include or ["trips", "cooks", "reminders"]
     events = []
 
     def add(item: str, kind: str, date: str, title: str, description: str,
             location: str | None = None) -> None:
         end = (dt.date.fromisoformat(date) + dt.timedelta(days=1)).isoformat()
-        events.append({"uid": f"{item}@pantry-planner", "item_id": item, "kind": kind,
-                       "date": date, "end": end, "all_day": True, "title": title,
-                       "location": location, "description": description,
-                       "categories": ["Pantry plan"], "sequence": s.get("rev", 0), "labels": [],
-                       "google_url": "https://calendar.google.com/calendar/render?action=TEMPLATE"})
+        event = {"uid": f"{item}@pantry-planner", "item_id": item, "kind": kind,
+                 "date": date, "end": end, "all_day": True, "title": title,
+                 "location": location, "description": description,
+                 "categories": ["Pantry plan"], "sequence": s.get("rev", 0), "labels": [],
+                 "google_url": "https://calendar.google.com/calendar/render?action=TEMPLATE"}
+        if newer or timing is not None:
+            event.update(start_time=None, end_time=None, timezone=None, reminders_min=[])
+        if timing is not None:
+            group = _TIMING_KEY[kind]
+            window = timing.get(group) if group != "reminders" else None
+            if window:         # ends on the day the clock says, which may be the next
+                begin = dt.datetime.combine(dt.date.fromisoformat(date),
+                                            dt.time.fromisoformat(window["start"]))
+                stop = begin + dt.timedelta(minutes=window["minutes"])
+                event.update(all_day=False, start_time=window["start"],
+                             end_time=stop.strftime("%H:%M"), timezone=timing["timezone"],
+                             end=stop.date().isoformat())
+            event["reminders_min"] = list(timing["reminders"][group])
+        events.append(event)
 
     if "trips" in include:
         for t in s.get("trips", []):
