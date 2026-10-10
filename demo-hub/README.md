@@ -36,6 +36,7 @@ browser ── :8090 demo hub ─┬─ /pantry/          the built pantry-front
                            ├─ /hub/agent/conversations/{id}/alternatives, /swap → the cart: pantry :8000/mcp directly
                            ├─ /hub/sims/*       → mcp-sim runner :8765
                            ├─ /hub/calendar/*   → Google Calendar sync (optional): connect, preview, apply
+                           ├─ /hub/geocode      → OpenStreetMap Nominatim (the Meal plan's "Where you shop")
                            └─ /hub/status       → every service's health
 ```
 
@@ -80,6 +81,38 @@ the weekly reconnect while the app is in Testing, revoking, and the manual smoke
 | `POST /hub/calendar/sync/preview` | the diff for an approved schedule, with optional times and reminders; writes nothing |
 | `POST /hub/calendar/sync/apply` | that exact diff, written (409 if anything changed since) |
 | `POST /hub/calendar/disconnect` | revoke, delete the token, optionally the calendar |
+
+## Address search
+
+The Meal plan's **Where you shop** takes an address. The console sends it to the hub
+(`GET /hub/geocode?q=<address>`, on submit, never as you type) and the hub asks
+[Nominatim](https://nominatim.org/), OpenStreetMap's public search, for up to five places:
+
+```json
+{"results": [{"label": "…", "lat": 49.28, "lon": -123.12}],
+ "attribution": "© OpenStreetMap contributors", "source": "OpenStreetMap Nominatim"}
+```
+
+`results` is `[]` when nothing matches. Show the attribution wherever the places are shown.
+Refusals are `{detail: {code, message}}`: 400 `bad_query` (under 3 or over 200 characters),
+429 `rate_limited`, 502 `geocoder_unavailable` (an error, or no answer in 10 s), 503
+`geocoder_off`. `/hub/status` has `"geocoder": true|false`.
+
+**What is sent where.** Only the address text goes to `nominatim.openstreetmap.org` (over HTTPS,
+with `format=jsonv2&limit=5&addressdetails=0&accept-language=en`) and a User-Agent naming the app,
+`pantry-planner-demo-hub/1.0 (local demo)`: no email, no cookie, no location of yours. Nothing
+else leaves the machine for this. The hub keeps Nominatim's usage policy for you: one request a
+second for the whole process (searches queue for up to 3 s, then 429), a stop of a minute after
+Nominatim says 429, and answers kept in memory, 256 searches for 24 hours, under a hash of the
+query. The public service is for light use: for more, run your own and set `GEOCODER_URL`;
+`GEOCODER_URL=""` turns the route off (503, and `/hub/status` says `geocoder: false`).
+
+**The address is personal data.** It is not logged (the access log reads `?q=***` when the hub
+starts as `python -m demo_hub.app`, as `scripts/up.sh` does, and so does httpx's log of the
+request to Nominatim), not in the Assistant's traces, the metrics or the
+browser measures (a query is cut from a measured path), not in an error message, and not written
+to disk; the cache lives in memory and ends with the hub. The route answers with `no-store`.
+The tests check each of these and never call the real Nominatim.
 
 ## Demo data
 
@@ -291,7 +324,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 482 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 515 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
@@ -299,6 +332,7 @@ The tests cover the chat client (request shapes, retries, quota handling, every 
 the agent loop (tool calls, failing tools, step budget, model fallback), the MCP client against a
 real MCP server over HTTP (catalog, calls, resources, prompts, 401), the runner client, the
 Google Calendar sync against a stateful fake Google (`tests/fake_google.py`: sign-in, conflicts,
-crash recovery, a lost ledger, rate limits, timed events and reminders), and every HTTP route with
-its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks it); in
-dev, `npm run dev` proxies `/hub` to this hub on :8090.
+crash recovery, a lost ledger, rate limits, timed events and reminders), the address search against
+a fake Nominatim (its usage policy, and the address kept out of every log), and every HTTP route
+with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks
+it); in dev, `npm run dev` proxies `/hub` to this hub on :8090.
