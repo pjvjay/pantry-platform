@@ -120,6 +120,9 @@ class Settings:
     google_token_url: str = "https://oauth2.googleapis.com/token"
     google_revoke_url: str = "https://oauth2.googleapis.com/revoke"
     google_calendar_url: str = "https://www.googleapis.com/calendar/v3"
+    # Address search for the wizard's "Where you shop" (GEOCODER_URL; README.md): OpenStreetMap's
+    # Nominatim, with its usage policy kept by geocode.py. "" turns it off.
+    geocoder_url: str = "https://nominatim.openstreetmap.org/search"
 
     @staticmethod
     def from_env() -> Settings:
@@ -199,6 +202,7 @@ class Settings:
             google_revoke_url=env.get("GOOGLE_REVOKE_URL", Settings.google_revoke_url),
             google_calendar_url=env.get("GOOGLE_CALENDAR_URL", Settings.google_calendar_url)
             .rstrip("/"),
+            geocoder_url=env.get("GEOCODER_URL", Settings.geocoder_url).strip(),
         )
 
 

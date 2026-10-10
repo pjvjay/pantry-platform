@@ -11,6 +11,8 @@
 * ``/hub/sims/*``         the mcp-sim runner: scenarios, runs, start and follow jobs
 * ``/hub/demo/reset``     reseed pantry's database and reload the demo origin evidence
 * ``/hub/calendar/*``     opt-in Google Calendar sync of the approved meal plan (gcal_routes.py)
+* ``/hub/geocode``        an address looked up in OpenStreetMap's Nominatim (geocode.py); the
+                          address is never logged, traced or stored
 
 Secrets (the pantry bearer token, the ContextForge JWT, the Gemini key) stay in this process;
 the browser only ever talks to the hub. ``guard.py`` checks every request first: the hub's own
@@ -43,10 +45,11 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from demo_hub import gcal_routes, mcp_targets, meal_plans, pricing, redact
+from demo_hub import gcal_routes, geocode, mcp_targets, meal_plans, pricing, redact
 from demo_hub.agent import AGENT_TARGETS, Agent, CartError
 from demo_hub.evals import evaluate
 from demo_hub.gcal_sync import CalendarSync
+from demo_hub.geocode import Geocoder
 from demo_hub.guard import Guard
 from demo_hub.images import ImageCache, ImageError
 from demo_hub.llm import MODEL_CHOICES, ChatClient, LLMError
@@ -174,8 +177,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     http_stats = HttpStats()
     stores_cache: dict[str, Any] = {"at": 0.0, "names": []}
     calendar = CalendarSync(settings)
+    geocoder = Geocoder(settings)
     app.state.settings, app.state.agent, app.state.targets = settings, agent, targets
-    app.state.calendar = calendar
+    app.state.calendar, app.state.geocoder = calendar, geocoder
     app.state.importer = importer
     app.state.traces, app.state.images, app.state.http_stats = store, images, http_stats
 
@@ -276,6 +280,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                      "google_calendar_client": calendar.configured(),
                      "google_calendar_connected": calendar.connected()},
             "agent": {"default_model": s.default_agent_model},
+            "geocoder": geocoder.enabled,
             "recipe_import": importer.status(),
             "video_import": importer.video_status(),
         }
@@ -570,6 +575,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- Google Calendar sync (opt-in; nothing happens until the shopper connects) -------------
 
     app.include_router(gcal_routes.router(calendar))
+
+    # --- address search (Nominatim; the address is never logged or stored) ---------------------
+
+    app.include_router(geocode.router(geocoder))
 
     # --- demo data -----------------------------------------------------------------------------
 
