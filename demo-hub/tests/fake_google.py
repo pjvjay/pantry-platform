@@ -467,7 +467,7 @@ def preview(s: dict[str, Any], include: list[str] | None = None,
     events = []
 
     def add(item: str, kind: str, date: str, title: str, description: str,
-            location: str | None = None) -> None:
+            location: str | None = None, slot: str = "") -> None:
         end = (dt.date.fromisoformat(date) + dt.timedelta(days=1)).isoformat()
         event = {"uid": f"{item}@pantry-planner", "item_id": item, "kind": kind,
                  "date": date, "end": end, "all_day": True, "title": title,
@@ -480,10 +480,11 @@ def preview(s: dict[str, Any], include: list[str] | None = None,
             group = _TIMING_KEY[kind]
             window = timing.get(group) if group != "reminders" else None
             if window:         # ends on the day the clock says, which may be the next
+                start = window.get("by_slot", {}).get(slot, window["start"])
                 begin = dt.datetime.combine(dt.date.fromisoformat(date),
-                                            dt.time.fromisoformat(window["start"]))
+                                            dt.time.fromisoformat(start))
                 stop = begin + dt.timedelta(minutes=window["minutes"])
-                event.update(all_day=False, start_time=window["start"],
+                event.update(all_day=False, start_time=start,
                              end_time=stop.strftime("%H:%M"), timezone=timing["timezone"],
                              end=stop.date().isoformat())
             event["reminders_min"] = list(timing["reminders"][group])
@@ -501,7 +502,8 @@ def preview(s: dict[str, Any], include: list[str] | None = None,
     if "cooks" in include:
         for c in s.get("cooks", []):
             add(c["item_id"], "cook", c["date"], f"Cook: {c['title']} ({c['slot']})",
-                "Ingredients, as the recipe gives them:\n- (the recipe lists none)")
+                "Ingredients, as the recipe gives them:\n- (the recipe lists none)",
+                slot=c["slot"])
     events.sort(key=lambda e: (e["date"], e["item_id"]))
     counts = {k: sum(1 for e in events if e["kind"] == k) for k in ("trip", "cook", "freeze",
                                                                      "thaw")}

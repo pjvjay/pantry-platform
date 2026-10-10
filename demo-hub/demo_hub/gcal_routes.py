@@ -56,13 +56,20 @@ class ConnectBody(BaseModel):
 
 Minutes = Annotated[int, Field(ge=0, le=MAX_REMINDER_MIN)]
 Before = Annotated[list[Minutes], Field(max_length=3)]
+Clock = Annotated[str, Field(pattern=CLOCK)]
+Slot = Literal["breakfast", "lunch", "dinner", "snack"]
 
 
 class Window(BaseModel):
     """When a kind of event starts on its day, and how long it lasts."""
     model_config = ConfigDict(extra="forbid")
-    start: str = Field(pattern=CLOCK)
+    start: Clock
     minutes: Minutes
+
+
+class CookWindow(Window):
+    """A cook event starts at its meal's slot time in ``by_slot``, else at ``start``."""
+    by_slot: dict[Slot, Clock] | None = None
 
 
 class Alarms(BaseModel):
@@ -79,7 +86,7 @@ class Timing(BaseModel):
     model_config = ConfigDict(extra="forbid")
     timezone: str
     trips: Window | None = None
-    cooks: Window | None = None
+    cooks: CookWindow | None = None
     reminders: Alarms = Field(default_factory=Alarms)
 
     @field_validator("timezone")
@@ -115,7 +122,13 @@ def _refusal(exc: OAuthError | SyncRefused) -> HTTPException:
 
 
 def _timing(body: SyncBody) -> dict[str, Any] | None:
-    return body.timing.model_dump(mode="json") if body.timing else None
+    """What pantry-api is sent: the timing as given, with no ``by_slot`` where there was none."""
+    if not body.timing:
+        return None
+    out = body.timing.model_dump(mode="json")
+    if out["cooks"] and out["cooks"]["by_slot"] is None:
+        del out["cooks"]["by_slot"]
+    return out
 
 
 def _schedule(body: SyncBody) -> dict[str, Any]:

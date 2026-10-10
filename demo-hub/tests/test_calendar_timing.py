@@ -290,6 +290,27 @@ def test_without_a_timing_pantry_api_is_asked_as_before(env: CalendarEnv) -> Non
     assert diff["counts"]["noop"] == 5 and sum(diff["counts"].values()) == 5
 
 
+def test_a_meals_slot_time_is_passed_on_as_given_and_used(env: CalendarEnv) -> None:
+    sched = schedule()
+    sched["cooks"][0]["slot"], sched["cooks"][1]["slot"] = "breakfast", "lunch"
+    by_slot = {"breakfast": "07:30", "lunch": "12:15"}
+    cooks = {"start": "18:00", "minutes": 45, "by_slot": by_slot}
+    diff, _ = env.sync_now(sched, timing=timing(cooks=cooks))
+    assert env.pantry.requests[-1]["timing"]["cooks"] == cooks
+    assert one(env, "cook-m1")["start"]["dateTime"] == "2026-10-13T07:30:00-07:00"
+    assert one(env, "cook-m2")["start"]["dateTime"] == "2026-10-14T12:15:00-07:00"
+    assert one(env, "cook-m3")["start"]["dateTime"] == "2026-10-15T18:00:00-07:00"   # its start
+    assert one(env, "cook-m1")["end"]["dateTime"] == "2026-10-13T08:15:00-07:00"
+    # a slot time that changes is a new time for that meal only
+    later = {**cooks, "by_slot": {**by_slot, "lunch": "12:30"}}
+    diff = env.preview(sched, timing=timing(cooks=later)).json()
+    assert [(o["item_id"], o["changes"]) for o in diff["ops"] if o["op"] == "update"] == \
+        [("cook-m2", ["time"])]
+    # without by_slot the request has none, not a null
+    env.preview(sched, timing=timing())
+    assert "by_slot" not in env.pantry.requests[-1]["timing"]["cooks"]
+
+
 def test_a_timing_with_nothing_set_is_passed_on_as_it_is(env: CalendarEnv) -> None:
     sched = schedule()
     r = env.preview(sched, timing={"timezone": "UTC"})
@@ -307,6 +328,12 @@ def test_a_timing_with_nothing_set_is_passed_on_as_it_is(env: CalendarEnv) -> No
     {"trips": {"start": "٠٩:٣٠", "minutes": 60}}, {"cooks": {"start": "18:00", "minutes": -1}},
     {"cooks": {"start": "18:00", "minutes": 40321}}, {"cooks": {"minutes": 45}},
     {"cooks": {"start": "18:00", "minutes": 45, "ends": "19:00"}},
+    {"cooks": {"start": "18:00", "minutes": 45, "by_slot": {"brunch": "10:00"}}},
+    {"cooks": {"start": "18:00", "minutes": 45, "by_slot": {"lunch": "12:60"}}},
+    {"cooks": {"start": "18:00", "minutes": 45, "by_slot": {"lunch": "9:00"}}},
+    {"cooks": {"start": "18:00", "minutes": 45, "by_slot": {"lunch": None}}},
+    {"cooks": {"start": "18:00", "minutes": 45, "by_slot": ["12:00"]}},
+    {"trips": {"start": "09:30", "minutes": 60, "by_slot": {"lunch": "12:00"}}},
     {"reminders": {"trips": [-1], "cooks": [], "reminders": []}},
     {"reminders": {"trips": [40321], "cooks": [], "reminders": []}},
     {"reminders": {"trips": [1, 2, 3, 4], "cooks": [], "reminders": []}},

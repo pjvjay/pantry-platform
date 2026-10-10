@@ -201,7 +201,10 @@ it is (and only when present, so without it pantry-api is asked exactly as befor
 ```
 
 `timezone` is required and must be an IANA name exactly as the tz database spells it; `trips` and
-`cooks` are a 24-hour `HH:MM` and a length in minutes (0 to 40320), or `null`; each list of
+`cooks` are a 24-hour `HH:MM` and a length in minutes (0 to 40320), or `null`; `cooks` may also
+have `by_slot`, `{breakfast?, lunch?, dinner?, snack?: "HH:MM"}` (those four keys only), the start
+of a cook event for that meal slot instead of `start`, which pantry-api applies and the hub passes
+on unchanged (the key is left out when there is none); each list of
 reminders has at most 3 numbers of minutes before, 0 to 40320 (Google's four-week limit), and
 `reminders` covers the freeze and thaw events. An unknown key is a 422, not ignored. Preview and
 apply must send the same `timing`: with another, the diff differs and apply is `preview_stale`.
