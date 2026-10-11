@@ -37,6 +37,7 @@ browser ── :8090 demo hub ─┬─ /pantry/          the built pantry-front
                            ├─ /hub/sims/*       → mcp-sim runner :8765
                            ├─ /hub/calendar/*   → Google Calendar sync (optional): connect, preview, apply
                            ├─ /hub/geocode      → OpenStreetMap Nominatim (the Meal plan's "Where you shop")
+                           ├─ /hub/tiles/*      → OpenStreetMap tiles (the Meal plan's store map), cached on disk
                            └─ /hub/status       → every service's health
 ```
 
@@ -119,6 +120,34 @@ request to Nominatim), not in the Assistant's traces, the metrics or the
 browser measures (a query is cut from a measured path), not in an error message, and not written
 to disk; the cache lives in memory and ends with the hub. The route answers with `no-store`.
 The tests check each of these and never call the real Nominatim.
+
+## Map tiles
+
+The Meal plan's store map draws OpenStreetMap's tiles through the hub
+(`GET /hub/tiles/{z}/{x}/{y}.png`), so the browser never calls a third party. **A map that shows
+them must show "© OpenStreetMap contributors", linked to
+<https://www.openstreetmap.org/copyright>**: the tile usage policy requires the credit, and the map
+data is under the Open Database License.
+
+The hub keeps [OpenStreetMap's tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
+for you (`demo_hub/tiles.py`):
+
+- a User-Agent naming the app, `pantry-planner-demo-hub/1.0 (local demo)` as for address search,
+  and nothing of yours: no cookie, no Referer, no address;
+- a disk cache in `DEMO_TILE_DIR` (default `~/.pantry-demo/tiles`, folders 0700, files 0600): a
+  tile is kept as long as the tile server's `Cache-Control` max-age (else its `Expires`) says, and
+  at least 7 days; then it is asked again with its ETag and Last-Modified (304 keeps it), and the
+  old copy is served while the server cannot be reached;
+- zoom 0 to 19, with x and y inside the zoom's grid (else 400);
+- at most 2 requests to the tile server at once, and one per tile however many ask for it;
+- only the tiles the map asks for: nothing is prefetched, nothing downloaded in bulk.
+
+Refusals are `{detail: {code, message}}`: 400 `bad_tile`, 404 `no_tile`, 502 `tiles_unavailable`
+(an error, an answer that is not an image, or none in 10 s, with no copy cached), 503
+`tiles_off`. `/hub/status` has `"tiles": true|false`. The public tile server is for light use: for
+more, use another tile server and set `TILES_URL` (with `{z}`, `{x}` and `{y}` in it);
+`TILES_URL=""` turns the route off. `scripts/up.sh` passes `TILES_URL` and `DEMO_TILE_DIR` to the
+hub. The tests use a fake tile server and never call OpenStreetMap.
 
 ## Demo data
 
@@ -334,7 +363,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 534 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 600 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
@@ -343,6 +372,7 @@ the agent loop (tool calls, failing tools, step budget, model fallback), the MCP
 real MCP server over HTTP (catalog, calls, resources, prompts, 401), the runner client, the
 Google Calendar sync against a stateful fake Google (`tests/fake_google.py`: sign-in, conflicts,
 crash recovery, a lost ledger, rate limits, timed events and reminders), the address search against
-a fake Nominatim (its usage policy, and the address kept out of every log), and every HTTP route
-with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks
+a fake Nominatim (its usage policy, and the address kept out of every log), the map tiles against a
+fake tile server (its usage policy and the disk cache), recipe pictures against a fake Wikipedia,
+and every HTTP route with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks
 it); in dev, `npm run dev` proxies `/hub` to this hub on :8090.
