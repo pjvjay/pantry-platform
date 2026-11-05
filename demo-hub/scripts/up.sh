@@ -136,6 +136,15 @@ if [ -f "$GOOGLE_CLIENT" ]; then
 else
   echo "  info  no Google OAuth client ($GOOGLE_CLIENT): calendar sync is off"
 fi
+# Map tiles for the Meal plan's store map (README.md, Map tiles): OpenStreetMap's, through the hub
+# and cached on disk as its tile usage policy asks. TILES_URL="" turns them off.
+OSM_TILES='https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+TILES_URL=${TILES_URL-$OSM_TILES}
+if [ -n "$TILES_URL" ]; then
+  echo "  ok    map tiles from ${TILES_URL%%/\{z\}*}, cached in $STATE_DIR/tiles"
+else
+  echo "  info  map tiles are off (TILES_URL is empty)"
+fi
 if [ -f "$STATE_DIR/pids/hub.pid" ] && kill -0 "$(cat "$STATE_DIR/pids/hub.pid")" 2>/dev/null; then
   kill "$(cat "$STATE_DIR/pids/hub.pid")" && sleep 1   # always restart: it is cheap and picks up new settings
 fi
@@ -152,7 +161,7 @@ fi
     YOUTUBE_API_KEY_FILE=$SECRETS_DIR/youtube_api_key DEMO_VIDEO_IMPORT=${DEMO_VIDEO_IMPORT:-0} \
     GOOGLE_OAUTH_CLIENT_FILE=$GOOGLE_CLIENT \
     GOOGLE_CALENDAR_TOKEN_FILE=$SECRETS_DIR/google_calendar_token.json \
-    DEMO_CALENDAR_DIR=$STATE_DIR/calendar
+    DEMO_CALENDAR_DIR=$STATE_DIR/calendar TILES_URL="$TILES_URL" DEMO_TILE_DIR=$STATE_DIR/tiles
   start_bg hub .venv/bin/python -m demo_hub.app
 )
 wait_for "demo hub" "http://127.0.0.1:$HUB_PORT/hub/mcp/targets" 30

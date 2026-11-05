@@ -32,8 +32,9 @@ says "Reading links needs the local demo hub".
    schema.org Recipe: JSON-LD first, then microdata. The ingredient lines go to pantry's
    `POST /recipes/parse-lines` (no LLM), with `origin: "page"`, so every amount is
    `stated_by_source`. `source.method` is `jsonld` or `microdata`; `source.extractor` is
-   `extract_recipe.py <version>`. A page with no structured recipe is 422 `no_recipe_found`,
-   and in chat the model reads it with the fetch tool as before.
+   `extract_recipe.py <version>`. `source.image_url` is the link to the page's own preview
+   image (below). A page with no structured recipe is 422 `no_recipe_found`, and in chat the
+   model reads it with the fetch tool as before.
 2. **A YouTube video.**
    - The id comes from `watch?v=`, `youtu.be/`, `/shorts/`, `/live/` or `/embed/`
      (youtube.com, m., music., youtube-nocookie.com).
@@ -48,6 +49,8 @@ says "Reading links needs the local demo hub".
      could be the creator's written recipe (never social, shop, tip or shortener links) are
      offered as `linked_pages`; importing one of them is `method: youtube_linked_page`, with the
      channel kept on the source.
+   - A doc from a video has the video's thumbnail as its preview image:
+     `source.image_url` is `https://i.ytimg.com/vi/<id>/hqdefault.jpg`.
    - Without a key, or with no list in the description: `doc: null`, `needs: choose_method`.
      The shopper picks a linked page, pastes the list, or (if enabled) clicks Transcribe.
    - When the Data API refuses the key (not valid, quota spent, the API not enabled for it) or
@@ -96,8 +99,9 @@ says "Reading links needs the local demo hub".
   note and answers in one sentence that the shopper can choose how to read it.
 
 **Injection safety.** Only parsed ingredient lines (at most 60, at most 300 characters each) and
-the title reach the model. A page's prose, a description and a video's narration never do. The
-description is used in memory for its list and links and is not stored.
+the title reach the model. A page's prose, a description, a video's narration and the preview
+image link never do. The description is used in memory for its list and links and is not
+stored.
 
 ## What is sent to whom
 
@@ -108,6 +112,7 @@ description is used in memory for its list and links and is not stored.
 | YouTube Data API | The video id, with the key in `x-goog-api-key` | Only with a key |
 | Gemini (`generateContent`) | The public watch URL and the prompt, the key in `x-goog-api-key` | Only on the shopper's Transcribe click, with video import on |
 | pantry `/recipes/parse-lines` | The ingredient lines and the title or yield | Each import with lines |
+| The preview image's host (the page's image host, or `i.ytimg.com`) | One GET of the image, by the hub's guarded `/hub/images/remote` (hub user agent, no cookies), then served from its cache | When the console first shows the recipe's picture; never during the import |
 
 Not used: YouTube caption download (`captions.download` needs the video owner's permission),
 reading the watch page or its transcript (YouTube's terms forbid scraping), yt-dlp.
@@ -223,8 +228,20 @@ timestamp.
 
 ## Copyright
 
-Only ingredient lines and a link back (the source URL, site, title or channel) are stored. The
-method text, the page's prose, its images and a video's description are never stored or shown.
+Only ingredient lines and links back are stored: the source URL, site, title or channel, and the
+link to the page's own preview image (`source.image_url`). The method text, the page's prose and
+a video's description are never stored or shown.
+
+**The preview image.** The shopper asked to see the recipe's picture, so its page's own preview
+image is shown, credited to the site and linked back to the page, the way a link preview shows
+it. It is the image the page offers for that: its schema.org Recipe's `image` (a URL, a list,
+or an ImageObject's `url` or `contentUrl`, an `@id` followed within the page's JSON-LD; for
+microdata, the Recipe's own `itemprop="image"`), else the page's `og:image`, and a video's
+thumbnail. Only an absolute http(s) URL of at most 2,000 characters is kept
+(`recipe_import/web.py` `preview_image`); a relative one, `data:` and anything else is not. The
+doc holds the link only, never the image: the console shows it through the hub's guarded
+`GET /hub/images/remote` (public hosts only, raster images up to 3 MB, cached by the hub). No
+other image on the page is read.
 
 ## Settings
 

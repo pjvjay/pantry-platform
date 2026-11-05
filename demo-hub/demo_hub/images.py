@@ -5,6 +5,10 @@ calls a third party, and a second look costs nothing).
 - ``ingredient(name)``: the ingredient's head words ("Canned Tomatoes" -> "tomato", "Extra Virgin
   Olive Oil 500ml" -> "olive oil"), looked up as a Wikipedia title, then by Wikipedia search; the
   page's lead image as a 240 px thumbnail. A miss is cached too.
+- ``wiki(title)``: a recipe's picture, the lead image of the English Wikipedia article the title
+  names (a demo recipe's ``image_wiki``; a redirect is followed, nothing is searched) as a 320 px
+  thumbnail. A miss (no such article, or no lead image) is cached too; a Wikipedia that does not
+  answer is not, so a moment offline never hides a picture for good.
 - ``remote(url)``: an image from a recipe page. Guarded: http(s) only, every address the host
   resolves to must be public (no loopback, private, link-local or reserved ranges), redirects are
   re-checked, the reply must be a raster image (SVG can carry script), at most 3 MB.
@@ -28,6 +32,10 @@ import httpx
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 USER_AGENT = "pantry-demo-hub/0.1 (local demo; https://github.com/pjvjay/pantry-platform)"
 MAX_BYTES = 3 * 1024 * 1024
+INGREDIENT_PX, RECIPE_PX = 240, 320
+# What no Wikipedia title holds (a "|" would ask the API for two pages), and a title's limit.
+NOT_IN_TITLES = re.compile(r"[#<>\[\]|{}\x00-\x1f\x7f]")
+MAX_TITLE_BYTES = 255
 TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
          "image/avif": ".avif"}
 DESCRIPTORS = {
@@ -132,20 +140,51 @@ class ImageCache:
         return (path, ctype) if path else None
 
     async def _wiki_thumbnail(self, query: str) -> tuple[str | None, str | None]:
-        base = {"action": "query", "format": "json", "formatversion": "2", "prop": "pageimages",
-                "piprop": "thumbnail", "pithumbsize": "240", "redirects": "1"}
         for params in ({"titles": query[:1].upper() + query[1:]},
                        {"generator": "search", "gsrsearch": f"{query} food", "gsrlimit": "1"}):
             try:
-                r = await self._client().get(WIKI_API, params={**base, **params},
-                                             headers={"User-Agent": USER_AGENT})
-                pages = (r.json().get("query") or {}).get("pages") or []
+                source, title = await self._lead_image(params, INGREDIENT_PX)
             except (httpx.HTTPError, ValueError):
                 return None, None
-            for page in pages:
-                source = (page.get("thumbnail") or {}).get("source")
-                if source:
-                    return str(source), str(page.get("title") or "")
+            if source:
+                return source, title
+        return None, None
+
+    async def wiki(self, title: str) -> tuple[Path, str] | None:
+        title = " ".join(title.replace("_", " ").split())
+        if not title or len(title.encode()) > MAX_TITLE_BYTES or NOT_IN_TITLES.search(title):
+            raise ImageError("not a Wikipedia article title")
+        key = f"wiki:{title}"
+        known, path, ctype = self._hit(key)
+        if known:
+            return (path, ctype) if path else None
+        try:
+            thumb, found = await self._lead_image({"titles": title}, RECIPE_PX)
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ImageError("Wikipedia did not answer", 502) from exc
+        content, ctype = (await self._download(thumb)) if thumb else (None, "")
+        if thumb and content is None:
+            raise ImageError("the article's image could not be read", 502)
+        path = await self._remember(key, content, ctype or "image/jpeg", title=found,
+                                    source=thumb)
+        return (path, ctype) if path else None
+
+    async def _lead_image(self, params: dict[str, str],
+                          width: int) -> tuple[str | None, str | None]:
+        """(thumbnail URL, title) of the first page Wikipedia's API finds for ``params`` that has
+        a lead image, ``width`` px wide; (None, None) when none has. Raises httpx.HTTPError or
+        ValueError when Wikipedia cannot be asked or its answer read."""
+        r = await self._client().get(WIKI_API, params={
+            "action": "query", "format": "json", "formatversion": "2", "prop": "pageimages",
+            "piprop": "thumbnail", "pithumbsize": str(width), "redirects": "1", **params},
+            headers={"User-Agent": USER_AGENT})
+        r.raise_for_status()
+        body = r.json()
+        query = body.get("query") if isinstance(body, dict) else None
+        for page in (query or {}).get("pages") or []:
+            source = (page.get("thumbnail") or {}).get("source")
+            if source:
+                return str(source), str(page.get("title") or "")
         return None, None
 
     async def remote(self, url: str) -> tuple[Path, str] | None:

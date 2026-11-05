@@ -2,10 +2,11 @@
 Google account: previewed as a diff, applied only as previewed (docs/google-calendar.md).
 
 **Where the events come from.** pantry-api's ``POST /calendar/preview`` builds every event (the
-one builder, PLAN.md C7): all-day, with title, description and location. The hub turns each into
-a Google event body here and adds only what the sync needs: a deterministic id, private
-properties naming the plan and item, and a content hash. Nothing in an event is written by the
-hub itself, and no event ever has attendees.
+one builder, PLAN.md C7): all-day unless the shopper sent ``timing``, with title, description and
+location, and the reminders ``timing`` asked for. The hub turns each into a Google event body
+here and adds only what the sync needs: a deterministic id, private properties naming the plan
+and item, and a content hash. Nothing in an event is written by the hub itself, and no event
+ever has attendees.
 
 **Identity.** An event's id is ``pp1`` + the first 40 hex of sha256("<plan>/<item>/<gen>"), so
 the same item always maps to the same event and a crashed or repeated apply cannot duplicate it.
@@ -20,8 +21,11 @@ ledger finds the same events again.
 (changed in the plan, untouched in Google), conflict (edited in Google: Keep by default, or
 Overwrite), deleted_in_google (deleted there: restored only when asked), skip (in the past).
 An event of this plan that is no longer planned is a delete (a conflict when it was edited in
-Google). ``preview_token`` hashes the plan, its revision and every operation; apply recomputes
-the diff and refuses (409 preview_stale) unless it is exactly the one the shopper reviewed.
+Google). The hash covers the title, description, location, start and end (a timed event by the
+moment it is, not by how Google writes the offset), free or busy, and the reminders; so a new
+time or reminder is an update, worded "time" or "reminders". ``preview_token`` hashes the plan,
+its revision and every operation; apply recomputes the diff, from the same ``timing``, and
+refuses (409 preview_stale) unless it is exactly the one the shopper reviewed.
 
 **Apply** runs one at a time under a lock (409 sync_in_progress), creates the calendar on first
 use, writes each operation with If-Match where an event exists and ``sendUpdates=none``, and saves
@@ -34,12 +38,14 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import httpx
 
@@ -76,6 +82,9 @@ CALENDAR_DESCRIPTION = ("Made by the pantry demo hub from your approved meal pla
                         "changes only events it created here.")
 MAX_SCHEDULE_BYTES = 512 * 1024
 PROPERTY_VERSION = "1"
+MAX_REMINDER_MIN = 40320             # four weeks, Google's limit for a reminder
+MAX_REMINDERS = 5                    # Google's limit of overrides on an event
+CLOCK = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"          # HH:MM, 24-hour
 
 OpKind = Literal["create", "update", "delete", "conflict", "deleted_in_google", "noop", "skip"]
 Choice = Literal["keep", "overwrite", "restore"]
@@ -108,20 +117,80 @@ def event_id(key: str, item_id: str, gen: int) -> str:
     return "pp1" + hashlib.sha256(f"{key}/{item_id}/{gen}".encode()).hexdigest()[:40]
 
 
+@cache
+def _zones() -> frozenset[str]:
+    return frozenset(available_timezones())
+
+
+def valid_zone(name: object) -> bool:
+    """An IANA time zone name, spelled as the database does (America/Vancouver)."""
+    return isinstance(name, str) and name in _zones()
+
+
+def _timed(ev: dict[str, Any]) -> bool:
+    return ev.get("all_day", True) is False
+
+
+def _event_ok(e: Any) -> bool:
+    """One of pantry-api's events as the hub can write it: the keys every event has; for a timed
+    one (all_day false) its date, clock times and zone; and its reminders, if any, as minutes
+    Google accepts. An event with none of the newer fields is an all-day one with no reminders."""
+    if not isinstance(e, dict) or not {"item_id", "date", "end", "title"} <= e.keys():
+        return False
+    minutes = e.get("reminders_min") or []
+    if not isinstance(minutes, list) or len(minutes) > MAX_REMINDERS or not all(
+            type(m) is int and 0 <= m <= MAX_REMINDER_MIN for m in minutes):
+        return False
+    if not _timed(e):
+        return True
+    try:
+        dt.date.fromisoformat(e["date"])
+    except (TypeError, ValueError):
+        return False
+    return all(isinstance(e.get(k), str) and re.fullmatch(CLOCK, e[k])
+               for k in ("start_time", "end_time")) and valid_zone(e.get("timezone"))
+
+
+def _instant(value: dict[str, Any]) -> str:
+    """A dateTime as the moment it is, in UTC: the hub writes a wall-clock time and a zone name,
+    Google answers with an offset, and both must hash alike."""
+    raw = str(value.get("dateTime", ""))
+    try:
+        moment = dt.datetime.fromisoformat(raw)
+        if moment.tzinfo is None and value.get("timeZone"):
+            moment = moment.replace(tzinfo=ZoneInfo(str(value["timeZone"])))
+    except (ValueError, LookupError, OSError):
+        return raw
+    return moment.astimezone(dt.UTC).isoformat() if moment.tzinfo else raw
+
+
 def _when(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     if value.get("date"):
         return {"date": str(value["date"])}
-    return {"dateTime": str(value.get("dateTime", ""))}
+    return {"dateTime": _instant(value)}
+
+
+def _reminders(event: dict[str, Any]) -> list[tuple[str, int]]:
+    """The reminders an event sets itself, sorted. None when it uses the calendar's own."""
+    rem = event.get("reminders")
+    if not isinstance(rem, dict) or rem.get("useDefault"):
+        return []
+    return sorted({(str(o.get("method", "")), o["minutes"]) for o in rem.get("overrides") or []
+                   if isinstance(o, dict) and isinstance(o.get("minutes"), int)})
 
 
 def _content(event: dict[str, Any]) -> dict[str, Any]:
-    """The fields the plan decides, as Google reports them."""
-    return {"summary": event.get("summary", ""), "description": event.get("description", ""),
-            "location": event.get("location", ""), "start": _when(event.get("start")),
-            "end": _when(event.get("end")),
-            "transparency": event.get("transparency", "opaque")}
+    """The fields the plan decides, as Google reports them. Reminders count only when there are
+    some, so an event without any hashes as it did before the hub wrote them."""
+    out: dict[str, Any] = {
+        "summary": event.get("summary", ""), "description": event.get("description", ""),
+        "location": event.get("location", ""), "start": _when(event.get("start")),
+        "end": _when(event.get("end")), "transparency": event.get("transparency", "opaque")}
+    if reminders := _reminders(event):
+        out["reminders"] = reminders
+    return out
 
 
 def content_hash(event: dict[str, Any]) -> str:
@@ -141,20 +210,39 @@ def gen_of(event: dict[str, Any]) -> int:
         return 0
 
 
+def _span(ev: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """The Google start and end of one of pantry-api's events. All-day: the dates, the end
+    exclusive. Timed: the wall-clock times with the zone, which Google reads as the shopper set
+    them. ``end`` is the all-day end, so a timed event ends on its own date, or the next one
+    when it ends before it starts (past midnight)."""
+    if not _timed(ev):
+        return {"date": ev["date"]}, {"date": ev["end"]}
+    day = dt.date.fromisoformat(ev["date"])
+    last = day + dt.timedelta(days=1) if ev["end_time"] < ev["start_time"] else day
+    zone = ev["timezone"]
+    return ({"dateTime": f"{day.isoformat()}T{ev['start_time']}:00", "timeZone": zone},
+            {"dateTime": f"{last.isoformat()}T{ev['end_time']}:00", "timeZone": zone})
+
+
 def google_body(ev: dict[str, Any], key: str, rev: int, gen: int) -> dict[str, Any]:
     """A Google event for one of pantry-api's events, word for word. All-day (start and end
-    dates, the end exclusive, as the .ics), free time, no reminders (the .ics has none either),
-    no attendees."""
+    dates, the end exclusive, as the .ics) unless the event is timed, free time, no attendees.
+    Reminders are the event's own pop-ups (``reminders_min``, minutes before); an event with
+    none has none, not the calendar's defaults."""
+    start, end = _span(ev)
+    minutes = list(dict.fromkeys(ev.get("reminders_min") or []))
     body: dict[str, Any] = {
         "id": event_id(key, ev["item_id"], gen),
         "summary": ev["title"],
         "description": ev.get("description", ""),
-        "start": {"date": ev["date"]},
-        "end": {"date": ev["end"]},
+        "start": start,
+        "end": end,
         "transparency": "transparent",
         "status": "confirmed",
         "reminders": {"useDefault": False},
     }
+    if minutes:
+        body["reminders"]["overrides"] = [{"method": "popup", "minutes": m} for m in minutes]
     if ev.get("location"):
         body["location"] = ev["location"]
     body["extendedProperties"] = {"private": {
@@ -164,17 +252,38 @@ def google_body(ev: dict[str, Any], key: str, rev: int, gen: int) -> dict[str, A
     return body
 
 
-_FIELD_WORDS = (("summary", "title"), ("start", "date"), ("end", "date"),
+_FIELD_WORDS = (("summary", "title"), ("start", "when"), ("end", "when"),
                 ("description", "description"), ("location", "location"),
                 ("transparency", "busy or free"))
+
+
+def _clock(value: Any) -> tuple[str, str]:
+    """(date, time of day) as an event states its start or end: no time for an all-day one."""
+    value = value if isinstance(value, dict) else {}
+    stamp = str(value.get("dateTime", ""))
+    return str(value.get("date") or stamp[:10]), stamp[11:16]
+
+
+def _moved(desired: Any, remote: Any, end: bool) -> list[str]:
+    """What differs between two starts (or ends): the "date", the "time" of day, or both. An
+    all-day event's end is the day after, so it says nothing about the date next to a timed one."""
+    (d1, t1), (d2, t2) = _clock(desired), _clock(remote)
+    date = d1 != d2 and not (end and bool(t1) != bool(t2))
+    return [w for w, moved in (("date", date), ("time", t1 != t2)) if moved] or ["time"]
 
 
 def changed_fields(desired: dict[str, Any], remote: dict[str, Any]) -> list[str]:
     a, b = _content(desired), _content(remote)
     out: list[str] = []
     for key, word in _FIELD_WORDS:
-        if a[key] != b[key] and word not in out:
-            out.append(word)
+        if a[key] == b[key]:
+            continue
+        for w in (_moved(desired.get(key), remote.get(key), key == "end") if word == "when"
+                  else [word]):
+            if w not in out:
+                out.append(w)
+    if a.get("reminders") != b.get("reminders"):
+        out.append("reminders")
     return out
 
 
@@ -601,14 +710,19 @@ class CalendarSync:
 
     # the diff
 
-    async def _events(self, schedule: dict[str, Any], include: list[str]) -> list[dict[str, Any]]:
-        """pantry-api's events for the schedule: the one builder."""
+    async def _events(self, schedule: dict[str, Any], include: list[str],
+                      timing: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """pantry-api's events for the schedule: the one builder. ``timing`` (times and
+        reminders, as pantry-api reads it) is sent only when there is one, so without it the
+        request is the one an older pantry-api knows."""
+        request: dict[str, Any] = {"schedule": schedule, "include": include}
+        if timing is not None:
+            request["timing"] = timing
         try:
             async with httpx.AsyncClient(base_url=self.settings.pantry_api_url, timeout=60,
                                          transport=self.pantry_transport,
                                          trust_env=False) as http:
-                r = await http.post("/calendar/preview",
-                                    json={"schedule": schedule, "include": include})
+                r = await http.post("/calendar/preview", json=request)
         except httpx.HTTPError as exc:
             raise SyncRefused(502, "pantry_unavailable", "pantry-api could not be reached "
                               f"({type(exc).__name__}).") from exc
@@ -632,11 +746,12 @@ class CalendarSync:
             raise SyncRefused(502, "pantry_unavailable",
                               f"pantry-api answered {r.status_code}.")
         events = body.get("events") if isinstance(body, dict) else None
-        if not isinstance(events, list) or not all(
-                isinstance(e, dict) and {"item_id", "date", "end", "title"} <= e.keys()
-                for e in events):
+        if not isinstance(events, list) or not all(_event_ok(e) for e in events):
             raise SyncRefused(502, "pantry_refused", "pantry-api's preview was not a list of "
                               "calendar events.")
+        if timing is not None and _timing_ignored(timing, events):
+            raise SyncRefused(502, "pantry_too_old", "This pantry-api did not apply the times "
+                              "and reminders asked for (the timing of POST /calendar/preview).")
         return events
 
     def _ready(self) -> Connection:
@@ -647,9 +762,10 @@ class CalendarSync:
                              + TESTING_NOTE)
         return conn
 
-    async def _diff(self, schedule: dict[str, Any], include: list[str]) -> tuple[Diff, Ledger]:
+    async def _diff(self, schedule: dict[str, Any], include: list[str],
+                    timing: dict[str, Any] | None = None) -> tuple[Diff, Ledger]:
         conn = self._ready()
-        desired = await self._events(schedule, include)
+        desired = await self._events(schedule, include, timing)
         ledger = self.ledger()
         key = plan_key(schedule)
         rev = int(schedule.get("rev") or 0)
@@ -671,19 +787,21 @@ class CalendarSync:
         diff.token = diff_token(key, rev, calendar, ops)
         return diff, ledger
 
-    async def preview(self, schedule: dict[str, Any], include: list[str]) -> dict[str, Any]:
+    async def preview(self, schedule: dict[str, Any], include: list[str],
+                      timing: dict[str, Any] | None = None) -> dict[str, Any]:
         """The diff; nothing is written, in Google or in the ledger."""
-        diff, _ = await self._diff(schedule, include)
+        diff, _ = await self._diff(schedule, include, timing)
         return diff.public()
 
     # apply
 
     async def apply(self, schedule: dict[str, Any], include: list[str], preview_token: str,
-                    choices: dict[str, Choice]) -> dict[str, Any]:
+                    choices: dict[str, Choice],
+                    timing: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.lock.locked():
             raise SyncRefused(409, "sync_in_progress", "A sync is already running.")
         async with self.lock:
-            diff, ledger = await self._diff(schedule, include)
+            diff, ledger = await self._diff(schedule, include, timing)
             if diff.token != preview_token:
                 raise SyncRefused(409, "preview_stale", "The plan or the Pantry plan calendar "
                                   "changed since you reviewed it: review the changes again.")
@@ -914,6 +1032,24 @@ def _check_choices(ops: list[Op], choices: dict[str, Choice]) -> None:
     if missing:
         raise SyncRefused(422, "choice_needed", "Choose Keep or Overwrite for every event "
                           "edited in Google Calendar.", items=missing)
+
+
+_TIMED_KINDS = {"trips": ("trip",), "cooks": ("cook",), "reminders": ("freeze", "thaw")}
+
+
+def _timing_ignored(timing: dict[str, Any], events: list[dict[str, Any]]) -> bool:
+    """True when pantry-api answered a ``timing`` as if it had none: for some kind of event the
+    timing sets a time or reminders for, events came back, and none of them is timed or has a
+    reminder. An older pantry-api ignores the field and sends all-day events, which the hub
+    would otherwise write while the shopper thinks they have times and reminders."""
+    reminders = timing.get("reminders") or {}
+    for group, kinds in _TIMED_KINDS.items():
+        window = timing.get(group) if group != "reminders" else None
+        asked = bool(window or reminders.get(group))
+        mine = [e for e in events if e.get("kind") in kinds]
+        if asked and mine and not any(_timed(e) or e.get("reminders_min") for e in mine):
+            return True
+    return False
 
 
 def schedule_size_ok(schedule: dict[str, Any]) -> bool:

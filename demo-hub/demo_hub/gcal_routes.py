@@ -10,9 +10,14 @@ check and those, and answers with no-store and no-referrer.
                                          not_configured | origin_not_registered
 * ``GET  /hub/calendar/oauth/callback``  303 to the console (?calendar=connected|denied|error),
                                          or 400 with nothing stored
-* ``POST /hub/calendar/sync/preview``    {schedule, include?} -> the diff; no writes
-* ``POST /hub/calendar/sync/apply``      {schedule, include?, preview_token, choices} -> results
+* ``POST /hub/calendar/sync/preview``    {schedule, include?, timing?} -> the diff; no writes
+* ``POST /hub/calendar/sync/apply``      {schedule, include?, timing?, preview_token, choices}
+                                         -> results
 * ``POST /hub/calendar/disconnect``      {delete_calendar} -> {revoked, calendar_deleted, note}
+
+``timing`` is the optional times and reminders of pantry-api's ``POST /calendar/preview``, checked
+here and passed to it as it is; without it the events are all-day with no reminders. Preview and
+apply must send the same one: a different ``timing`` is a different diff (409 preview_stale).
 
 None of these routes go near the Assistant: the trace store never sees calendar data, and there
 is no calendar tool. Every write is the shopper's click on a diff they reviewed.
@@ -21,14 +26,21 @@ is no calendar tool. Every write is the shopper's click on a diff they reviewed.
 from __future__ import annotations
 
 import html
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from demo_hub.gcal_oauth import COOKIE, COOKIE_PATH, PENDING_TTL_S, OAuthError, nonce_matches
-from demo_hub.gcal_sync import CalendarSync, SyncRefused, schedule_size_ok
+from demo_hub.gcal_sync import (
+    CLOCK,
+    MAX_REMINDER_MIN,
+    CalendarSync,
+    SyncRefused,
+    schedule_size_ok,
+    valid_zone,
+)
 
 Include = Literal["trips", "cooks", "reminders"]
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
@@ -42,10 +54,54 @@ class ConnectBody(BaseModel):
     return_to: str = Field(default=DEFAULT_RETURN, pattern=r"^#/[A-Za-z0-9/_-]{0,60}$")
 
 
+Minutes = Annotated[int, Field(ge=0, le=MAX_REMINDER_MIN)]
+Before = Annotated[list[Minutes], Field(max_length=3)]
+Clock = Annotated[str, Field(pattern=CLOCK)]
+Slot = Literal["breakfast", "lunch", "dinner", "snack"]
+
+
+class Window(BaseModel):
+    """When a kind of event starts on its day, and how long it lasts."""
+    model_config = ConfigDict(extra="forbid")
+    start: Clock
+    minutes: Minutes
+
+
+class CookWindow(Window):
+    """A cook event starts at its meal's slot time in ``by_slot``, else at ``start``."""
+    by_slot: dict[Slot, Clock] | None = None
+
+
+class Alarms(BaseModel):
+    """Minutes before each kind of event: a pop-up reminder for every number."""
+    model_config = ConfigDict(extra="forbid")
+    trips: Before = Field(default_factory=list)
+    cooks: Before = Field(default_factory=list)
+    reminders: Before = Field(default_factory=list)
+
+
+class Timing(BaseModel):
+    """Times and reminders for the events (pantry-api's ``timing``). Unknown keys are refused,
+    not dropped: a reminder that is misspelled must not quietly go missing."""
+    model_config = ConfigDict(extra="forbid")
+    timezone: str
+    trips: Window | None = None
+    cooks: CookWindow | None = None
+    reminders: Alarms = Field(default_factory=Alarms)
+
+    @field_validator("timezone")
+    @classmethod
+    def _zone(cls, name: str) -> str:
+        if not valid_zone(name):
+            raise ValueError("not an IANA time zone name (for example America/Vancouver)")
+        return name
+
+
 class SyncBody(BaseModel):
     schedule: dict[str, Any]
     include: list[Include] = Field(default_factory=lambda: ["trips", "cooks", "reminders"],
                                    min_length=1, max_length=3)
+    timing: Timing | None = None
 
 
 class ApplyBody(SyncBody):
@@ -63,6 +119,16 @@ def _refusal(exc: OAuthError | SyncRefused) -> HTTPException:
         code = "needs_reconnect" if exc.code == "invalid_grant" else exc.code
         return HTTPException(exc.status, {"code": code, "message": exc.message})
     return HTTPException(exc.status, exc.body())
+
+
+def _timing(body: SyncBody) -> dict[str, Any] | None:
+    """What pantry-api is sent: the timing as given, with no ``by_slot`` where there was none."""
+    if not body.timing:
+        return None
+    out = body.timing.model_dump(mode="json")
+    if out["cooks"] and out["cooks"]["by_slot"] is None:
+        del out["cooks"]["by_slot"]
+    return out
 
 
 def _schedule(body: SyncBody) -> dict[str, Any]:
@@ -140,7 +206,7 @@ def router(sync: CalendarSync) -> APIRouter:
     async def calendar_preview(body: SyncBody) -> dict[str, Any]:
         """What a sync would do, operation by operation. Writes nothing anywhere."""
         try:
-            return await sync.preview(_schedule(body), list(body.include))
+            return await sync.preview(_schedule(body), list(body.include), _timing(body))
         except (OAuthError, SyncRefused) as exc:
             raise _refusal(exc) from exc
 
@@ -149,7 +215,7 @@ def router(sync: CalendarSync) -> APIRouter:
         """The reviewed diff, written: only when it is still exactly the one reviewed."""
         try:
             return await sync.apply(_schedule(body), list(body.include), body.preview_token,
-                                    dict(body.choices))
+                                    dict(body.choices), _timing(body))
         except (OAuthError, SyncRefused) as exc:
             raise _refusal(exc) from exc
 

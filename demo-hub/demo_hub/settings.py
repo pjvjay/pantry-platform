@@ -120,6 +120,14 @@ class Settings:
     google_token_url: str = "https://oauth2.googleapis.com/token"
     google_revoke_url: str = "https://oauth2.googleapis.com/revoke"
     google_calendar_url: str = "https://www.googleapis.com/calendar/v3"
+    # Address search for the wizard's "Where you shop" (GEOCODER_URL; README.md): OpenStreetMap's
+    # Nominatim, with its usage policy kept by geocode.py. "" turns it off.
+    geocoder_url: str = "https://nominatim.openstreetmap.org/search"
+    # Map tiles for the wizard's store map (TILES_URL, with {z}/{x}/{y}; README.md):
+    # OpenStreetMap's, with its tile usage policy kept by tiles.py and a disk cache in tile_dir
+    # (DEMO_TILE_DIR). "" turns them off.
+    tiles_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    tile_dir: str = ""
 
     @staticmethod
     def from_env() -> Settings:
@@ -199,6 +207,9 @@ class Settings:
             google_revoke_url=env.get("GOOGLE_REVOKE_URL", Settings.google_revoke_url),
             google_calendar_url=env.get("GOOGLE_CALENDAR_URL", Settings.google_calendar_url)
             .rstrip("/"),
+            geocoder_url=env.get("GEOCODER_URL", Settings.geocoder_url).strip(),
+            tiles_url=env.get("TILES_URL", Settings.tiles_url).strip(),
+            tile_dir=env.get("DEMO_TILE_DIR", "~/.pantry-demo/tiles"),
         )
 
 
