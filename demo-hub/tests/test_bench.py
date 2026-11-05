@@ -11,8 +11,9 @@ from typing import Any
 import pytest
 
 from demo_hub import bench
-from demo_hub.bench import CASES, Run, grade, money_in, summarise
+from demo_hub.bench import CASES, Run, check_known_tools, grade, money_in, summarise
 from demo_hub.llm import LLMError
+from demo_hub.settings import Settings
 
 PENNE = {"query": "penne", "match": "direct", "total": 2, "items": [
     {"name": "Penne Rigate 500g", "store": "GreenLeaf Grocers Kitsilano", "price": 1.97},
@@ -171,7 +172,7 @@ def test_main_runs_interleaved_resumes_and_reports(tmp_path: Path, monkeypatch: 
     order: list[tuple[str, str, int]] = []
 
     async def fake_run_case(agent: Any, model: str, case: Any, rep: int, tools: Any,
-                            disclosure: str = "all") -> Run:
+                            disclosure: str = "all", *rest: Any) -> Run:
         order.append((model, case.id, rep))
         assert tools == bench.CORE_TOOLS
         return Run.from_events(model, case.id, rep, events("I can only help with groceries."))
@@ -221,7 +222,7 @@ def test_main_gives_each_variant_its_own_settings(tmp_path: Path, monkeypatch: p
     seen: dict[str, Any] = {}
 
     async def fake_run_case(agent: Any, spec: str, case: Any, rep: int, tools: Any,
-                            disclosure: str = "all") -> Run:
+                            disclosure: str = "all", *rest: Any) -> Run:
         seen[spec] = agent.chat.settings.ollama_think
         return Run.from_events(spec, case.id, rep, events("I can only help with groceries."))
 
@@ -236,3 +237,81 @@ def test_main_gives_each_variant_its_own_settings(tmp_path: Path, monkeypatch: p
     assert seen == {"ollama:g": None, "ollama:g#think=false": False}
     meta = json.loads((tmp_path / "meta.json").read_text())
     assert meta["model_info"]["ollama:g#think=false"] == {"model": "ollama:g", "options": {"think": False}}
+
+
+def test_a_bench_run_is_kept_as_a_tagged_trace_with_its_online_evals(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from demo_hub.telemetry import TraceStore
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.settings = Settings()
+            self.conversations: dict[str, Any] = {}
+
+        def conversation(self, cid: Any, model: str, target: str, disclosure: str) -> Any:
+            return SimpleNamespace(id="c1", model=model, tools=None)
+
+        async def run(self, conv: Any, message: str) -> Any:
+            for e in events("I can only help with groceries."):
+                yield e
+
+    store = TraceStore(tmp_path)
+    case = next(c for c in bench.CASES if c.id == "out-of-scope")
+    run = asyncio.run(bench.run_case(FakeAgent(), "ollama:m#think=false", case, 2, None, "progressive",
+                                     "pantry", store, ["Pantry Mart Downtown"]))
+    trace = store.get(run.trace_id)
+    assert trace is not None and (trace["source"], trace["case"], trace["rep"]) == \
+        ("bench", "out-of-scope", 2)
+    assert trace["evals"]["checks"] and run.answer_confidence == trace["evals"]["answer_confidence"]
+    assert trace["model"] == "ollama:m#think=false"          # the full spec, variant included
+    assert bench.record(run, [])["trace_id"] == run.trace_id
+
+
+def test_discover_tools_counts_as_offered_when_the_toolset_is_progressive() -> None:
+    events = [{"type": "start", "tools": ["pantry-list-recipes"], "discoverable": True},
+              {"type": "tool_call", "id": "c1", "name": "discover_tools", "arguments": {}},
+              {"type": "tool_result", "id": "c1", "name": "discover_tools", "is_error": False,
+               "text": "offered"},
+              {"type": "done", "stop": "answered", "seconds": 1}]
+    run = Run.from_events("m", "case", 1, events)
+    assert check_known_tools(run).passed
+    run = Run.from_events("m", "case", 1, [{**events[0], "discoverable": False}, *events[1:]])
+    assert not check_known_tools(run).passed
+
+
+def test_excluding_the_united_states_by_its_alias_counts() -> None:
+    case = next(c for c in CASES if c.id == "tomato-penne-no-us")
+    for name in ("United States", "US", "U.S.A.", "usa"):
+        events = [{"type": "start", "tools": ["plan_recipe"]},
+                  {"type": "tool_call", "id": "c", "name": "plan_recipe",
+                   "arguments": {"slug": "tomato_penne", "exclude_origin": [name]}},
+                  {"type": "tool_result", "id": "c", "name": "plan_recipe", "is_error": False,
+                   "structured": {"summary": {}}}]
+        checks = {c.name: c.passed for c in case.grade(Run.from_events("m", case.id, 1, events))}
+        assert checks["excludes the United States"], name
+
+
+def test_a_shoppers_cart_change_grounds_the_answer_that_quotes_it() -> None:
+    from demo_hub.evals import evaluate
+    change = {"type": "cart_change", "ts": 3.0, "at": 1.8e12, "ref": 1, "line_no": 1,
+              "lines": [1], "recipe_name": "Spaghetti Bolognese", "ingredient": "ground beef",
+              "from": {"id": 11, "name": "Lean Ground Beef 500g"},
+              "to": {"id": 12, "name": "Extra Lean Ground Beef 450g"},
+              "total_before": 13.95, "total_after": 15.45,
+              "stores_after": ["GreenLeaf Grocers Kitsilano", "Pantry Mart Downtown"],
+              "undone": False, "note": "[cart] ...",
+              "structured": {"summary": {"trip": {"total_cost": 15.45}}, "full": None}}
+    answer = "Your trip is now $15.45 at GreenLeaf Grocers Kitsilano and Pantry Mart Downtown."
+    told = [{"type": "start", "tools": []}, change, {"type": "assistant", "text": answer},
+            {"type": "done", "stop": "answered", "seconds": 1.0}]
+    stores = ["GreenLeaf Grocers Kitsilano", "Pantry Mart Downtown"]
+    run = Run.from_events("m", "online", 0, told)
+    assert run.shopper_changes[0]["total_after"] == 15.45 and "ts" not in run.shopper_changes[0]
+    assert run.tool_uses == [] and check_known_tools(run).passed       # not a tool use
+    checks = {c["name"]: c["passed"] for c in evaluate(told, stores)["checks"]}
+    assert checks["grounded_money"] and checks["grounded_stores"] and checks["known_tools"]
+    untold = [e for e in told if e["type"] != "cart_change"]
+    checks = {c["name"]: c["passed"] for c in evaluate(untold, stores)["checks"]}
+    assert not checks["grounded_money"] and not checks["grounded_stores"]
+    assert bench.record(run, [])["shopper_changes"] == 1

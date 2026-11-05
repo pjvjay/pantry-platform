@@ -19,6 +19,7 @@ from demo_hub.observers import (
     Policy,
     View,
     gte,
+    normalize,
     tool_called,
     tool_result,
     user_says,
@@ -28,24 +29,46 @@ from demo_hub.observers import (
 COOKING = (r"\b(make|cook|plan|recipe|meals?|dinners?|lunch|breakfast|ingredients?"
            r"|shopping list)\b")
 _WORD = re.compile(r"[a-z]+")
+# Asking what the library holds is not asking to cook: "which recipes can you plan?" names no
+# dish, so no plan tools join (they cost reading time, and joining mid-turn breaks the cache).
+LISTING = re.compile(r"\b(which|what) (recipes|dishes|meals)\b|\blist (the |your |all )?recipes\b"
+                     r"|\bwhat can you (plan|make|cook)\b|\brecipes? (do|can) you\b", re.IGNORECASE)
+
+
+def wants_a_dish(view: View) -> CheckResult:
+    """The shopper's newest message is about making or planning food, and not just asking which
+    recipes there are."""
+    text = view.user_messages[-1] if view.user_messages else ""
+    if not text:
+        return None, "no message yet"
+    if LISTING.search(text):
+        return False, "asking what the library holds"
+    m = re.search(COOKING, text, re.IGNORECASE)
+    return (True, f"said {m.group(0)!r}") if m else (False, "nothing about cooking")
 
 
 def dish_not_in_library(view: View) -> CheckResult:
-    """After list_recipes: true when the shopper wants to cook and no library recipe is named
-    in their messages (every word of its name), so the dish must be written and planned as text."""
+    """Once list_recipes has answered (in this turn or an earlier one): true when the shopper's
+    newest message wants to cook and names no library recipe (every word of its name, or of its
+    slug: "the chicken curry" is Simple Chicken Curry, chicken_curry), so the dish must be
+    written and planned as text. Only the newest message counts: after "plan tomato penne", "a
+    similar recipe with fish" is a new dish, not the library's Tomato Penne."""
     listed = view.results.get("list_recipes")
     if listed is None:
         return None, "list_recipes has not answered yet"
-    asked = " ".join(view.user_messages)
-    if not re.search(COOKING, asked, re.IGNORECASE):
+    asked = view.user_messages[-1] if view.user_messages else ""
+    if not re.search(COOKING, asked, re.IGNORECASE) or LISTING.search(asked):
         return False, "the shopper is not asking to cook anything"
     words = set(_WORD.findall(asked.lower()))
     recipes: Any = listed.get("result", listed) if isinstance(listed, dict) else listed
     for recipe in recipes if isinstance(recipes, list) else []:
-        name = str(recipe.get("name", "")) if isinstance(recipe, dict) else ""
-        if (name_words := set(_WORD.findall(name.lower())) - {"and", "with", "the"}) \
-                and name_words <= words:
-            return False, f"the library has {name!r}"
+        if not isinstance(recipe, dict):
+            continue
+        name = str(recipe.get("name", ""))
+        for said in (str(recipe.get("name", "")), str(recipe.get("slug", ""))):
+            if (named := set(_WORD.findall(said.lower())) - {"and", "with", "the"}) \
+                    and named <= words:
+                return False, f"the library has {name!r}"
     return True, f"none of the {len(recipes)} library recipes is named in the request"
 
 
@@ -59,11 +82,39 @@ def library_miss(view: View) -> CheckResult:
     return (True, f"{missed[0]} returned no result") if missed else \
         (False, "the library lookups answered")
 
+
+_LINK = user_says(r"https?://\S+")
+
+
+def recipe_imported(view: View) -> CheckResult:
+    """The hub read the shopper's link (or took the recipe the shopper reviewed) into lines this
+    turn, before the model: it is planned with plan_from_lines by its doc_key."""
+    imported = view.hub.get("import") or {}
+    if imported.get("ok") and imported.get("lines"):
+        return True, f"{imported.get('doc_key')}: {imported['lines']} reviewed line(s)"
+    return False, "no recipe imported this turn"
+
+
+def link_to_read(view: View) -> CheckResult:
+    """The newest message has a web link the hub did not read itself: the model reads it with
+    fetch as before. A link the hub read, or a YouTube link (never fetched), is not one."""
+    value, evidence = normalize(_LINK(view))
+    if not value:
+        return value, evidence
+    imported = view.hub.get("import")
+    if imported is None or (not imported.get("ok") and imported.get("fallback")):
+        return True, evidence
+    return False, "the hub read the link itself"
+
+
 # --- code observers: a pattern or a tool result decides -------------------------------------------
 
 link_reader = Observer("link_reader", "Watches the shopper's messages for a recipe page to read.")
-link_reader.when("the shopper's message contains a web link", check=user_says(r"https?://\S+"),
-                 id="recipe_link") \
+link_reader.when("the hub read the shopper's recipe into lines this turn", check=recipe_imported,
+                 id="recipe_imported") \
+    .enable_tools("plan_from_lines")
+link_reader.when("the shopper's message contains a web link the hub did not read",
+                 check=link_to_read, id="recipe_link") \
     .enable_tools("fetch*", "plan_from_text") \
     .enable_skill("recipe-shopper")
 
@@ -81,13 +132,13 @@ recipe_reader.when(
 menu_clerk = Observer("menu_clerk", "Listens for a dish the shopper wants to cook or shop for.",
                       on=["turn", "tool_result"])
 menu_clerk.when("the shopper wants to make, cook or plan a dish or some meals",
-                check=user_says(COOKING), on="turn", id="dish_to_cook") \
+                check=wants_a_dish, on="turn", id="dish_to_cook") \
     .enable_tools("get_recipe", "plan_recipe")
 menu_clerk.when("the agent listed the recipe library", check=tool_called("list_recipes"),
                 on="tool_result", id="library_listed") \
     .enable_tools("get_recipe", "plan_recipe")
 menu_clerk.when("the shopper wants to cook something the recipe library does not have",
-                check=dish_not_in_library, on="tool_result", id="not_in_library") \
+                check=dish_not_in_library, on=["turn", "tool_result"], id="not_in_library") \
     .enable_tools("plan_from_text")
 menu_clerk.when("a library lookup found no recipe", check=library_miss, on="tool_result",
                 id="library_miss") \
@@ -118,6 +169,36 @@ week_planner.when(
                     r"|(two|three|four|five|six|seven)\s+(dinners|meals|days|nights)|budget)\b"),
     id="several_meals") \
     .enable_tools("plan_week")
+
+# Counted dishes over one or two weeks: "3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken
+# briyani + 7 mango milkshakes in 2 weeks". Two or more counted items joined by +, a comma or
+# "and"; or a period of weeks ("in 2 weeks", "a fortnight", "10 days"); or "meal plan for".
+# "plan 5 dinners under $60" is one count and no period: week_planner's, not this one's. When it
+# holds, the hub reads the dishes with pantry's Quick add parse before the model (meal_plans.py).
+_COUNT = (r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen"
+          r"|twenty)")
+_COUNTED = rf"{_COUNT}\s*[x×]?\s*[a-z][\w'’ -]{{1,40}}?"
+MEAL_REQUEST = re.compile(
+    rf"\b{_COUNTED}\s*(?:\+|,|&|\band\b)\s*{_COUNT}\s*[x×]?\s*[a-z]"
+    rf"|\b(?:in|for|over|across|within)\s+(?:the\s+)?(?:next\s+)?(?:{_COUNT}|a|a couple of)"
+    r"\s+weeks?\b"
+    r"|\bfortnight\b|\b(?:1[0-4]|[89])\s+days\b|\bmeal plan for\b",
+    re.IGNORECASE)
+
+
+def wants_meal_plan(view: View) -> CheckResult:
+    """The shopper's newest message names counted dishes, or a period of one or two weeks."""
+    text = view.user_messages[-1] if view.user_messages else ""
+    if not text:
+        return None, "no message yet"
+    m = MEAL_REQUEST.search(text)
+    return (True, f"said {m.group(0).strip()[:60]!r}") if m else (False, "no counted dishes")
+
+
+meal_planner = Observer("meal_planner", "Hears counted dishes for one or two weeks of meals.")
+meal_planner.when("the shopper names counted dishes, or one or two weeks of meals",
+                  check=wants_meal_plan, id="counted_dishes") \
+    .enable_tools("plan_meals", "list_recipes")
 
 shelf_clerk = Observer("shelf_clerk", "Reads find_product's results and nothing else.",
                        on="tool_result")
@@ -167,12 +248,17 @@ compliance_officer.when("the shopper asks for help with something that would vio
                         "Canadian law (buying alcohol or tobacco for a minor, reselling recalled "
                         "food, mislabelling a product's origin, dodging import rules)",
                         id="unlawful_request") \
-    .disable_tools("plan_recipe", "plan_from_text", "plan_week", "submit_origin_evidence") \
+    .disable_tools("plan_recipe", "plan_from_text", "plan_week", "plan_meals",
+                   "submit_origin_evidence") \
     .enable_goal("Decline the unlawful part plainly, without lecturing, and help with whatever "
                  "is lawful.")
 
 POLICY = Policy(
     initial=["list_recipes", "find_product"],
-    observers=[link_reader, recipe_reader, menu_clerk, origin_desk, week_planner, shelf_clerk,
-               ops_desk, origin_listener, label_desk, diet_watch, tone_watch, compliance_officer],
+    observers=[link_reader, recipe_reader, menu_clerk, origin_desk, week_planner, meal_planner,
+               shelf_clerk, ops_desk, origin_listener, label_desk, diet_watch, tone_watch,
+               compliance_officer],
+    # The cart's follow-ups to a plan: the hub calls them for the shopper's Options dialog and
+    # "Use this", on the plan's basis, which the model never holds.
+    hidden=["rank_alternatives", "reprice_plan"],
 )

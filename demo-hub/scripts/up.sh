@@ -136,6 +136,36 @@ else
 fi
 
 echo "== demo hub :$HUB_PORT"
+# Optional: a YouTube Data API key the user created (docs/recipe-import.md). With it the hub reads a
+# video's description for its ingredient list; without it a video gives its title and channel.
+if [ -s "$SECRETS_DIR/youtube_api_key" ]; then
+  echo "  ok    YouTube Data API key ($SECRETS_DIR/youtube_api_key)"
+else
+  echo "  info  no YouTube Data API key: YouTube links give their title and channel only"
+fi
+# Optional: Google Calendar sync (docs/google-calendar.md). The OAuth client JSON is one you made in
+# your own Cloud project; up.sh never makes Google credentials, never prints the file, and only
+# keeps it private. Connecting happens in the console (Meal plan, Add to calendar).
+GOOGLE_CLIENT=$SECRETS_DIR/google_oauth_client.json
+if [ -f "$GOOGLE_CLIENT" ]; then
+  chmod 600 "$GOOGLE_CLIENT"
+  if [ -f "$SECRETS_DIR/google_calendar_token.json" ]; then
+    echo "  ok    Google OAuth client: calendar sync is set up, with a saved connection"
+  else
+    echo "  ok    Google OAuth client: calendar sync is set up (connect it from the console)"
+  fi
+else
+  echo "  info  no Google OAuth client ($GOOGLE_CLIENT): calendar sync is off"
+fi
+# Map tiles for the Meal plan's store map (README.md, Map tiles): OpenStreetMap's, through the hub
+# and cached on disk as its tile usage policy asks. TILES_URL="" turns them off.
+OSM_TILES='https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+TILES_URL=${TILES_URL-$OSM_TILES}
+if [ -n "$TILES_URL" ]; then
+  echo "  ok    map tiles from ${TILES_URL%%/\{z\}*}, cached in $STATE_DIR/tiles"
+else
+  echo "  info  map tiles are off (TILES_URL is empty)"
+fi
 if [ -f "$STATE_DIR/pids/hub.pid" ] && kill -0 "$(cat "$STATE_DIR/pids/hub.pid")" 2>/dev/null; then
   kill "$(cat "$STATE_DIR/pids/hub.pid")" && sleep 1   # always restart: it is cheap and picks up new settings
 fi
@@ -147,7 +177,12 @@ fi
     DEMO_RESET_SCRIPT=$HUB_DIR/scripts/reset-demo-data.sh HUB_PORT=$HUB_PORT \
     PANTRY_API_URL=http://127.0.0.1:$PANTRY_PORT CONTEXTFORGE_URL=http://127.0.0.1:$CF_PORT \
     FETCH_URL=http://127.0.0.1:$FETCH_PORT MCPSIM_UI_URL=http://127.0.0.1:$RUNNER_PORT \
-    DEMO_AGENT_MODEL=$AGENT_MODEL DEMO_OBSERVER_MODEL=$OBSERVER_MODEL
+    DEMO_AGENT_MODEL=$AGENT_MODEL DEMO_OBSERVER_MODEL=$OBSERVER_MODEL \
+    DEMO_BURR_DIR=$PANTRY_API_DIR/.burr BURR_URL=http://127.0.0.1:$BURR_PORT \
+    YOUTUBE_API_KEY_FILE=$SECRETS_DIR/youtube_api_key DEMO_VIDEO_IMPORT=${DEMO_VIDEO_IMPORT:-0} \
+    GOOGLE_OAUTH_CLIENT_FILE=$GOOGLE_CLIENT \
+    GOOGLE_CALENDAR_TOKEN_FILE=$SECRETS_DIR/google_calendar_token.json \
+    DEMO_CALENDAR_DIR=$STATE_DIR/calendar TILES_URL="$TILES_URL" DEMO_TILE_DIR=$STATE_DIR/tiles
   start_bg hub .venv/bin/python -m demo_hub.app
 )
 wait_for "demo hub" "http://127.0.0.1:$HUB_PORT/hub/mcp/targets" 30

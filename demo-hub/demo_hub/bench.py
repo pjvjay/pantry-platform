@@ -33,10 +33,11 @@ from typing import Any
 
 import httpx
 
-from demo_hub.agent import Agent
+from demo_hub.agent import AGENT_TARGETS, Agent
 from demo_hub.llm import ChatClient, parse_model, split_variant
 from demo_hub.mcp_targets import Targets
 from demo_hub.settings import Settings
+from demo_hub.telemetry import TraceRecorder, TraceStore, add_gateway_spans
 
 # The read-only tools a shopper's questions need, plus near misses to choose between. The full
 # profile offers all 15, exactly as the Assistant does.
@@ -57,6 +58,12 @@ DECLINE_WORDS = ("no ", "not ", "n't", "unable", "cannot", "couldn", "isn't", "n
 
 
 # --- one run, as the grader sees it ---------------------------------------------------------------
+
+
+def canonical_tool(name: str) -> str:
+    """A tool's name as the cases write it, whichever server answered: ContextForge's
+    ``pantry-find-product`` is pantry's ``find_product``."""
+    return str(name).removeprefix("pantry-").replace("-", "_")
 
 
 @dataclass
@@ -80,6 +87,15 @@ class Run:
     stop: str = ""
     errors: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    trace_id: str = ""                       # the run's Assistant trace, when one was kept
+    answer_confidence: float | None = None   # its online evals' share of checks passed
+    # swaps the shopper made in the cart since the last turn (cart_change events): not tool
+    # uses (the model made none of them), but facts the model was told, so the answer may
+    # quote their figures
+    shopper_changes: list[dict[str, Any]] = field(default_factory=list)
+    # every plan tool call: {name, by_hub, asked} (asked: plan_meals' arguments as the model
+    # wrote them, before the hub filled in the dishes), for the meal-plan argument rates
+    plan_calls: list[dict[str, Any]] = field(default_factory=list)
 
     @staticmethod
     def from_events(model: str, case: str, rep: int, events: Iterable[dict[str, Any]]) -> Run:
@@ -88,25 +104,40 @@ class Run:
         for e in events:
             kind = e.get("type")
             if kind == "start":
-                run.tools_offered = list(e.get("tools") or [])
+                run.tools_offered = [canonical_tool(t) for t in e.get("tools") or []]
+                if e.get("discoverable"):          # progressive: discover_tools is offered too
+                    run.tools_offered.append("discover_tools")
+            elif kind in ("observation", "tools_offered"):
+                # progressive disclosure: an observer (or discover_tools) changed the toolset
+                added = [canonical_tool(t) for t in e.get("added") or []]
+                removed = {canonical_tool(t) for t in e.get("removed") or []}
+                run.tools_offered = [t for t in run.tools_offered if t not in removed] + [
+                    t for t in added if t not in run.tools_offered]
             elif kind == "llm_call":
                 run.llm_calls.append({k: v for k, v in e.items() if k != "type"})
             elif kind == "assistant":
                 run.answer = str(e.get("text") or "")  # the last text is the answer
             elif kind == "tool_call":
                 pending[str(e.get("id"))] = e
+                if canonical_tool(str(e.get("name"))).startswith("plan_"):
+                    run.plan_calls.append({"name": canonical_tool(str(e.get("name"))),
+                                           "by_hub": bool(e.get("by_hub")),
+                                           "asked": e.get("asked", e.get("arguments"))})
             elif kind == "tool_result":
                 call = pending.pop(str(e.get("id")), {})
                 result = e.get("structured") if e.get("structured") is not None else e.get("text")
                 run.tool_uses.append(
                     ToolUse(
-                        str(e.get("name") or call.get("name")),
+                        canonical_tool(str(e.get("name") or call.get("name"))),
                         dict(call.get("arguments") or {}),
                         bool(e.get("is_error")),
                         result,
                         float(e.get("ms") or 0),
                     )
                 )
+            elif kind == "cart_change":
+                run.shopper_changes.append(
+                    {k: v for k, v in e.items() if k not in ("type", "ts", "at")})
             elif kind == "error":
                 run.errors.append(str(e.get("message")))
             elif kind == "done":
@@ -117,9 +148,12 @@ class Run:
         return [u for u in self.tool_uses if u.name in names]
 
     def results_text(self) -> str:
+        """Everything this turn's answer may quote: its tool results, and the shopper's cart
+        changes with their re-priced plans."""
         return " ".join(
-            json.dumps(u.result) if not isinstance(u.result, str) else u.result
-            for u in self.tool_uses
+            [json.dumps(u.result) if not isinstance(u.result, str) else u.result
+             for u in self.tool_uses]
+            + [json.dumps(c) for c in self.shopper_changes]
         )
 
 
@@ -255,10 +289,15 @@ def stir_fry(run: Run) -> list[Check]:
     return checks
 
 
+US_NAMES = {"united states", "united states of america", "us", "usa", "america"}
+
+
 def tomato_penne_no_us(run: Run) -> list[Check]:
     def excludes_us(u: ToolUse) -> bool:
+        # pantry takes a country's name or a common alias ("US" excludes the same products)
         return any(
-            "united states" in str(c).lower() for c in u.arguments.get("exclude_origin") or []
+            str(c).strip().lower().replace(".", "") in US_NAMES
+            for c in u.arguments.get("exclude_origin") or []
         )
 
     calls = run.used("plan_recipe", "plan_from_text")
@@ -330,6 +369,72 @@ def out_of_scope(run: Run) -> list[Check]:
     ]
 
 
+MEAL_SENTENCE = ("3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken briyani + 7 mango "
+                 "milkshakes in 2 weeks")
+MEAL_COUNTS = {"Pepperoni Pizza": 3, "Chicken Fried Rice": 2, "Mango Milkshake": 7}
+
+
+def meal_plan_fortnight(run: Run) -> list[Check]:
+    """The user's sentence: a draft whose placed dishes are the three exact or plural ones
+    with their counts, and Chicken Biryani (written "briyani") proposed, never placed."""
+    plans = [u.result["summary"] for u in run.used("plan_meals")
+             if not u.is_error and isinstance(u.result, dict)
+             and isinstance(u.result.get("summary"), dict)]
+    checks = [Check("drafted the plan", bool(plans), "plan_meals, by the model or the hub")]
+    if plans:
+        s = plans[-1]
+        counts = {a.get("title"): a.get("count") for a in s.get("added") or []}
+        checks.append(Check("placed 3/2/7", counts == MEAL_COUNTS, json.dumps(counts)))
+        placed = {str(m.get("recipe_key")) for m in s.get("meals") or []}
+        proposed = {str(p.get("recipe_key")) for p in s.get("proposals") or []}
+        checks.append(Check("briyani proposed, not placed",
+                            any("biryani" in k for k in proposed)
+                            and not any("biryani" in k for k in placed),
+                            f"proposed {sorted(proposed)}"))
+    return checks
+
+
+def meal_arguments(run: Run) -> dict[str, Any] | None:
+    """How the model handled plan_meals' arguments on a meal-plan run: its own plan_meals
+    calls, their dishes (given: a list of {recipe, count}; empty: none, so the hub's parse
+    filled them, as the instructions ask; malformed: anything else), other plan tools called
+    instead (wrong tool), plan_meals calls the server refused, and whether the hub drafted the
+    plan because the model made no call. An argument error is a malformed dishes value, a
+    wrong tool or a refused call. None for a run with no meal plan."""
+    calls = [c for c in run.plan_calls if not c["by_hub"]]
+    meals = [c for c in calls if c["name"] == "plan_meals"]
+    hub = any(c["by_hub"] for c in run.plan_calls)
+    if not meals and not hub and not run.used("plan_meals"):
+        return None
+    dishes = []
+    for c in meals:
+        value = (c.get("asked") or {}).get("dishes")
+        if value in (None, []):
+            dishes.append("empty")
+        elif isinstance(value, list) and all(
+                isinstance(d, dict) and str(d.get("recipe") or "").strip()
+                and isinstance(d.get("count"), int) and 1 <= d["count"] <= 28 for d in value):
+            dishes.append("given")
+        else:
+            dishes.append("malformed")
+    wrong = sorted({c["name"] for c in calls if c["name"] != "plan_meals"})
+    refused = sum(u.is_error for u in run.used("plan_meals"))
+    return {"model_calls": len(meals), "dishes": dishes, "wrong_tool": wrong,
+            "refused": refused, "hub_drafted": hub,
+            "argument_error": "malformed" in dishes or bool(wrong) or refused > 0}
+
+
+def first_token_s(run: Run) -> float | None:
+    """Seconds before the first model call began writing: its wall time less its writing
+    time (loading, queueing and reading the prompt)."""
+    if not run.llm_calls:
+        return None
+    first = run.llm_calls[0]
+    wall = first.get("wall_s")
+    return None if wall is None else round(max(0.0, float(wall) - float(first.get("gen_s") or 0)),
+                                           1)
+
+
 @dataclass(frozen=True)
 class Case:
     id: str
@@ -359,6 +464,7 @@ CASES: tuple[Case, ...] = (
         out_of_scope,
         "negative",
     ),
+    Case("meal-plan-fortnight", MEAL_SENTENCE, meal_plan_fortnight),
 )
 
 
@@ -390,12 +496,40 @@ async def run_case(
     rep: int,
     tools: frozenset[str] | None,
     disclosure: str = "all",
+    target: str = "pantry",
+    store: TraceStore | None = None,
+    stores: Iterable[str] = (),
 ) -> Run:
-    conv = agent.conversation(None, parse_variant(spec)[0], "pantry", disclosure)
-    conv.tools = tools
-    events = [e async for e in agent.run(conv, case.message)]
+    """One case, once. With a ``store`` the run is also kept as an Assistant trace (the same
+    spans, online evals and, through ContextForge, gateway spans as a turn in the browser), tagged
+    with its case, so the Metrics page and the report read bench runs like any other turn."""
+    from demo_hub.evals import evaluate  # evals grades with this module's checks
+
+    conv = agent.conversation(None, parse_variant(spec)[0], target, disclosure)
+    # through ContextForge the same tools are named pantry-<tool-with-dashes>
+    conv.tools = tools if tools is None or target == "pantry" else frozenset(
+        "pantry-" + t.replace("_", "-") for t in tools)
+    # the trace names the full spec (e.g. "#think=false"): the agent's model has the variant
+    # applied through its settings, not in its name
+    recorder = TraceRecorder(conversation_id=conv.id, model=spec, target=target,
+                             message=case.message, disclosure=disclosure)
+    events = []
+    async for e in agent.run(conv, case.message):
+        events.append(e)
+        recorder.on(e)
     agent.conversations.pop(conv.id, None)
-    return Run.from_events(spec, case.id, rep, events)
+    run = Run.from_events(spec, case.id, rep, events)
+    if store is not None:
+        recorder.evals = evaluate(events, stores, spec)
+        trace = recorder.to_dict() | {"source": "bench", "case": case.id, "rep": rep}
+        store.save(trace)
+        settings = agent.settings
+        if target != "pantry" and await add_gateway_spans(trace, settings.contextforge_url,
+                                                          settings.contextforge_jwt):
+            store.save(trace)
+        run.trace_id = trace["id"]
+        run.answer_confidence = recorder.evals["answer_confidence"]
+    return run
 
 
 def record(run: Run, checks: list[Check]) -> dict[str, Any]:
@@ -409,12 +543,18 @@ def record(run: Run, checks: list[Check]) -> dict[str, Any]:
         "stop": run.stop,
         "errors": run.errors,
         "seconds": run.seconds,
+        "trace_id": run.trace_id,
+        "answer_confidence": run.answer_confidence,
         "tools_offered": len(run.tools_offered),
         "tool_uses": [
             {"name": u.name, "arguments": u.arguments, "is_error": u.is_error, "ms": u.ms}
             for u in run.tool_uses
         ],
         "llm_calls": run.llm_calls,
+        "shopper_changes": len(run.shopper_changes),
+        "meal_arguments": meal_arguments(run),
+        "plan_calls": run.plan_calls,
+        "first_token_s": first_token_s(run),
         "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
@@ -551,7 +691,22 @@ def summarise(records: list[dict[str, Any]], models: list[str]) -> dict[str, Any
             "output_tokens_median": _median([c.get("output_tokens", 0) for c in calls]),
             "thinking_chars": sum(c.get("thinking_chars", 0) for c in calls),
             "load_s_max": max((c.get("load_s", 0) for c in calls), default=None),
+            "first_token_s_median": _median([r["first_token_s"] for r in rows
+                                             if r.get("first_token_s") is not None]),
         }
+        meal = [r["meal_arguments"] for r in rows if r.get("meal_arguments")]
+        if meal:
+            out["models"][model]["meal_plans"] = {
+                "runs": len(meal),
+                "model_plan_meals_calls": sum(m["model_calls"] for m in meal),
+                "dishes_given": sum(m["dishes"].count("given") for m in meal),
+                "dishes_empty_filled_by_hub": sum(m["dishes"].count("empty") for m in meal),
+                "dishes_malformed": sum(m["dishes"].count("malformed") for m in meal),
+                "runs_with_wrong_tool": sum(bool(m["wrong_tool"]) for m in meal),
+                "runs_hub_drafted": sum(m["hub_drafted"] for m in meal),
+                "argument_error_rate": round(sum(m["argument_error"] for m in meal)
+                                             / len(meal), 2),
+            }
     for case in {r["case"] for r in records}:
         for model in models:
             rows = [r for r in records if r["case"] == case and r["model"] == model]
@@ -644,6 +799,25 @@ def report(summary: dict[str, Any], meta: dict[str, Any], records: list[dict[str
         row("thinking characters (all calls)", "thinking_chars"),
         row("longest model load", "load_s_max", " s"),
     ]
+    lines.append(row("seconds to the first token, first call (median)",
+                     "first_token_s_median", " s"))
+    meal_models = [m for m in models if summary["models"][m].get("meal_plans")]
+    if meal_models:
+        lines += ["\n## Meal-plan arguments (plan_meals)\n\n",
+                  "| | " + " | ".join(f"`{m}`" for m in meal_models) + " |\n|---|"
+                  + "---|" * len(meal_models) + "\n"]
+        for key, label in (("runs", "meal-plan runs"),
+                           ("model_plan_meals_calls", "plan_meals calls by the model"),
+                           ("dishes_given", "... with dishes it wrote"),
+                           ("dishes_empty_filled_by_hub",
+                            "... with no dishes (the hub's parse filled them, as asked)"),
+                           ("dishes_malformed", "... with malformed dishes"),
+                           ("runs_with_wrong_tool", "runs calling another plan tool"),
+                           ("runs_hub_drafted", "runs the hub drafted (no model call)"),
+                           ("argument_error_rate", "tool-argument error rate")):
+            lines.append(f"| {label} | " + " | ".join(
+                _fmt(summary["models"][m]["meal_plans"].get(key)) for m in meal_models)
+                + " |\n")
     for m in models:
         info = meta["model_info"].get(m, {})
         lines.append(
@@ -723,6 +897,14 @@ async def main(argv: list[str] | None = None) -> Path:
         help="all: every profile tool from the first call (as the first runs); "
         "progressive: the Assistant's observers enable them",
     )
+    parser.add_argument("--target", choices=AGENT_TARGETS, default="pantry",
+                        help="pantry: the MCP server directly; gateway-recipes: through ContextForge")
+    parser.add_argument("--no-traces", action="store_true",
+                        help="do not keep each run as an Assistant trace")
+    parser.add_argument("--warm", action="store_true",
+                        help="before each local run, have the model read the instructions and "
+                        "first tools (as the Assistant does while the shopper types); the time "
+                        "it takes is recorded apart from the run's")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--report-only", action="store_true")
     args = parser.parse_args(argv)
@@ -755,6 +937,8 @@ async def main(argv: list[str] | None = None) -> Path:
             "num_ctx": args.num_ctx,
             "models": args.model,
             "disclosure": args.disclosure,
+            "target": args.target,
+            "warm": args.warm,
             "model_info": {},
             "demo_mode": None,
         }
@@ -768,6 +952,15 @@ async def main(argv: list[str] | None = None) -> Path:
             except (httpx.HTTPError, ValueError):
                 meta["demo_mode"] = None
         targets = Targets(settings)
+        store = None if args.no_traces else TraceStore(settings.traces_dir
+                                                       or out / "traces")
+        stores: list[str] = []
+        async with httpx.AsyncClient(timeout=10) as client:
+            try:
+                stores = [s["name"] for s in
+                          (await client.get(f"{settings.pantry_api_url}/stores")).json()]
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                stores = []
         agents = {}
         for spec in args.model:
             variant = variant_settings(settings, parse_variant(spec)[1])
@@ -778,23 +971,30 @@ async def main(argv: list[str] | None = None) -> Path:
                 for model in args.model:
                     if (model, case.id, rep) in done:
                         continue
+                    warm = None
+                    if args.warm and model.startswith("ollama:"):
+                        warm = await agents[model].warm(parse_variant(model)[0], args.target,
+                                                        args.disclosure)
                     started = time.perf_counter()
-                    run = await run_case(agents[model], model, case, rep, tools, args.disclosure)
+                    run = await run_case(agents[model], model, case, rep, tools, args.disclosure,
+                                         args.target, store, stores)
                     checks = grade(run, case)
-                    rec = record(run, checks)
+                    rec = record(run, checks) | ({"warm": warm} if warm else {})
                     with runs_path.open("a", encoding="utf-8") as fh:
                         fh.write(json.dumps(rec) + "\n")
                     records.append(rec)
                     if model not in meta["model_info"]:
-                        meta["model_info"][model] = await ollama_model_info(
+                        meta["model_info"][model] = (await ollama_model_info(
                             settings, parse_variant(model)[0]
-                        ) | {"options": parse_variant(model)[1]}
+                        ) if model.startswith("ollama:") else {"model": model}) | {
+                            "options": parse_variant(model)[1]}
                     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
                     write_outputs(out, records, meta, reported(args.model, records))
                     print(
                         f"{datetime.now(UTC).astimezone():%H:%M:%S} rep {rep} {case.id:20s} {model:24s} "
                         f"{'PASS' if rec['passed'] else 'fail'} {time.perf_counter() - started:6.0f}s "
-                        f"tools={[u['name'] for u in rec['tool_uses']]}",
+                        f"tools={[u['name'] for u in rec['tool_uses']]}"
+                        + (f" warm={warm['wall_s']:.0f}s/{warm['prompt_tokens']}tok" if warm else ""),
                         flush=True,
                     )
     write_outputs(out, records, meta, reported(args.model, records))

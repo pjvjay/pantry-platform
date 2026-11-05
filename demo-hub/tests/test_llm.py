@@ -134,9 +134,10 @@ def test_ollama_uses_the_native_api_with_a_capped_context_and_no_key() -> None:
     assert str(request.url) == "http://ollama.test/api/chat"
     assert "authorization" not in request.headers
     body = json.loads(request.content)
-    # The model's own 8,192 caps the hub's 16,384; no tools, sampling or thinking unless asked.
+    # The model's own 8,192 caps the hub's 16,384; no tools, sampling or thinking unless asked;
+    # a reply is cut at DEMO_LOCAL_MAX_TOKENS.
     assert body == {"model": "command-r7b", "messages": [], "stream": True,
-                    "options": {"num_ctx": 8192}, "keep_alive": "30m"}
+                    "options": {"num_ctx": 8192, "num_predict": 600}, "keep_alive": "30m"}
     assert (turn.text, turn.tool_calls, turn.finish_reason) == ("hi", [], "stop")
     assert turn.metrics | {"wall_s": 0} == {
         "prompt_tokens": 2000, "output_tokens": 40, "prompt_s": 80.0, "gen_s": 10.0,
@@ -157,7 +158,8 @@ def test_ollama_history_tools_and_options_in_the_native_shape() -> None:
     turn = asyncio.run(chat.complete("ollama:granite4.2:8b", history, tools))
     body = json.loads(seen[1].content)
     assert body["model"] == "granite4.2:8b" and body["tools"] == tools and body["think"] is False
-    assert body["options"] == {"num_ctx": 16384, "temperature": 0.0}   # /api/show failed: no cap
+    # /api/show failed: no context cap; thinking off, so the reply is capped
+    assert body["options"] == {"num_ctx": 16384, "temperature": 0.0, "num_predict": 600}
     assert body["messages"] == [
         {"role": "system", "content": "sys"}, {"role": "user", "content": "penne?"},
         {"role": "assistant", "content": "", "tool_calls": [
@@ -395,3 +397,22 @@ def test_a_json_schema_asks_each_provider_for_a_json_reply() -> None:
                         Settings(ollama_url="http://ollama.test"))
     asyncio.run(chat.complete("ollama:g", [], [], json_schema=schema))
     assert json.loads(sent[-1].content)["format"] == schema
+
+
+def test_warming_reads_the_prompt_with_the_same_context_and_writes_one_token() -> None:
+    chat, seen = ollama(lambda r: httpx.Response(200, json={
+        "message": {"role": "assistant", "content": "x"}, "done": True, "prompt_eval_count": 1500,
+        "prompt_eval_duration": 75_000_000_000, "load_duration": 2_000_000_000}),
+        Settings(ollama_url="http://ollama.test"))
+    system = [{"role": "system", "content": "be brief"}]
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+    result = asyncio.run(chat.warm("ollama:command-r7b", system, tools))
+    body = json.loads(seen[1].content)
+    # the num_ctx the real calls use (another would reload the model), no stream, one token
+    assert body["options"] == {"num_ctx": 8192, "num_predict": 1} and body["stream"] is False
+    assert body["tools"] == tools and body["messages"] == system
+    assert result | {"wall_s": 0} == {"model": "ollama:command-r7b", "wall_s": 0,
+                                      "prompt_tokens": 1500, "prompt_s": 75.0, "load_s": 2.0}
+    # the next call's estimate knows the warmed prefix is cached
+    assert chat.timings is not None and chat.timings.last_prompt("command-r7b")
+    assert "skipped" in asyncio.run(chat.warm("gemini:g", system, tools))

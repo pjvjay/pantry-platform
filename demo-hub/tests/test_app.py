@@ -16,6 +16,7 @@ from demo_hub import mcp_targets, version
 from demo_hub.mcp_targets import McpTargetError
 from demo_hub.settings import Settings
 from demo_hub.sims import SimsError
+from tests.conftest import console_client
 
 SETTINGS = Settings(pantry_api_url="http://pantry.test", contextforge_url="http://cf.test",
                     fetch_url="http://fetch.test", mcpsim_ui_url="http://runner.test",
@@ -39,6 +40,9 @@ def upstream(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
             return httpx.Response(200, json={"echo": dict(request.url.params.multi_items()),
                                              "body": request.content.decode()},
                                   headers={"x-upstream": "yes"})
+        if host == "pantry.test" and path == "/stores":
+            return httpx.Response(200, json=[{"id": 1, "name": "Pantry Mart Downtown", "lat": 49.28,
+                                              "lon": -123.12, "address": ""}])
         if host == "pantry.test" and path == "/plan/nl":
             return httpx.Response(409, json={"detail": {"aborted": {"code": "budget_infeasible"}}})
         if host == "cf.test" and path == "/health":
@@ -62,7 +66,7 @@ def upstream(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
 
 
 def make_client(settings: Settings = SETTINGS) -> TestClient:
-    return TestClient(app_module.create_app(settings))
+    return console_client(app_module.create_app(settings))
 
 
 def test_status_reports_every_service(upstream: list[httpx.Request]) -> None:
@@ -73,9 +77,14 @@ def test_status_reports_every_service(upstream: list[httpx.Request]) -> None:
     assert services["fetch"]["ok"] is False and services["burr"]["ok"] is False
     assert services["ollama"]["models"] == ["command-r7b:latest"]
     assert services["mcp-sim"]["skill"] == "/skills/local"
-    assert body["keys"] == {"gemini": True, "pantry_token": True, "contextforge_jwt": True}
+    assert body["keys"] == {"gemini": True, "pantry_token": True, "contextforge_jwt": True,
+                            "youtube": False, "google_calendar_client": False,
+                            "google_calendar_connected": False}
     cf_lists = [r for r in upstream if r.url.path == "/servers"]
     assert cf_lists[0].headers["authorization"] == "Bearer jwt"
+    assert body["geocoder"] is True                  # address search is on unless GEOCODER_URL=""
+    off = Settings(**{**SETTINGS.__dict__, "geocoder_url": ""})
+    assert make_client(off).get("/hub/status").json()["geocoder"] is False
 
 
 def test_status_carries_the_release_block(upstream: list[httpx.Request],
@@ -182,21 +191,38 @@ def test_mcp_routes_run_the_operation_on_a_session(monkeypatch: pytest.MonkeyPat
 def test_agent_options_and_stream(monkeypatch: pytest.MonkeyPatch, upstream: Any, tmp_path: Path) -> None:
     skill = tmp_path / "SKILL.md"
     skill.write_text("body")
-    client = make_client(Settings(**{**SETTINGS.__dict__, "recipe_shopper_skill": str(skill)}))
+    client = make_client(Settings(**{**SETTINGS.__dict__, "recipe_shopper_skill": str(skill),
+                                     "traces_dir": str(tmp_path / "traces")}))
     options = client.get("/hub/agent/options").json()
     assert options["default_model"] == "gemini:gemini-3-flash-preview" and options["skill_loaded"] is True
     assert [t["id"] for t in options["targets"]] == ["gateway-recipes", "pantry", "gateway-sim"]
 
-    async def fake_run(conv: Any, message: str) -> Any:
+    async def fake_run(conv: Any, message: str, recipe_doc: Any = None) -> Any:
         yield {"type": "start", "conversation_id": conv.id}
         yield {"type": "assistant", "text": f"you said {message}"}
+        yield {"type": "done", "steps": 1, "stop": "answered", "seconds": 0.1,
+               "input_tokens": 3, "output_tokens": 2}
 
     agent = client.app.state.agent  # type: ignore[attr-defined]
     monkeypatch.setattr(agent, "run", fake_run)
     r = client.post("/hub/agent/chat", json={"message": "hi"})
     assert r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["server-timing"].startswith("hub;dur=")
     events = [json.loads(line[6:]) for line in r.text.split("\n\n") if line.startswith("data: ")]
-    assert events[1] == {"type": "assistant", "text": "you said hi"}
+    # every event is stamped for the browser: ms since the turn began, and epoch ms
+    assert all(isinstance(e["ts"], float) and e["at"] > 1.7e12 for e in events)
+    assert {k: v for k, v in events[1].items() if k not in ("ts", "at")} == \
+        {"type": "assistant", "text": "you said hi"}
+    trace_id = events[0]["trace_id"]
+    # the answer's evals arrive just before "done", and the turn is kept as a trace
+    assert [e["type"] for e in events[-2:]] == ["evals", "done"]
+    assert events[-2]["trace_id"] == trace_id and events[-2]["answer_confidence"] is not None
+    # graded with the turn's end in view: a finished turn passes "finished"
+    assert {c["name"]: c["passed"] for c in events[-2]["checks"]}["finished"] is True
+    listed = client.get("/hub/traces").json()
+    assert listed[0]["id"] == trace_id and listed[0]["status"] == "answered"
+    assert client.get(f"/hub/traces/{trace_id}").json()["evals"]["checks"]
+    assert client.get("/hub/traces/tr-missing").status_code == 404
     conv_id = events[0]["conversation_id"]
     assert client.delete(f"/hub/agent/conversations/{conv_id}").json() == {"forgotten": True}
     assert client.delete(f"/hub/agent/conversations/{conv_id}").json() == {"forgotten": False}
@@ -264,3 +290,25 @@ def test_root_redirects_and_the_spa_is_served(upstream: Any, tmp_path: Path) -> 
     assert "immutable" in client.get("/pantry/assets/index-abc123.js").headers["cache-control"]
     # The API proxy is matched before the SPA mount.
     assert client.get("/pantry/api/health").json() == {"status": "ok"}
+
+
+def test_a_run_comes_back_from_every_source_and_warming_is_shared(
+        monkeypatch: pytest.MonkeyPatch, upstream: Any, tmp_path: Path) -> None:
+    client = make_client(Settings(**{**SETTINGS.__dict__, "traces_dir": str(tmp_path / "traces")}))
+    client.app.state.traces.save({  # type: ignore[attr-defined]
+        "id": "tr-run", "started_at": "2026-10-05T08:00:00+00:00", "spans": []})
+    run = client.get("/hub/runs/tr-run").json()
+    assert run["trace"]["id"] == "tr-run" and run["burr"] == [] and run["gateway"] == []
+    assert set(run["links"]) == {"burr_ui", "contextforge"}
+    assert client.get("/hub/runs/tr-missing").status_code == 404
+
+    calls: list[tuple[str, str, Any]] = []
+
+    async def fake_warm(model: str, target: str, disclosure: Any = None) -> dict[str, Any]:
+        calls.append((model, target, disclosure))
+        return {"model": model, "prompt_tokens": 1500}
+
+    monkeypatch.setattr(client.app.state.agent, "warm", fake_warm)  # type: ignore[attr-defined]
+    r = client.post("/hub/agent/warm", json={"model": "ollama:granite4.2:8b"})
+    assert r.json() == {"model": "ollama:granite4.2:8b", "prompt_tokens": 1500}
+    assert calls == [("ollama:granite4.2:8b", "gateway-recipes", None)]
