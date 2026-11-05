@@ -1,0 +1,245 @@
+"""A meal plan's card, Markdown and model lines (answers.py), what the model and the browser get
+of a plan_meals result (agent.py), and the two meal-plan evals: no_invented_shelf_life and
+grounded_nutrition (evals.py)."""
+
+from __future__ import annotations
+
+import copy
+from typing import Any
+
+from demo_hub.agent import FOR_BROWSER, SERVER_ONLY, for_browser, model_copy
+from demo_hub.answers import (
+    is_mealplan,
+    mealplan_for_model,
+    mealplan_table,
+    plan_cards,
+    plan_for_model,
+    plan_tables,
+)
+from demo_hub.bench import Run
+from demo_hub.evals import (
+    check_grounded_nutrition,
+    check_no_invented_shelf_life,
+    evaluate,
+    reply_of,
+)
+from tests.test_pre_meal_selection import PARSED_DISHES, PARSED_PROPOSALS, drafted
+
+
+def result(**summary: Any) -> dict[str, Any]:
+    out = drafted({"dishes": PARSED_DISHES, "proposed": PARSED_PROPOSALS, "days": 14,
+                   "start_date": "2026-10-09", "current": {"rev": 7}})
+    out["summary"].update(summary)
+    return out
+
+
+def test_a_plan_meals_result_is_a_mealplan_card_with_its_ops() -> None:
+    r = result()
+    assert is_mealplan(r)
+    [card] = plan_cards([{"result": []}, r], drop=FOR_BROWSER | SERVER_ONLY, start=3)
+    assert card["kind"] == "mealplan" and card["base_rev"] == 7
+    assert card["links"] == [{"label": "Open in Meal plan", "href": "#/mealplan?from=assistant"}]
+    assert len(card["summary"]["ops"]) == 12 and "label" not in card
+    drafted_card = plan_cards([result(drafted_from_message=True)], drop=FOR_BROWSER)[0]
+    assert drafted_card["label"] == "drafted from your message"
+
+
+def test_the_model_never_reads_the_ops_or_the_draft_and_the_browser_does() -> None:
+    r = result()
+    seen = model_copy(r)
+    assert "draft" not in seen and "ops" not in seen["summary"]
+    assert seen["summary"]["proposals"] == r["summary"]["proposals"]
+    shown = for_browser({"structured": r, "text": ""})
+    assert shown["structured"]["draft"] == r["draft"]
+    assert shown["structured"]["summary"]["ops"] == r["summary"]["ops"]
+    assert r["summary"]["ops"] and r["draft"]                          # the original untouched
+
+
+def test_a_local_model_reads_at_most_twelve_short_lines() -> None:
+    many = result(trips=[{"date": f"2026-10-{9 + i:02d}", "stores": ["A"], "items": 3,
+                          "total_cost": 10.0 + i, "total_is_floor": i == 2, "reason": "x"}
+                         for i in range(9)],
+                  warnings=[f"warning {i} " + "w" * 300 for i in range(8)],
+                  unplaced=[{"title": "Mango Milkshake", "count": 1, "reason": "no slot"}])
+    for r in (result(), many):
+        text = plan_for_model(r)
+        assert text == mealplan_for_model(r["summary"])
+        assert len(text.splitlines()) <= 12 and len(text) < 1500
+    lines = plan_for_model(result()).splitlines()
+    assert lines[0] == ("meal plan draft (not applied yet): 12 new meal(s) over 14 days from "
+                        "Fri 9 Oct, each serving 2")
+    assert lines[1] == "placed: 3 Pepperoni Pizza, 2 Chicken Fried Rice, 7 Mango Milkshake"
+    assert lines[2] == ("needs the shopper's OK, not placed: 3 Chicken Biryani (you wrote "
+                        "\"chicken briyani\")")
+    assert "(demo amounts)" in plan_for_model(result())
+    assert "and 5 more" in plan_for_model(many)
+
+
+def test_the_meal_plan_markdown() -> None:
+    [table] = plan_tables([result()])
+    assert table == mealplan_table(result()["summary"])
+    assert table.startswith("### Meal plan draft: 14 days from Fri 9 Oct\n\n| Day | Meals |")
+    assert "| Fri 9 Oct | Pepperoni Pizza, Chicken Fried Rice, Mango Milkshake |" in table
+    assert "**Trips (fresh, suggested):** Fri 9 Oct $63.76 at Pantry Mart Downtown" in table
+    assert "**Total:** $63.76 (demo prices)" in table
+    assert "**Needs your OK:** 3 Chicken Biryani (you wrote \"chicken briyani\")" in table
+    assert "**Nutrition:** nutrition per person (demo amounts)" in table
+
+
+# --- evals ----------------------------------------------------------------------------------------------
+
+def run_with(answer: str, structured: Any, reply: str | None = None) -> tuple[Run, list[dict]]:
+    events = [{"type": "start", "tools": ["plan_meals"]},
+              {"type": "tool_call", "id": "c1", "name": "plan_meals", "arguments": {}},
+              {"type": "tool_result", "id": "c1", "name": "plan_meals", "is_error": False,
+               "structured": structured, "ms": 1},
+              {"type": "assistant", "text": answer,
+               **({"reply": reply} if reply is not None else {})},
+              {"type": "done", "stop": "answered", "seconds": 1}]
+    return Run.from_events("m", "online", 0, events), events
+
+
+def test_grounded_nutrition_fails_kcal_for_demo_amounts_without_demo() -> None:
+    r = result()
+    run, events = run_with("Over the two weeks the meals add up to at least 5,456 kcal per "
+                           "person.", r)
+    check = check_grounded_nutrition(run, reply_of(events))
+    assert check is not None and not check.passed and "demo" in check.detail
+    run, events = run_with("They add up to at least 5,456 kcal per person (demo amounts).", r)
+    check = check_grounded_nutrition(run, reply_of(events))
+    assert check is not None and check.passed, check
+    # an invented figure fails, labelled or not
+    run, events = run_with("About 2,100 kcal a day (demo amounts).", r)
+    check = check_grounded_nutrition(run, reply_of(events))
+    assert check is not None and not check.passed and "2,100 kcal" in check.detail
+    # the hub's own table says "demo amounts": the model's reply must say it itself
+    run, events = run_with("The plan has 5,456 kcal.\n\n**Nutrition:** (demo amounts) 5,456 kcal",
+                           r, reply="The plan has 5,456 kcal.")
+    check = check_grounded_nutrition(run, reply_of(events))
+    assert check is not None and not check.passed
+    # no figure quoted: nothing to check
+    run, events = run_with("Twelve meals are placed.", r)
+    assert check_grounded_nutrition(run, reply_of(events)) is None
+
+
+def test_grounded_nutrition_needs_no_badge_for_amounts_from_a_source() -> None:
+    r = result(nutrition="nutrition per person: 4 of 14 days complete; 1,840 kcal and 96 g "
+                         "protein on average over the complete days")
+    run, events = run_with("You average 1,840 kcal and 96 g protein a day.", r)
+    check = check_grounded_nutrition(run, reply_of(events))
+    assert check is not None and check.passed, check
+
+
+def test_no_invented_shelf_life() -> None:
+    r = result()      # its trip reason cites "keeps 1 to 2 days in the fridge"
+    cases = [
+        ("Chicken keeps 1 to 2 days in the fridge, so the trip is Friday.", True),
+        ("Chicken keeps 1-2 days in the fridge.", True),
+        ("Chicken keeps 5 days in the fridge, so one trip covers it.", False),
+        ("The milk lasts 2 weeks.", False),
+        ("I placed 12 meals over 14 days; 3 Chicken Biryani need your OK.", True),
+    ]
+    for answer, ok in cases:
+        run, events = run_with(answer, r)
+        check = check_no_invented_shelf_life(run, reply_of(events))
+        assert check is not None and check.passed is ok, (answer, check)
+    # a turn with no meal plan and no storage claim: not applicable
+    run = Run.from_events("m", "online", 0, [{"type": "assistant", "text": "Penne is $1.97."}])
+    assert check_no_invented_shelf_life(run, "Penne is $1.97.") is None
+
+
+def test_evaluate_runs_both_checks_on_a_meal_plan_turn() -> None:
+    _, events = run_with("Twelve meals at least 5,456 kcal (demo amounts); chicken keeps 1 to 2 "
+                         "days in the fridge.", copy.deepcopy(result()))
+    checks = {c["name"]: c for c in evaluate(events)["checks"]}
+    assert checks["grounded_nutrition"]["passed"] and checks["no_invented_shelf_life"]["passed"]
+
+
+# --- the bench's meal-plan case -------------------------------------------------------------------------
+
+def bench_run(*calls: dict[str, Any]) -> Run:
+    """A meal-plan run: each call {name, asked?, by_hub?, error?}, plan_meals answering with
+    the draft of the user's sentence."""
+    from demo_hub.bench import Run as BenchRun
+
+    events: list[dict[str, Any]] = [{"type": "start", "tools": ["plan_meals", "plan_week"]},
+                                    {"type": "llm_call", "step": 1, "wall_s": 50.0,
+                                     "gen_s": 12.0}]
+    for i, c in enumerate(calls):
+        events.append({"type": "tool_call", "id": f"c{i}", "name": c["name"], "arguments": {},
+                       **({"asked": c["asked"]} if "asked" in c else {}),
+                       **({"by_hub": True} if c.get("by_hub") else {})})
+        events.append({"type": "tool_result", "id": f"c{i}", "name": c["name"],
+                       "is_error": bool(c.get("error")),
+                       "structured": None if c.get("error") or c["name"] != "plan_meals"
+                       else result(added=[
+                           {"title": t, "count": n, "recipe_key": k} for t, n, k in (
+                               ("Pepperoni Pizza", 3, "starter:pepperoni_pizza"),
+                               ("Chicken Fried Rice", 2, "starter:chicken_fried_rice"),
+                               ("Mango Milkshake", 7, "starter:mango_milkshake"))]),
+                       "ms": 1})
+    events += [{"type": "assistant", "text": "Planned."},
+               {"type": "done", "stop": "answered", "seconds": 60}]
+    return BenchRun.from_events("ollama:granite4.2:8b", "meal-plan-fortnight", 1, events)
+
+
+def test_the_bench_grades_the_sentence_and_counts_argument_errors() -> None:
+    from demo_hub.bench import CASES, first_token_s, meal_arguments, meal_plan_fortnight
+
+    case = next(c for c in CASES if c.id == "meal-plan-fortnight")
+    assert case.message == ("3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken briyani + "
+                            "7 mango milkshakes in 2 weeks")
+    empty = bench_run({"name": "plan_meals", "asked": {}})
+    assert all(c.passed for c in meal_plan_fortnight(empty)), meal_plan_fortnight(empty)
+    assert meal_arguments(empty) == {"model_calls": 1, "dishes": ["empty"], "wrong_tool": [],
+                                     "refused": 0, "hub_drafted": False,
+                                     "argument_error": False}
+    assert first_token_s(empty) == 38.0
+    given = meal_arguments(bench_run({"name": "plan_meals", "asked": {
+        "dishes": [{"recipe": "Pepperoni Pizza", "count": 3}]}}))
+    assert given is not None and given["dishes"] == ["given"] and not given["argument_error"]
+    for bad in ({"dishes": "3 pizza"}, {"dishes": [{"recipe": "", "count": 3}]},
+                {"dishes": [{"recipe": "Pizza", "count": "3"}]}):
+        out = meal_arguments(bench_run({"name": "plan_meals", "asked": bad}))
+        assert out is not None and out["dishes"] == ["malformed"] and out["argument_error"]
+    wrong = meal_arguments(bench_run({"name": "plan_week", "asked": {"days": 14}},
+                                     {"name": "plan_meals", "by_hub": True}))
+    assert wrong is not None and wrong["wrong_tool"] == ["plan_week"] and wrong["hub_drafted"]
+    assert wrong["model_calls"] == 0 and wrong["argument_error"]
+    hub = meal_arguments(bench_run({"name": "plan_meals", "by_hub": True}))
+    assert hub is not None and hub["hub_drafted"] and not hub["argument_error"]
+    refused = meal_arguments(bench_run({"name": "plan_meals", "asked": {}, "error": True}))
+    assert refused is not None and refused["refused"] == 1 and refused["argument_error"]
+    assert meal_arguments(bench_run()) is None
+
+
+def test_a_hidden_arguments_types_leave_the_schema_with_it() -> None:
+    from demo_hub.agent import Agent, used_defs
+    from demo_hub.settings import Settings
+    from tests.test_agent import FakeTargets
+
+    ref = {"$ref": "#/$defs/RecipeDoc"}
+    tool = {"name": "plan_meals", "description": "Plan meals.", "inputSchema": {
+        "type": "object",
+        "properties": {
+            "dishes": {"type": "array", "items": {"$ref": "#/$defs/DishIn"}},
+            "days": {"type": "integer"},
+            "current": {"$ref": "#/$defs/MealPlanContext"},
+            "my_recipe_docs": {"type": "array", "items": ref},
+            "proposed": {"type": "array", "items": {"$ref": "#/$defs/ProposedDish"}},
+            "lat": {"type": "number"}},
+        "$defs": {"DishIn": {"type": "object", "properties": {"slot": {"$ref": "#/$defs/Slot"}}},
+                  "Slot": {"enum": ["dinner", "snack"]},
+                  "MealPlanContext": {"type": "object", "properties": {
+                      "meals": {"type": "array", "items": {"$ref": "#/$defs/Meal"}}}},
+                  "Meal": {"type": "object"}, "RecipeDoc": {"type": "object"},
+                  "ProposedDish": {"type": "object"}}}}
+    shown = Agent(Settings(observer_model=""), FakeTargets(), None)._plan_tools(
+        [tool], "ollama:granite4.2:8b")[0]["inputSchema"]
+    assert set(shown["properties"]) == {"dishes", "days"}
+    assert set(shown["$defs"]) == {"DishIn", "Slot"}          # reached through dishes only
+    plain = {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}},
+             "$defs": {"A": {"type": "object"}}}
+    assert used_defs(plain) is plain
+    assert "$defs" not in used_defs({"type": "object", "properties": {},
+                                     "$defs": {"A": {"type": "object"}}})

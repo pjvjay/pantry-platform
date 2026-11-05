@@ -88,5 +88,6 @@ still use `npm run dev`.
   your own user account, as it always has.
 - **Reads by a program.** A local program can read traces and status. Nothing secret is in
   them: keys and tokens never leave the hub process.
-- **The calendar sync (later).** Its OAuth routes add the OAuth `state` and cookie checks on
-  top of this guard.
+- **The calendar sync.** Its routes (`/hub/calendar/*`) are guarded like every other; the
+  sign-in adds a PKCE verifier and a `state` bound to an HttpOnly cookie on top, and the access
+  log masks OAuth values ([google-calendar.md](google-calendar.md)).

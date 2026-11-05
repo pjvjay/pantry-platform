@@ -474,6 +474,10 @@ class TraceStore:
         """A browser measurement: a page load, an API call batch, or one chat turn's stream (that
         one also joins its trace as the ``browser`` span)."""
         record = {**record, "received_at": datetime.now(UTC).isoformat()}
+        if isinstance(record.get("entries"), list):     # a path, never its query (an address)
+            record["entries"] = [{**e, "path": str(e["path"]).split("?", 1)[0]}
+                                 if isinstance(e, dict) and "path" in e else e
+                                 for e in record["entries"]]
         self.frontend.append(record)
         self._append("browser", record)
         trace = self.get(str(record.get("trace_id"))) if record.get("kind") == "chat" else None

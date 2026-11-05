@@ -134,7 +134,12 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for f in products.json recipes.json; do
+          for f in products.json recipes.json nutrients.json; do
+            # nutrients.json arrives with the nutrition work: absent from both is fine, from one is not
+            if [ ! -e pantry-api/seeds/$f ] && [ ! -e pantry-db/seeds/$f ]; then
+              echo "skip  seeds/$f is in neither repo at these commits"
+              continue
+            fi
             if cmp pantry-api/seeds/$f pantry-db/seeds/$f; then
               echo "ok    seeds/$f is the same in pantry-api and pantry-db"
             else
