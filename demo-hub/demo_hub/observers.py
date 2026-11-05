@@ -59,6 +59,9 @@ class View:
     tool_calls: list[str] = field(default_factory=list)      # canonical tool names, in order
     results: dict[str, Any] = field(default_factory=dict)    # canonical name -> last structured
     transcript: list[str] = field(default_factory=list)      # "[n] shopper: ..." lines for LLMs
+    # What the hub settled in code this turn, before the model's first call: {"import": {ok,
+    # lines, needs, fallback, ...}} once it read the shopper's link (recipe_import).
+    hub: dict[str, Any] = field(default_factory=dict)
 
     @property
     def last_message(self) -> str:
@@ -196,6 +199,9 @@ class Policy:
     initial: list[str]
     observers: list[Observer]
     discover_tool: bool = True
+    # Tools the model is never offered, in any mode, nor finds with discover_tools (globs on
+    # canonical names): the hub calls them itself, for the browser.
+    hidden: list[str] = field(default_factory=list)
 
     def conditions(self, trigger: str | None = None) -> list[Condition]:
         return [c for o in self.observers for c in o.conditions

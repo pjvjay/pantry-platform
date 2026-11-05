@@ -113,16 +113,21 @@ def test_a_tool_call_then_an_answer(session: FakeSession) -> None:
     assert events[3]["phase"] == "writing" and events[3]["tokens"] == 3
     assert events[4] == {"type": "llm_call", "step": 1, "model": "gemini:m", "tool_calls": 1,
                          "prompt_tokens": 10, "output_tokens": 2, "wall_s": 0.5}
-    assert events[5]["arguments"] == {"query": "penne"}
+    assert events[5]["arguments"] == {"query": "penne", "lat": 49.2827, "lon": -123.1207}
+    assert events[5]["filled_by_hub"] == ["lat", "lon"]
     assert events[6]["structured"]["items"][0]["price"] == 1.97
     assert events[-1] | {"seconds": 0} == {"type": "done", "steps": 2, "stop": "answered",
                                          "seconds": 0, "input_tokens": 20, "output_tokens": 4}
-    assert session.calls == [("pantry-find-product", {"query": "penne"})]
+    # the hub sends the shopper's location with every location-taking tool
+    assert session.calls == [("pantry-find-product", {"query": "penne", "lat": 49.2827,
+                                                      "lon": -123.1207})]
     # The second model call sees the system prompt, the user, the assistant's call and the result.
     second = chat.requests[1]["messages"]
     assert [m["role"] for m in second] == ["system", "user", "assistant", "tool"]
     assert second[3]["tool_call_id"] == "c1" and "1.97" in second[3]["content"]
-    assert chat.requests[0]["tools"][0]["function"]["name"] == "pantry-find-product"
+    # discover_tools first, then the tools in the order they were offered
+    assert [f["function"]["name"] for f in chat.requests[0]["tools"]][:2] == [
+        "discover_tools", "pantry-find-product"]
     # The conversation keeps its history for the next turn.
     assert [m["role"] for m in conv.messages] == ["user", "assistant", "tool", "assistant"]
 
@@ -325,3 +330,27 @@ def test_an_overloaded_gemini_model_falls_back_but_a_local_one_does_not(session:
     chat = ScriptedChat(ModelUnavailable("ollama m: HTTP 500"))
     events, conv = run(Agent(settings, FakeTargets(), chat), "hi", model="ollama:m")
     assert conv.model == "ollama:m" and events[-1]["stop"] == "error"
+
+
+def test_an_empty_reply_gets_one_nudge(session: FakeSession) -> None:
+    empty = turn("")
+    empty.output_tokens = 50                       # it wrote something nobody could read
+    chat = ScriptedChat(empty, turn("Penne is $1.97."))
+    events, _ = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "penne?")
+    assert any(e["type"] == "notice" and "asked it once more" in e["text"] for e in events)
+    assert chat.requests[1]["messages"][-1]["content"].startswith("Your last reply was empty")
+    assert next(e for e in events if e["type"] == "assistant")["text"] == "Penne is $1.97."
+    # a second empty reply is the answer: no loop
+    chat = ScriptedChat(empty, empty)
+    events, _ = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "penne?")
+    assert events[-1]["stop"] == "answered" and len(chat.requests) == 2
+
+
+def test_a_repeated_call_is_not_run_again(session: FakeSession) -> None:
+    call = {"id": "c1", "name": "pantry-find-product", "arguments": {"query": "penne"}}
+    chat = ScriptedChat(turn(calls=[call]), turn(calls=[{**call, "id": "c2"}]), turn("Done."))
+    events, _ = run(Agent(Settings(observer_model=""), FakeTargets(), chat), "penne?")
+    assert [name for name, _ in session.calls] == ["pantry-find-product"]      # once
+    second = [e for e in events if e["type"] == "tool_result"][1]
+    assert second["text"].startswith("You already called pantry-find-product")
+    assert any(e["type"] == "notice" and e["text"].startswith("repeated call") for e in events)

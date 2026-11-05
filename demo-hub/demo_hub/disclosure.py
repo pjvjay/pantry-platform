@@ -95,6 +95,14 @@ def parse_reports(text: str, conditions: list[Condition]) -> dict[str, tuple[boo
     return out
 
 
+def visible_tools(policy: Policy, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The target's tools without the policy's hidden ones (``Policy.hidden``)."""
+    if not policy.hidden:
+        return tools
+    return [t for t in tools
+            if not any(fnmatch.fnmatch(canonical(t["name"]), p) for p in policy.hidden)]
+
+
 # --- one conversation's disclosure ----------------------------------------------------------------
 
 @dataclass
@@ -112,8 +120,8 @@ class Disclosure:
               skills: dict[str, str] | None = None) -> Disclosure:
         if mode not in MODES:
             raise ValueError(f"disclosure must be one of {MODES}, got {mode!r}")
-        d = cls(policy, mode, catalog, dict(skills or {}))
-        d.offered = [t["name"] for t in catalog] if mode == "all" else d.resolve(policy.initial)
+        d = cls(policy, mode, visible_tools(policy, catalog), dict(skills or {}))
+        d.offered = [t["name"] for t in d.catalog] if mode == "all" else d.resolve(policy.initial)
         return d
 
     @property
@@ -126,8 +134,10 @@ class Disclosure:
                 if any(fnmatch.fnmatch(canonical(t["name"]), p) for p in patterns)]
 
     def offered_tools(self) -> list[dict[str, Any]]:
-        keep = set(self.offered)
-        return [t for t in self.catalog if t["name"] in keep]
+        """The offered tools in the order they were offered: one added later comes last, so a
+        model's cached prompt (the tools are rendered in order) stays valid up to it."""
+        by_name = {t["name"]: t for t in self.catalog}
+        return [by_name[name] for name in self.offered if name in by_name]
 
     def is_offered(self, name: str) -> bool:
         return name in self.offered

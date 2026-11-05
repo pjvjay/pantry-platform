@@ -1,6 +1,6 @@
 #!/bin/bash
-# Reseed pantry's demo database (161 products, 7 recipes) and load the demo origin evidence:
-# 32 label readings and 5 database records, including US-origin items, a conflicting product
+# Reseed pantry's demo database (165 products, 7 recipes) and load the demo origin evidence:
+# 36 label readings and 5 database records, including US-origin items, a conflicting product
 # (garlic: China vs Mexico) and an importer-only label that must never count as an origin.
 # Clears the review queue. Safe to run while the API is up (SQLite, one writer).
 set -euo pipefail

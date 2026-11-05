@@ -38,6 +38,8 @@ MODEL_CHOICES: tuple[dict[str, str], ...] = (
      "label": "IBM Granite 4.2 8B, thinking off (local Ollama: slow without a GPU)"},
     {"id": "ollama:granite4.2:8b",
      "label": "IBM Granite 4.2 8B, thinking on (local Ollama: slower still)"},
+    {"id": "ollama:granite4.2:3b#think=false",
+     "label": "IBM Granite 4.2 3B, thinking off (local: faster, less reliable; docs/local-speed.md)"},
     {"id": "ollama:command-r7b", "label": "Cohere command-r7b (local Ollama: slow without a GPU)"},
 )
 MAX_ATTEMPTS = 4
@@ -158,6 +160,14 @@ class _Progress:
                    "eta_s": None if eta is None else round(eta, 1)})
 
 
+def prompt_key(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
+    """A prompt serialized in the order the chat template renders it (the system prompt, then the
+    tools, then the conversation), so two prompts share a prefix exactly where the model's cache
+    does: one that keeps the instructions but changes the tools still shares the instructions."""
+    head = messages[:1] if messages and messages[0].get("role") == "system" else []
+    return json.dumps(head) + json.dumps(tools) + json.dumps(messages[len(head):])
+
+
 @dataclass
 class ChatClient:
     settings: Settings
@@ -222,12 +232,17 @@ class ChatClient:
         if temperature is not None:
             options["temperature"] = temperature
         body = {"model": name, "messages": to_ollama_messages(messages), "stream": True,
-                "options": options, "keep_alive": "30m"}
+                "options": options, "keep_alive": self.settings.ollama_keep_alive}
         if tools:
             body["tools"] = tools
         think = override.get("think", self.settings.ollama_think)
         if think is not None:
             body["think"] = think
+        if not think and self.settings.local_max_tokens and not json_schema:
+            # a runaway reply is cut (the 8B once wrote 856 tokens in one step, then over 1,800 in
+            # the next, at 1.5-2.7 tokens/s); with thinking on the reasoning counts too, so it is
+            # left alone
+            options["num_predict"] = self.settings.local_max_tokens
         if json_schema:
             body["format"] = json_schema
         return f"{self.settings.ollama_url}/api/chat", {}, self.settings.ollama_timeout_s, body
@@ -242,11 +257,7 @@ class ChatClient:
         key = self.model_key(model)
         assert self.timings is not None
         # What the model must read: a cached prompt prefix from its previous call is not re-read.
-        # Serialized in the order the chat template renders it (the system prompt, then the tools,
-        # then the conversation), so a prompt that keeps the instructions but changes the tools
-        # still shares the instructions with the previous one.
-        head = messages[:1] if messages and messages[0].get("role") == "system" else []
-        prompt = json.dumps(head) + json.dumps(tools) + json.dumps(messages[len(head):])
+        prompt = prompt_key(messages, tools)
         # The cache belongs to the loaded model, whichever thinking setting used it last.
         previous = self.timings.last_prompt(name) if provider == "ollama" else ""
         cached = common_prefix(prompt, previous)
@@ -286,6 +297,41 @@ class ChatClient:
             gen_s=float(m.get("gen_s", 0)), later=later,
             cache_known=provider != "ollama" or bool(previous)))
         return turn
+
+    async def warm(self, model: str, messages: list[dict[str, Any]],
+                   tools: list[dict[str, Any]]) -> dict[str, Any]:
+        """Read the beginning of a prompt into a local model's cache without answering (one token
+        is written and dropped): the next call that starts the same way reads only what follows.
+        The Assistant warms the instructions and the first tools while the shopper types."""
+        provider, name = parse_model(model)
+        if provider != "ollama":
+            return {"skipped": "only a local model keeps a prompt cache the hub can fill"}
+        assert self.timings is not None
+        client = self.client or httpx.AsyncClient(timeout=self.settings.ollama_timeout_s)
+        started = time.perf_counter()
+        try:
+            limit = await self._context_limit(client, name)
+            # the same num_ctx as the calls it warms for: another size reloads the model
+            num_ctx = min(self.settings.ollama_num_ctx, limit or self.settings.ollama_num_ctx)
+            url, _, _, body = self._request(provider, name, messages, tools, num_ctx,
+                                            split_variant(model)[1])
+            body["stream"] = False
+            body["options"]["num_predict"] = 1
+            response = await client.post(url, json=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(f"warming {model} failed: {type(exc).__name__}: {exc}") from exc
+        finally:
+            if self.client is None:
+                await client.aclose()
+        if response.status_code >= 400:
+            raise LLMError(f"warming {model} failed: HTTP {response.status_code}")
+        data = response.json()
+        self.timings.set_last_prompt(name, prompt_key(messages, tools))
+        ns = 1_000_000_000
+        return {"model": model, "wall_s": round(time.perf_counter() - started, 3),
+                "prompt_tokens": int(data.get("prompt_eval_count") or 0),
+                "prompt_s": round((data.get("prompt_eval_duration") or 0) / ns, 3),
+                "load_s": round((data.get("load_duration") or 0) / ns, 3)}
 
     async def _send(self, client: httpx.AsyncClient, url: str, headers: dict[str, str],
                     body: dict[str, Any], provider: str, progress: _Progress | None

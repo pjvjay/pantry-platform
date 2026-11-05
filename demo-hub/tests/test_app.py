@@ -16,6 +16,7 @@ from demo_hub import mcp_targets
 from demo_hub.mcp_targets import McpTargetError
 from demo_hub.settings import Settings
 from demo_hub.sims import SimsError
+from tests.conftest import console_client
 
 SETTINGS = Settings(pantry_api_url="http://pantry.test", contextforge_url="http://cf.test",
                     fetch_url="http://fetch.test", mcpsim_ui_url="http://runner.test",
@@ -65,7 +66,7 @@ def upstream(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
 
 
 def make_client(settings: Settings = SETTINGS) -> TestClient:
-    return TestClient(app_module.create_app(settings))
+    return console_client(app_module.create_app(settings))
 
 
 def test_status_reports_every_service(upstream: list[httpx.Request]) -> None:
@@ -76,9 +77,14 @@ def test_status_reports_every_service(upstream: list[httpx.Request]) -> None:
     assert services["fetch"]["ok"] is False and services["burr"]["ok"] is False
     assert services["ollama"]["models"] == ["command-r7b:latest"]
     assert services["mcp-sim"]["skill"] == "/skills/local"
-    assert body["keys"] == {"gemini": True, "pantry_token": True, "contextforge_jwt": True}
+    assert body["keys"] == {"gemini": True, "pantry_token": True, "contextforge_jwt": True,
+                            "youtube": False, "google_calendar_client": False,
+                            "google_calendar_connected": False}
     cf_lists = [r for r in upstream if r.url.path == "/servers"]
     assert cf_lists[0].headers["authorization"] == "Bearer jwt"
+    assert body["geocoder"] is True                  # address search is on unless GEOCODER_URL=""
+    off = Settings(**{**SETTINGS.__dict__, "geocoder_url": ""})
+    assert make_client(off).get("/hub/status").json()["geocoder"] is False
 
 
 def test_the_pantry_proxy_forwards_method_path_query_and_body(upstream: list[httpx.Request]) -> None:
@@ -175,7 +181,7 @@ def test_agent_options_and_stream(monkeypatch: pytest.MonkeyPatch, upstream: Any
     assert options["default_model"] == "gemini:gemini-3-flash-preview" and options["skill_loaded"] is True
     assert [t["id"] for t in options["targets"]] == ["gateway-recipes", "pantry", "gateway-sim"]
 
-    async def fake_run(conv: Any, message: str) -> Any:
+    async def fake_run(conv: Any, message: str, recipe_doc: Any = None) -> Any:
         yield {"type": "start", "conversation_id": conv.id}
         yield {"type": "assistant", "text": f"you said {message}"}
         yield {"type": "done", "steps": 1, "stop": "answered", "seconds": 0.1,
@@ -268,3 +274,25 @@ def test_root_redirects_and_the_spa_is_served(upstream: Any, tmp_path: Path) -> 
     assert "immutable" in client.get("/pantry/assets/index-abc123.js").headers["cache-control"]
     # The API proxy is matched before the SPA mount.
     assert client.get("/pantry/api/health").json() == {"status": "ok"}
+
+
+def test_a_run_comes_back_from_every_source_and_warming_is_shared(
+        monkeypatch: pytest.MonkeyPatch, upstream: Any, tmp_path: Path) -> None:
+    client = make_client(Settings(**{**SETTINGS.__dict__, "traces_dir": str(tmp_path / "traces")}))
+    client.app.state.traces.save({  # type: ignore[attr-defined]
+        "id": "tr-run", "started_at": "2026-10-05T08:00:00+00:00", "spans": []})
+    run = client.get("/hub/runs/tr-run").json()
+    assert run["trace"]["id"] == "tr-run" and run["burr"] == [] and run["gateway"] == []
+    assert set(run["links"]) == {"burr_ui", "contextforge"}
+    assert client.get("/hub/runs/tr-missing").status_code == 404
+
+    calls: list[tuple[str, str, Any]] = []
+
+    async def fake_warm(model: str, target: str, disclosure: Any = None) -> dict[str, Any]:
+        calls.append((model, target, disclosure))
+        return {"model": model, "prompt_tokens": 1500}
+
+    monkeypatch.setattr(client.app.state.agent, "warm", fake_warm)  # type: ignore[attr-defined]
+    r = client.post("/hub/agent/warm", json={"model": "ollama:granite4.2:8b"})
+    assert r.json() == {"model": "ollama:granite4.2:8b", "prompt_tokens": 1500}
+    assert calls == [("ollama:granite4.2:8b", "gateway-recipes", None)]

@@ -26,6 +26,9 @@ class Settings:
     mcpsim_ui_url: str = "http://127.0.0.1:8765"
     ollama_url: str = "http://127.0.0.1:11434"
     burr_url: str = "http://127.0.0.1:7241"
+    # pantry's Burr tracker files (its .burr folder): the run view reads each plan call's steps
+    # from them ("" = not available).
+    burr_dir: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     gemini_api_key: str = field(default="", repr=False)
     # The hub's own bearer token for pantry's /mcp (a label in pantry's MCP_AUTH_TOKENS).
@@ -57,11 +60,74 @@ class Settings:
     # The most of one tool result a local (ollama:) model reads; longer JSON is shrunk. On a CPU
     # it reads ~15-20 tokens a second, so 4,000 characters (~1,000 tokens) cost about a minute.
     local_result_chars: int = 4000
+    # A plan or week result reaches a local model as short lines (answers.plan_for_model): about a
+    # fifth of its JSON's tokens. False sends the JSON, as other models get it.
+    local_compact_plans: bool = True
+    # Keep a local model's tools block as it was at the conversation's first step and announce
+    # tools offered later in a message (agent.announce_tools): the prompt only grows.
+    local_stable_tools: bool = False
+    # A local model's tool definitions without indentation, schema titles and null wrappers,
+    # and descriptions to their first paragraphs (agent.openai_tools).
+    local_lean_tools: bool = True
+    # The most a local model writes in one step with thinking off (Ollama's num_predict); 0 is
+    # no limit. Answers with the code's tables are 60-200 tokens, a tool call 20-300.
+    local_max_tokens: int = 600
+    # The shopper's location the hub adds to a plan call that leaves it out: lat, lon, km
+    # (DEMO_SHOPPER_LOCATION="49.2827,-123.1207,5"; "" adds none).
+    shopper_location: tuple[float, float, float] | None = (49.2827, -123.1207, 5.0)
+    # How long Ollama keeps the model, and with it the cached prompt, after a call.
+    ollama_keep_alive: str = "30m"
     # Every model call's timing, for the next call's estimate ("" keeps it in memory only).
     timings_path: str = ""
     # Assistant traces and browser measurements (JSON lines) and the image cache ("" = none).
     traces_dir: str = ""
     images_dir: str = ""
+    # Cart alternatives (DEMO_CART_ALTERNATIVES): plans are made with their basis, so the
+    # Assistant's cart offers Options per line and a swap re-prices it (docs/cart-alternatives.md).
+    cart_alternatives: bool = True
+    # The hub's port and the other Host values it answers to (guard.py): HUB_PORT, and
+    # HUB_ALLOWED_HOSTS, comma-separated host:port (Vite's dev proxy keeps the browser's Host).
+    hub_port: int = 8090
+    allowed_hosts: tuple[str, ...] = ("localhost:5173",)
+    # Recipe import (docs/recipe-import.md). The skill's stdlib extractor, loaded by path: its
+    # MAX_BYTES and TIMEOUT_S bound the hub's own fetch, and "" turns link import off. Default:
+    # scripts/extract_recipe.py beside RECIPE_SHOPPER_SKILL.
+    recipe_extractor: str = ""
+    # A YouTube Data API key the user created (D4): with it, a video's description and length
+    # are read (videos.list, 1 unit). "" leaves a video at its title and channel.
+    youtube_api_key: str = field(default="", repr=False)
+    # Gemini watching a public video for its ingredient lines: off unless DEMO_VIDEO_IMPORT=1,
+    # and then only on the shopper's click. Capped in video seconds a UTC day (6 h, under the
+    # free tier's 8 h), counted in usage_dir.
+    video_import_enabled: bool = False
+    video_import_model: str = "gemini-3-flash-preview"
+    video_import_daily_seconds: int = 6 * 3600
+    # USD per 1M tokens (input, output) for a video import; 0 while YouTube input is a free
+    # preview ("preview pricing" on every figure), set when Google prices it.
+    video_import_price: tuple[float, float] = (0.0, 0.0)
+    gemini_native_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    usage_dir: str = ""
+    # Google Calendar sync (docs/google-calendar.md): the OAuth client JSON the user downloaded
+    # (mode 600; "" or missing turns sync off), the refresh token the hub writes (mode 600) and
+    # the sync ledger's folder. HUB_OAUTH_ORIGINS: console origins that may sign in (empty: the
+    # hub's own 127.0.0.1 address and Vite's localhost:5173). The Google URLs are overridable
+    # for tests; nothing here is ever logged.
+    google_oauth_client_file: str = ""
+    google_token_file: str = ""
+    calendar_dir: str = ""
+    oauth_origins: tuple[str, ...] = ()
+    google_auth_url: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    google_token_url: str = "https://oauth2.googleapis.com/token"
+    google_revoke_url: str = "https://oauth2.googleapis.com/revoke"
+    google_calendar_url: str = "https://www.googleapis.com/calendar/v3"
+    # Address search for the wizard's "Where you shop" (GEOCODER_URL; README.md): OpenStreetMap's
+    # Nominatim, with its usage policy kept by geocode.py. "" turns it off.
+    geocoder_url: str = "https://nominatim.openstreetmap.org/search"
+    # Map tiles for the wizard's store map (TILES_URL, with {z}/{x}/{y}; README.md):
+    # OpenStreetMap's, with its tile usage policy kept by tiles.py and a disk cache in tile_dir
+    # (DEMO_TILE_DIR). "" turns them off.
+    tiles_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    tile_dir: str = ""
 
     @staticmethod
     def from_env() -> Settings:
@@ -73,6 +139,7 @@ class Settings:
             mcpsim_ui_url=env.get("MCPSIM_UI_URL", Settings.mcpsim_ui_url).rstrip("/"),
             ollama_url=env.get("OLLAMA_URL", Settings.ollama_url).rstrip("/"),
             burr_url=env.get("BURR_URL", Settings.burr_url).rstrip("/"),
+            burr_dir=env.get("DEMO_BURR_DIR", env.get("burr_path", Settings.burr_dir)),
             gemini_base_url=env.get("GEMINI_BASE_URL", Settings.gemini_base_url).rstrip("/"),
             gemini_api_key=env.get("GEMINI_API_KEY", ""),
             pantry_mcp_token=env.get("PANTRY_MCP_TOKEN")
@@ -94,6 +161,15 @@ class Settings:
             ollama_num_ctx=int(env.get("OLLAMA_NUM_CTX", str(Settings.ollama_num_ctx))),
             local_result_chars=int(env.get("DEMO_LOCAL_RESULT_CHARS",
                                            str(Settings.local_result_chars))),
+            local_compact_plans=env.get("DEMO_LOCAL_COMPACT_PLANS", "1").lower()
+            not in ("0", "false", "no"),
+            local_stable_tools=env.get("DEMO_LOCAL_STABLE_TOOLS", "0").lower()
+            in ("1", "true", "yes"),
+            local_lean_tools=env.get("DEMO_LOCAL_LEAN_TOOLS", "1").lower()
+            not in ("0", "false", "no"),
+            local_max_tokens=int(env.get("DEMO_LOCAL_MAX_TOKENS", str(Settings.local_max_tokens))),
+            shopper_location=_location(env.get("DEMO_SHOPPER_LOCATION", "49.2827,-123.1207,5")),
+            ollama_keep_alive=env.get("DEMO_OLLAMA_KEEP_ALIVE", Settings.ollama_keep_alive),
             ollama_temperature=float(env["OLLAMA_TEMPERATURE"]) if env.get("OLLAMA_TEMPERATURE")
             else None,
             ollama_think=_flag(env.get("OLLAMA_THINK", "")),
@@ -101,7 +177,53 @@ class Settings:
             timings_path=env.get("LLM_TIMINGS_PATH", "~/.pantry-demo/llm-timings.jsonl"),
             traces_dir=env.get("DEMO_TRACES_DIR", "~/.pantry-demo/traces"),
             images_dir=env.get("DEMO_IMAGES_DIR", "~/.pantry-demo/images"),
+            cart_alternatives=env.get("DEMO_CART_ALTERNATIVES", "1").lower()
+            not in ("0", "false", "no"),
+            hub_port=int(env.get("HUB_PORT", str(Settings.hub_port))),
+            allowed_hosts=tuple(h.strip() for h in env.get(
+                "HUB_ALLOWED_HOSTS", ",".join(Settings.allowed_hosts)).split(",") if h.strip()),
+            recipe_extractor=env.get("RECIPE_EXTRACTOR")
+            or _beside_skill(env.get("RECIPE_SHOPPER_SKILL", "")),
+            youtube_api_key=env.get("YOUTUBE_API_KEY") or _read_secret(
+                env.get("YOUTUBE_API_KEY_FILE", "~/.pantry-secrets/youtube_api_key")),
+            video_import_enabled=env.get("DEMO_VIDEO_IMPORT", "0").lower()
+            in ("1", "true", "yes"),
+            video_import_model=env.get("DEMO_VIDEO_IMPORT_MODEL", Settings.video_import_model),
+            video_import_daily_seconds=int(env.get("DEMO_VIDEO_IMPORT_DAILY_SECONDS",
+                                                   str(Settings.video_import_daily_seconds))),
+            video_import_price=_price(env.get("DEMO_VIDEO_IMPORT_PRICE", "")),
+            gemini_native_url=env.get("GEMINI_NATIVE_URL", Settings.gemini_native_url)
+            .rstrip("/"),
+            usage_dir=env.get("DEMO_USAGE_DIR", "~/.pantry-demo/usage"),
+            google_oauth_client_file=env.get("GOOGLE_OAUTH_CLIENT_FILE",
+                                             "~/.pantry-secrets/google_oauth_client.json"),
+            google_token_file=env.get("GOOGLE_CALENDAR_TOKEN_FILE",
+                                      "~/.pantry-secrets/google_calendar_token.json"),
+            calendar_dir=env.get("DEMO_CALENDAR_DIR", "~/.pantry-demo/calendar"),
+            oauth_origins=tuple(o.strip() for o in env.get("HUB_OAUTH_ORIGINS", "").split(",")
+                                if o.strip()),
+            google_auth_url=env.get("GOOGLE_AUTH_URL", Settings.google_auth_url),
+            google_token_url=env.get("GOOGLE_TOKEN_URL", Settings.google_token_url),
+            google_revoke_url=env.get("GOOGLE_REVOKE_URL", Settings.google_revoke_url),
+            google_calendar_url=env.get("GOOGLE_CALENDAR_URL", Settings.google_calendar_url)
+            .rstrip("/"),
+            geocoder_url=env.get("GEOCODER_URL", Settings.geocoder_url).strip(),
+            tiles_url=env.get("TILES_URL", Settings.tiles_url).strip(),
+            tile_dir=env.get("DEMO_TILE_DIR", "~/.pantry-demo/tiles"),
         )
+
+
+def _beside_skill(skill: str) -> str:
+    """scripts/extract_recipe.py next to the recipe-shopper skill's SKILL.md, or ""."""
+    return str(Path(skill).expanduser().parent / "scripts" / "extract_recipe.py") if skill else ""
+
+
+def _price(value: str) -> tuple[float, float]:
+    """"input,output" USD per 1M tokens; "" is the free preview's 0, 0."""
+    parts = [float(x) for x in value.split(",") if x.strip()]
+    if not parts:
+        return 0.0, 0.0
+    return parts[0], parts[1] if len(parts) > 1 else parts[0]
 
 
 def _flag(raw: str) -> bool | None:
@@ -111,3 +233,12 @@ def _flag(raw: str) -> bool | None:
     if value in ("0", "false", "no", "off"):
         return False
     return None
+
+
+def _location(value: str) -> tuple[float, float, float] | None:
+    """"lat,lon,km" -> the tuple; "" -> None."""
+    parts = [x.strip() for x in value.split(",") if x.strip()]
+    if not parts:
+        return None
+    lat, lon, km = (float(x) for x in (parts + ["5"])[:3])
+    return lat, lon, km

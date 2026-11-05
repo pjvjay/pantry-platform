@@ -43,3 +43,27 @@ def call_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | 
     if price is None:
         return None
     return round(input_tokens * price[0] / 1e6 + output_tokens * price[1] / 1e6, 6)
+
+
+# A video import (recipe_import/gemini_video.py) is priced apart from chat: YouTube URL input is
+# a preview "at no charge", so its rate comes from the hub's settings (DEMO_VIDEO_IMPORT_PRICE,
+# 0 by default) and every figure carries this label rather than passing for a list price.
+VIDEO_IMPORT_PRICING = "preview pricing"
+
+
+def video_import(model: str, usage: dict, price: tuple[float, float]) -> dict:
+    """Gemini's usageMetadata for one video import as the hub records it: prompt, output and
+    total tokens, the per-modality prompt counts when Gemini gives them (VIDEO, AUDIO, TEXT),
+    and the cost at ``price`` (USD per 1M tokens, input and output). Thinking tokens are
+    billed as output."""
+    prompt = int(usage.get("promptTokenCount") or 0)
+    output = int(usage.get("candidatesTokenCount") or 0) + int(usage.get("thoughtsTokenCount")
+                                                               or 0)
+    by_modality = {str(d.get("modality", "")).lower(): int(d.get("tokenCount") or 0)
+                   for d in usage.get("promptTokensDetails") or [] if isinstance(d, dict)}
+    return {"kind": "video_import", "model": model, "prompt_tokens": prompt,
+            "output_tokens": output,
+            "total_tokens": int(usage.get("totalTokenCount") or prompt + output),
+            "by_modality": by_modality,
+            "llm_cost_usd": round(prompt * price[0] / 1e6 + output * price[1] / 1e6, 6),
+            "pricing": VIDEO_IMPORT_PRICING}
