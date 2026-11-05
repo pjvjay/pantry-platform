@@ -36,12 +36,33 @@ for name in pantry_mcp_token pantry_mcp_token_hub; do
 done
 echo "  ok    pantry tokens (labels: contextforge, demo-hub)"
 
+echo "== releases"
+# What each checkout is, by its vX.Y.Z tags (RELEASING.md). pantry-api and the hub read their own
+# checkouts with git describe at runtime; the console is compiled, so its version goes into the
+# build below. /hub/status compares all three with release-set.json.
+for dir in "$PLATFORM_DIR" "$PANTRY_API_DIR" "$FRONTEND_DIR"; do
+  fetch_tags "$dir"
+  release=$(release_of "$dir")
+  echo "  ok    ${dir##*/} ${release:-unknown (no vX.Y.Z tag)}"
+done
+
 echo "== frontend"
 DIST=$FRONTEND_DIR/dist
-if [ "$REBUILD" = 1 ] || [ ! -f "$DIST/index.html" ] || [ -n "$(find "$FRONTEND_DIR/src" -newer "$DIST/index.html" -print -quit)" ]; then
-  (cd "$FRONTEND_DIR" && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build) >"$STATE_DIR/logs/frontend-build.log" 2>&1 \
+# The console's version, as an image build bakes it (build.yml passes APP_VERSION). A dist/ built
+# as another version is rebuilt, like one older than its sources; a build with no version.json
+# (from before versioning) is left to the source check.
+CONSOLE_VERSION=$(release_of "$FRONTEND_DIR")
+BUILT_VERSION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("version") or "")' \
+  "$DIST/version.json" 2>/dev/null || true)
+if [ "$REBUILD" = 1 ] || [ ! -f "$DIST/index.html" ] \
+  || { [ -f "$DIST/version.json" ] && [ "$BUILT_VERSION" != "${CONSOLE_VERSION:-unknown}" ]; } \
+  || [ -n "$(find "$FRONTEND_DIR/src" -newer "$DIST/index.html" -print -quit)" ]; then
+  (cd "$FRONTEND_DIR" \
+    && export VITE_APP_VERSION="$CONSOLE_VERSION" VITE_GIT_SHA="$(git rev-parse HEAD 2>/dev/null)" \
+      VITE_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build) >"$STATE_DIR/logs/frontend-build.log" 2>&1 \
     || { echo "  FAIL  frontend build (see $STATE_DIR/logs/frontend-build.log)" >&2; exit 1; }
-  echo "  ok    built $DIST"
+  echo "  ok    built $DIST (${CONSOLE_VERSION:-version unknown})"
 else
   echo "  ok    $DIST is current"
 fi

@@ -124,6 +124,15 @@ Everything else converges from git. Details in
 [pantry-infra](https://github.com/pjvjay/pantry-infra) and
 [pantry-gitops](https://github.com/pjvjay/pantry-gitops).
 
+## Releases
+
+Every PR carries one release label (`release:major`, `release:minor`,
+`release:patch` or `release:none`); each component turns its labels into a
+`vX.Y.Z`, and the platform train pins a released set and tags the platform.
+**[RELEASING.md](RELEASING.md)** is the whole process: labels and what major
+means per repo, the 0.x policy, the train, rollback, bootstrap and
+troubleshooting.
+
 ## Working with the submodules
 
 Submodule pins mark a **known-good set** across the five repos — a
@@ -134,12 +143,17 @@ git submodule update --remote --merge   # pull every repo to latest main
 git commit -am "pin: <what changed>"    # record the new known-good set
 ```
 
+Once the components have release tags, the set is pinned by the release
+train instead (`python3 scripts/train.py --open-pr`), which pins tags and
+writes `release-set.json`; see [RELEASING.md](RELEASING.md#the-train).
+
 ## Checks on pull requests
 
-[`.github/workflows/verify.yml`](.github/workflows/verify.yml) runs four jobs
+[`.github/workflows/verify.yml`](.github/workflows/verify.yml) runs five jobs
 on every pull request, including one stacked on another branch, and, from the
-Actions tab, by hand on any branch. `hub-tests` checks the hub in this repo;
-the other three check the pinned set:
+Actions tab, by hand on any branch. `hub-tests` checks the hub in this repo,
+`release-tools` tests the release tooling, and the other three check the
+pinned set:
 
 | Job | What it checks |
 |---|---|
@@ -147,9 +161,10 @@ the other three check the pinned set:
 | `hub-tests` | demo-hub's tests pass on Python 3.12, with no network and no keys. |
 | `shared-seed` | `seeds/products.json` and `seeds/recipes.json` are byte-identical in pantry-api and pantry-db. pantry-api's tests seed from its copy; production's `seed.sql` is rendered from pantry-db's. |
 | `schema-parity` | pantry-db's migrations and pantry-api's SQLAlchemy models build the same schema on Postgres 17. |
+| `release-tools` | The unit tests for the release tooling (`.github/actions/semver-labels` and `scripts/`); GitHub and GHCR are fakes. |
 
 Only `verify-pins` is a required check in the ruleset on `main`; the other
-three report on the pull request but do not block a merge until the ruleset
+four report on the pull request but do not block a merge until the ruleset
 lists them too.
 
 The jobs check the pinned submodules, so a pantry-db migration or a

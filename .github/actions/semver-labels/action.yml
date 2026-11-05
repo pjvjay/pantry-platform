@@ -1,0 +1,169 @@
+# Release labels to version numbers for the pantry repos (RELEASING.md at the platform root).
+#
+# App repos pin this action by commit SHA, never by branch:
+#
+#   - uses: pjvjay/pantry-platform/.github/actions/semver-labels@<40-hex sha>
+#     with:
+#       command: check-pr
+#       advisory: "true"
+#
+# Every input reaches the script through an environment variable, never by splicing ${{ }} into
+# the shell, so a PR title or branch name cannot become a command. The script is stdlib Python:
+# the release jobs that call it hold write credentials, so nothing is installed into them.
+name: semver-labels
+description: >-
+  Release labels (release:major|minor|patch|none) to vX.Y.Z: the PR check (R1-R4), the release
+  plan, release notes, the platform train's level and an atomic tag reservation.
+
+inputs:
+  command:
+    description: check-pr, plan, notes, platform-level or reserve-tag
+    required: true
+  token:
+    description: Token for the GitHub REST API. Read access is enough except for reserve-tag (contents write).
+    default: ${{ github.token }}
+  config:
+    description: The repo's versioning.json (check-pr, plan)
+    default: .github/versioning.json
+  advisory:
+    description: check-pr only. "true" reports rule violations as warnings and passes.
+    default: "false"
+  predict-ref:
+    description: check-pr only. A full-history ref of the base branch (origin/main) so the prediction counts PRs merged since the last tag.
+    default: ""
+  ref:
+    description: plan only. The commit to plan for.
+    default: HEAD
+  level:
+    description: plan only. A dispatch override of the labels (none, patch, minor, major); recorded in the plan with by.
+    default: ""
+  by:
+    description: plan only. Who set level, promote-major or promote-version, recorded in the plan and the notes.
+    default: ""
+  floor:
+    description: plan only. The lowest level to release at (the platform train passes its component level).
+    default: ""
+  promote-major:
+    description: plan only. N.0.0; the only way to reach 1.0.0 (the 0.x policy).
+    default: ""
+  promote-version:
+    description: plan only. X.Y.Z of an existing tag to release and deploy again (rollback, failed deploy, bootstrap).
+    default: ""
+  plan-file:
+    description: Written by plan, read by notes.
+    default: plan.json
+  notes-file:
+    description: Written by notes.
+    default: release-notes.md
+  run-url:
+    description: notes only. Defaults to this run.
+    default: ""
+  image:
+    description: notes only. The image name without a tag; defaults to versioning.json's image.
+    default: ""
+  digest:
+    description: notes only. The pushed digest, sha256:<64 hex>.
+    default: ""
+  release-set:
+    description: notes and platform-level. The platform's release-set.json.
+    default: ""
+  previous-set:
+    description: notes and platform-level. The release set at the previous platform tag.
+    default: ""
+  tag:
+    description: reserve-tag only. vX.Y.Z.
+    default: ""
+  sha:
+    description: reserve-tag only. The full commit SHA to tag.
+    default: ""
+
+outputs:
+  version:
+    description: plan. X.Y.Z, empty when skipped
+    value: ${{ steps.run.outputs.version }}
+  previous:
+    description: plan. The previous X.Y.Z, empty when there is no tag
+    value: ${{ steps.run.outputs.previous }}
+  tag:
+    description: plan. vX.Y.Z, empty when skipped
+    value: ${{ steps.run.outputs.tag }}
+  level:
+    description: plan and platform-level. none, patch, minor or major
+    value: ${{ steps.run.outputs.level }}
+  mode:
+    description: plan. release, promote or skip
+    value: ${{ steps.run.outputs.mode }}
+  skip:
+    description: plan. "true" when there is nothing to release
+    value: ${{ steps.run.outputs.skip }}
+  skip-reason:
+    description: plan. Why nothing is released ("covered by v0.4.0", "nothing shipped since v0.4.0")
+    value: ${{ steps.run.outputs.skip-reason }}
+  notes-file:
+    description: notes. The file the notes were written to
+    value: ${{ steps.run.outputs.notes-file }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        SL_COMMAND: ${{ inputs.command }}
+        SL_CONFIG: ${{ inputs.config }}
+        SL_ADVISORY: ${{ inputs.advisory }}
+        SL_PREDICT_REF: ${{ inputs.predict-ref }}
+        SL_REF: ${{ inputs.ref }}
+        SL_LEVEL: ${{ inputs.level }}
+        SL_BY: ${{ inputs.by }}
+        SL_FLOOR: ${{ inputs.floor }}
+        SL_PROMOTE_MAJOR: ${{ inputs.promote-major }}
+        SL_PROMOTE_VERSION: ${{ inputs.promote-version }}
+        SL_PLAN_FILE: ${{ inputs.plan-file }}
+        SL_NOTES_FILE: ${{ inputs.notes-file }}
+        SL_RUN_URL: ${{ inputs.run-url }}
+        SL_IMAGE: ${{ inputs.image }}
+        SL_DIGEST: ${{ inputs.digest }}
+        SL_RELEASE_SET: ${{ inputs.release-set }}
+        SL_PREVIOUS_SET: ${{ inputs.previous-set }}
+        SL_TAG: ${{ inputs.tag }}
+        SL_SHA: ${{ inputs.sha }}
+      run: |
+        set -euo pipefail
+        args=()
+        case "$SL_COMMAND" in
+          check-pr)
+            args+=(--config "$SL_CONFIG")
+            if [ "$SL_ADVISORY" = "true" ]; then args+=(--advisory); fi
+            if [ -n "$SL_PREDICT_REF" ]; then args+=(--predict-ref "$SL_PREDICT_REF"); fi
+            ;;
+          plan)
+            args+=(--config "$SL_CONFIG" --ref "$SL_REF" --out "$SL_PLAN_FILE")
+            if [ -n "$SL_LEVEL" ]; then args+=(--level "$SL_LEVEL"); fi
+            if [ -n "$SL_BY" ]; then args+=(--by "$SL_BY"); fi
+            if [ -n "$SL_FLOOR" ]; then args+=(--floor "$SL_FLOOR"); fi
+            if [ -n "$SL_PROMOTE_MAJOR" ]; then args+=(--promote-major "$SL_PROMOTE_MAJOR"); fi
+            if [ -n "$SL_PROMOTE_VERSION" ]; then args+=(--promote-version "$SL_PROMOTE_VERSION"); fi
+            ;;
+          notes)
+            args+=(--plan "$SL_PLAN_FILE" --out "$SL_NOTES_FILE")
+            if [ -n "$SL_RUN_URL" ]; then args+=(--run-url "$SL_RUN_URL"); fi
+            if [ -n "$SL_IMAGE" ]; then args+=(--image "$SL_IMAGE"); fi
+            if [ -n "$SL_DIGEST" ]; then args+=(--digest "$SL_DIGEST"); fi
+            if [ -n "$SL_RELEASE_SET" ]; then args+=(--release-set "$SL_RELEASE_SET"); fi
+            if [ -n "$SL_PREVIOUS_SET" ]; then args+=(--previous-set "$SL_PREVIOUS_SET"); fi
+            ;;
+          platform-level)
+            args+=(--set "$SL_RELEASE_SET")
+            if [ -n "$SL_PREVIOUS_SET" ]; then args+=(--previous-set "$SL_PREVIOUS_SET"); fi
+            ;;
+          reserve-tag)
+            args+=(--tag "$SL_TAG" --sha "$SL_SHA")
+            ;;
+          *)
+            echo "::error::semver-labels: unknown command '$SL_COMMAND'"
+            exit 2
+            ;;
+        esac
+        python3 "$GITHUB_ACTION_PATH/semver_labels.py" "$SL_COMMAND" "${args[@]}"

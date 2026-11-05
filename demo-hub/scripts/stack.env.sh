@@ -62,3 +62,19 @@ start_bg() {  # start_bg <name> <command...>: run detached, log to $STATE_DIR/lo
   nohup "$@" >"$STATE_DIR/logs/$name.log" 2>&1 &
   echo $! >"$STATE_DIR/pids/$name.pid"
 }
+
+# A checkout's release as git describe reads it against vX.Y.Z tags, without the v: 0.2.0, or
+# 0.2.0-3-gabc1234 three commits past it (RELEASING.md). Prints nothing, and still succeeds, when
+# the checkout has no such tag, so callers under set -e need no guard.
+release_of() {
+  local described
+  described=$(git -C "$1" describe --tags --dirty --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null) || return 0
+  printf '%s\n' "${described#v}"
+}
+
+# Fetch a checkout's tags so release_of names the latest release. Best effort and never
+# interactive: offline, or with no credentials to hand, the tags already fetched are used.
+fetch_tags() {
+  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
+    git -C "$1" fetch --quiet --tags >/dev/null 2>&1 || true
+}

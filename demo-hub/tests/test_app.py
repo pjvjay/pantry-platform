@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from demo_hub import app as app_module
-from demo_hub import mcp_targets
+from demo_hub import mcp_targets, version
 from demo_hub.mcp_targets import McpTargetError
 from demo_hub.settings import Settings
 from demo_hub.sims import SimsError
@@ -85,6 +85,22 @@ def test_status_reports_every_service(upstream: list[httpx.Request]) -> None:
     assert body["geocoder"] is True                  # address search is on unless GEOCODER_URL=""
     off = Settings(**{**SETTINGS.__dict__, "geocoder_url": ""})
     assert make_client(off).get("/hub/status").json()["geocoder"] is False
+
+
+def test_status_carries_the_release_block(upstream: list[httpx.Request],
+                                         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "release-set.json").write_text(json.dumps(
+        {"components": {"pantry-api": {"version": "0.2.0"}}}))
+    monkeypatch.setattr(version, "PLATFORM_ROOT", tmp_path)
+    monkeypatch.setenv("PANTRY_PLATFORM_VERSION", "0.4.0")
+    monkeypatch.setenv("WORKSPACE", str(tmp_path))
+    release = make_client().get("/hub/status").json()["release"]
+    assert (release["platform"]["version"], release["platform"]["source"]) == ("0.4.0", "env")
+    assert release["release_set"] == {"present": True, "error": None}
+    api = release["components"][0]
+    # The fake pantry /health reports no version, so what runs is unknown: null, not a guess.
+    assert (api["name"], api["pinned"], api["running"], api["match"]) == \
+        ("pantry-api", "0.2.0", None, None)
 
 
 def test_the_pantry_proxy_forwards_method_path_query_and_body(upstream: list[httpx.Request]) -> None:
