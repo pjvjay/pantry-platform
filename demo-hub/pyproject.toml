@@ -14,8 +14,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.7"]
 
-[tool.setuptools]
-packages = ["demo_hub"]
+# Every subpackage too (recipe_import): a plain, non-editable install must carry them all.
+[tool.setuptools.packages.find]
+include = ["demo_hub", "demo_hub.*"]
 
 [tool.ruff]
 line-length = 100

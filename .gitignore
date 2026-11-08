@@ -1,0 +1,3 @@
+# Python bytecode and package builds, anywhere in the repo
+__pycache__/
+*.py[cod]

@@ -115,6 +115,12 @@ Setup, the full tool list, and the no-auth caveat for the HTTP endpoint:
 
 ## Deploy it
 
+**Render (the whole app, privately):** [`render.yaml`](render.yaml) deploys the console, pantry-api,
+the demo hub, an embedder and Postgres from this repo's pinned submodules, behind a login, and
+redeploys on every pin move. Setup and costs: [docs/render.md](docs/render.md).
+
+**Kubernetes (AKS, GitOps):**
+
 ```bash
 cd pantry-infra
 terraform apply        # seeds Key Vault + the ArgoCD root Application

@@ -3,3 +3,5 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .coverage
+# a plain (non-editable) pip install of the hub writes this
+build/

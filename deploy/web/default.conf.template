@@ -1,0 +1,51 @@
+# The public front door on Render: the console under /pantry/, pantry-api under /pantry/api/ and
+# the demo hub under /hub/, all on one origin (the console calls both with relative URLs). Filled
+# in at start by nginx's own envsubst; 40-pantry-auth.sh writes /etc/nginx/pantry-auth.conf.
+server {
+    listen ${PORT};
+    server_name _;
+    client_max_body_size 2m;
+
+    # Render's health check: never behind the login.
+    location = /healthz {
+        access_log off;
+        auth_basic off;
+        return 200 "ok\n";
+    }
+
+    include /etc/nginx/pantry-auth.conf;
+
+    location = / { return 302 /pantry/; }
+    location = /pantry { return 302 /pantry/; }
+
+    location /pantry/api/ {
+        proxy_pass http://${API_UPSTREAM}/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 180s;
+        proxy_buffering off;
+    }
+
+    # The hub: the Assistant streams server-sent events, so nothing is buffered and a turn may
+    # take minutes. The browser's Host is passed exactly, port included ($http_host, not $host):
+    # the hub answers only to HUB_ALLOWED_HOSTS.
+    location /hub/ {
+        proxy_pass http://${HUB_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 600s;
+        proxy_buffering off;
+    }
+
+    location /pantry/ {
+        alias /usr/share/nginx/html/;
+        try_files $uri $uri/ /pantry/index.html;
+    }
+    location /pantry/assets/ {
+        alias /usr/share/nginx/html/assets/;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+}
