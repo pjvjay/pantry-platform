@@ -113,6 +113,8 @@ services:
         value: "900"
       - key: MATCHING_DAILY_DESCRIBE_CALLS
         value: "200"
+      - key: MATCHING_EMBED_TEXTS_PER_MINUTE
+        value: "100"
       - key: PREFILL_MATCHING
         value: "1"
       - key: MCP_AUTH_TOKENS

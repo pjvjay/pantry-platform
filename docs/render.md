@@ -61,9 +61,11 @@ pantry-api's `docs/meal-planning.md`, "Describing names no seed knows"). No self
    `pantry-web.onrender.com`, update the two `HUB_` values to match and redeploy pantry-app.
 3. **Apply.** Render creates the database, builds the two images, runs pantry-app's pre-deploy step
    and starts everything. The pre-deploy step also fills the matching cache with 511 common
-   ingredient names, which uses most of the first day's free-tier embedding allowance; a shopper's
+   ingredient names, paced to Gemini's free tier (100 embedding texts a minute, so about six
+   minutes the first time), which uses most of the first day's allowance of 1,000; a shopper's
    imports that day may fall back to word matching for names not yet cached, and `/pantry/api/health`
-   shows the allowance under `matching.cache.budget`. The next deploy carries on where it stopped.
+   shows the allowance under `matching.cache.budget`. The next deploy carries on where it stopped
+   (what is cached costs nothing again).
 4. Open `https://<pantry-web address>/pantry/` and sign in with the login from step 2.
 
 ## Google Calendar sync (optional)
@@ -91,10 +93,14 @@ pantry-api's `docs/meal-planning.md`, "Describing names no seed knows"). No self
 - **The embedder check:** pantry-api uses Gemini's vectors only if they reproduce the seeds'
   (`embedder_matches_seeds` in `/pantry/api/health`). If Google changes the model under the same
   name, recipe names fall back to word matching, and the health check says why.
-- **Free-tier allowance:** the matcher stops calling Gemini once the day's allowance is spent
-  (`matching.cache.budget` in the health check) and resumes at 00:00 UTC. Cached names are never
-  affected. To lift the limit, enable billing on the Gemini key and raise
-  `MATCHING_DAILY_EMBED_TEXTS` (Gemini's embedding price is $0.15 per million tokens).
+- **Free-tier allowance:** Gemini counts every text of an embedding request, refused attempts
+  included: 100 a minute and 1,000 a day on the free tier, the day resetting at 08:00 UTC
+  (midnight Pacific). The matcher paces requests to `MATCHING_EMBED_TEXTS_PER_MINUTE` (100),
+  stops calling Gemini once the day's own allowance is spent (`matching.cache.budget` in the
+  health check, counted per UTC day) and never retries a refusal that names the day's quota.
+  Cached names are never affected. To lift the limit, enable billing on the Gemini key and raise
+  `MATCHING_DAILY_EMBED_TEXTS` and `MATCHING_EMBED_TEXTS_PER_MINUTE` (0 = unpaced; Gemini's
+  embedding price is $0.15 per million tokens).
 - **Demo origin evidence:** `LOAD_DEMO_ORIGINS=1` loads `demo-hub/data`'s label readings on every
   deploy (idempotent), so the origin rules have something to act on. Set it to `0` once real
   evidence is ingested.
