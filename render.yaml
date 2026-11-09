@@ -1,17 +1,23 @@
 # Render Blueprint: the whole app, privately, and the free public demo.
 #
-# Private app (behind a login, live Gemini, Postgres, the hub), built from this
-# repo's pinned submodules, so a deploy is always the known-good set the verify workflow checked:
+# Private app (behind a login, live Gemini, Postgres), built from this repo's pinned submodules,
+# so a deploy is always the known-good set the verify workflow checked:
 #
 #   browser ─▶ pantry-web (nginx, login) ─┬─ /pantry/      the console
-#                                         ├─ /pantry/api/ ─▶ pantry-api ─▶ pantry-db (Postgres)
-#                                         └─ /hub/        ─▶ pantry-hub  ─▶ pantry-api (MCP)
+#                                         ├─ /pantry/api/ ─▶ pantry-app :8000  pantry-api ─▶ pantry-db (Postgres)
+#                                         └─ /hub/        ─▶ pantry-app :8090  the demo hub ─▶ pantry-api (MCP)
+#                                                                       └─▶ Gemini (plans, describing and
+#                                                                            embedding ingredient names)
+#
+# pantry-app is one private service running pantry-api and the demo hub (deploy/app.Dockerfile,
+# deploy/run-app.sh): the two fit a Starter instance together (about 270 MB at rest) and the
+# hub's disk rides along, so the stack is three paid pieces, not four.
 #
 # Every push to main redeploys the private stack unless it only touched docs, the public demo or
-# scripts (buildFilter ignoredPaths); moving a submodule pin is a deploy.
-# pantry-api's pre-deploy step applies pantry-db's migrations and seed (deploy/migrate.py), the
-# demo origin evidence, and fills the matching cache with common ingredient names. Values marked sync: false are entered in the dashboard on the first
-# deploy and never stored here. Setup steps: docs/render.md.
+# scripts (buildFilter ignoredPaths); moving a submodule pin is a deploy. pantry-app's pre-deploy
+# step applies pantry-db's migrations and seed (deploy/migrate.py), the demo origin evidence, and
+# fills the matching cache with common ingredient names. Values marked sync: false are entered in
+# the dashboard on the first deploy and never stored here. Setup steps: docs/render.md.
 #
 # Public demo (pantry-planner-demo): one free container in DEMO_MODE, as before.
 
@@ -41,10 +47,8 @@ services:
         - scripts/**
         - .github/**
     envVars:
-      - key: API_UPSTREAM
-        fromService: {type: pserv, name: pantry-api, property: hostport}
-      - key: HUB_UPSTREAM
-        fromService: {type: pserv, name: pantry-hub, property: hostport}
+      - key: APP_HOST
+        fromService: {type: pserv, name: pantry-app, property: host}
       - key: REQUIRE_AUTH
         value: "1"
       - key: BASIC_AUTH_USER
@@ -53,13 +57,17 @@ services:
         sync: false
 
   - type: pserv
-    name: pantry-api
+    name: pantry-app
     runtime: docker
     plan: starter
     region: oregon
-    dockerfilePath: ./deploy/api.Dockerfile
+    dockerfilePath: ./deploy/app.Dockerfile
     dockerContext: .
     preDeployCommand: /predeploy.sh
+    disk:
+      name: hub-data
+      mountPath: /var/data
+      sizeGB: 1
     autoDeploy: true
     buildFilter:
       ignoredPaths:
@@ -109,31 +117,7 @@ services:
         value: "1"
       - key: MCP_AUTH_TOKENS
         sync: false
-
-  - type: pserv
-    name: pantry-hub
-    runtime: docker
-    plan: starter
-    region: oregon
-    dockerfilePath: ./deploy/hub.Dockerfile
-    dockerContext: .
-    autoDeploy: true
-    buildFilter:
-      ignoredPaths:
-        - "**/*.md"
-        - docs/**
-        - demo/**
-        - scripts/**
-        - .github/**
-    disk:
-      name: hub-data
-      mountPath: /var/data
-      sizeGB: 1
-    envVars:
-      - key: PANTRY_API_HOSTPORT
-        fromService: {type: pserv, name: pantry-api, property: hostport}
-      - key: GEMINI_API_KEY
-        sync: false
+      # The demo hub, in the same container (docs/google-calendar.md for the Calendar part).
       - key: PANTRY_MCP_TOKEN
         sync: false
       # The public address of pantry-web (or your domain), e.g. pantry-web.onrender.com:

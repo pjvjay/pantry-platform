@@ -13,7 +13,7 @@ COPY deploy/web/default.conf.template /etc/nginx/templates/default.conf.template
 COPY deploy/web/40-pantry-auth.sh /docker-entrypoint.d/40-pantry-auth.sh
 COPY --from=build /app/dist /usr/share/nginx/html
 # Only these variables are substituted, so nginx's own $host and friends stay as they are.
-ENV PORT=10000 API_UPSTREAM=pantry-api:8000 HUB_UPSTREAM=pantry-hub:8090 \
-    NGINX_ENVSUBST_FILTER="^(PORT|API_UPSTREAM|HUB_UPSTREAM)$"
+ENV PORT=10000 APP_HOST=pantry-app \
+    NGINX_ENVSUBST_FILTER="^(PORT|APP_HOST)$"
 RUN rm -f /etc/nginx/conf.d/default.conf
 EXPOSE 10000
