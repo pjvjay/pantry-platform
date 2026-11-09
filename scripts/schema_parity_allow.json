@@ -122,7 +122,8 @@
         "table nutrient_amounts: check nutrient = ANY (ARRAY['energy_kcal', 'protein_g', 'fat_g', 'satfat_g', 'carbohydrate_g', 'fibre_g', 'sugars_g', 'sodium_mg']): only in mig",
         "table nutrient_amounts: check per_100g >= 0::double precision: only in mig",
         "table nutrient_measures: check grams > 0::double precision: only in mig",
-        "table nutrient_measures: check volume_ml IS NULL OR volume_ml > 0::double precision: only in mig"
+        "table nutrient_measures: check volume_ml IS NULL OR volume_ml > 0::double precision: only in mig",
+        "table ingredient_identities: check status = ANY (ARRAY['auto', 'reviewed', 'overridden']): only in mig"
       ]
     }
   ]
