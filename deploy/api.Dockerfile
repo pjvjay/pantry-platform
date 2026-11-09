@@ -7,6 +7,7 @@ WORKDIR /app
 COPY pantry-api/pyproject.toml pantry-api/README.md ./
 COPY pantry-api/pantry_planner/ ./pantry_planner/
 COPY pantry-api/seeds/ ./seeds/
+COPY pantry-api/scripts/prefill_matching.py ./scripts/prefill_matching.py
 RUN pip install --no-cache-dir -e .
 
 COPY pantry-db/migrations/ /migrations/

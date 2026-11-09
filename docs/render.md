@@ -7,21 +7,23 @@ redeploys the private stack; changes to docs, `demo/`, `scripts/` or `.github/` 
 ```
 browser ─▶ pantry-web (nginx, login) ─┬─ /pantry/      the console (pantry-frontend's build)
                                       ├─ /pantry/api/ ─▶ pantry-api ─▶ pantry-db (Postgres 17)
-                                      │                      └──────▶ pantry-embedder (Ollama)
+                                      │                      └──────▶ Gemini (plans, matching)
                                       └─ /hub/        ─▶ pantry-hub  ─▶ pantry-api (MCP)
 ```
 
 | Service | Type | Plan | Monthly | Notes |
 |---|---|---|---|---|
 | pantry-web | web | starter | $7 | The only public service. Login (HTTP basic auth) on everything but `/healthz`. |
-| pantry-api | private | starter | $7 | Pre-deploy: pantry-db's migrations and seed, then the demo origin evidence. |
+| pantry-api | private | starter | $7 | Pre-deploy: pantry-db's migrations and seed, the demo origin evidence, and the matching cache for common ingredient names. |
 | pantry-hub | private | starter | $7 + 1 GB disk | Assistant, Google Calendar sync, address search, maps, pictures. |
-| pantry-embedder | private | standard | $25 + 2 GB disk | Ollama with EmbeddingGemma, for recipe names the seeds don't know. |
 | pantry-db | Postgres 17 | basic-256mb | $6 | |
 | pantry-planner-demo | web | free | $0 | Public demo: one container in demo mode, no hub. |
 
-About $53 a month for the private app (Render's prices on 2026-11-08; disks are $0.25 per GB).
-Leaving out the embedder saves $25: recipe names the seeds don't know are then matched by words.
+About $27 a month for the private app (Render's prices on 2026-11-08; disks are $0.25 per GB).
+Recipe names the seeds don't know are identified by Gemini Flash-Lite and embedded with
+Gemini's embedding API, both on the same key as the planner, cached in Postgres, and kept
+within the free tier's daily allowance (900 embedding texts, 200 describer calls a day; see
+pantry-api's `docs/meal-planning.md`, "Describing names no seed knows"). No self-hosted model.
 
 ## Before the first deploy
 
@@ -55,8 +57,10 @@ Leaving out the embedder saves $25: recipe names the seeds don't know are then m
    pantry-web's address appears once the blueprint creates it. If it is not
    `pantry-web.onrender.com`, update the two hub values to match and redeploy pantry-hub.
 3. **Apply.** Render creates the database, builds the images, runs pantry-api's pre-deploy step
-   and starts everything. The embedder downloads its model on the first start (about 600 MB) and
-   keeps it on its disk; until it has, `/pantry/api/health` says `unknown_names: "words"`.
+   and starts everything. The pre-deploy step also fills the matching cache with 511 common
+   ingredient names, which uses most of the first day's free-tier embedding allowance; a shopper's
+   imports that day may fall back to word matching for names not yet cached, and `/pantry/api/health`
+   shows the allowance under `matching.cache.budget`. The next deploy carries on where it stopped.
 4. Open `https://<pantry-web address>/pantry/` and sign in with the login from step 2.
 
 ## Google Calendar sync (optional)
@@ -74,14 +78,17 @@ Leaving out the embedder saves $25: recipe names the seeds don't know are then m
   workflow checks the new set (pins on `main`, shared seeds, schema parity, hub tests) before you
   merge, and Render deploys it after.
 - **Roll back:** revert the pin-move commit, or use **Rollback** on a service in Render.
-- **Downtime:** pantry-hub and pantry-embedder have disks, so a deploy stops the old instance before
-  the new one starts: a few seconds. pantry-web and pantry-api deploy with no downtime.
+- **Downtime:** pantry-hub has a disk, so a deploy stops the old instance before the new one
+  starts: a few seconds. pantry-web and pantry-api deploy with no downtime.
 - **Not kept between deploys:** pantry-api's embedding cache and its Options log
   (`matching/events.jsonl`). Both are rebuilt or restarted on each deploy.
-- **The embedder check:** pantry-api uses the embedder only if it reproduces the seeds' vectors
-  (`embedder_matches_seeds` in `/pantry/api/health`). If Render's EmbeddingGemma build differs
-  from the one the seeds were made with, recipe names fall back to word matching, and the health
-  check says why.
+- **The embedder check:** pantry-api uses Gemini's vectors only if they reproduce the seeds'
+  (`embedder_matches_seeds` in `/pantry/api/health`). If Google changes the model under the same
+  name, recipe names fall back to word matching, and the health check says why.
+- **Free-tier allowance:** the matcher stops calling Gemini once the day's allowance is spent
+  (`matching.cache.budget` in the health check) and resumes at 00:00 UTC. Cached names are never
+  affected. To lift the limit, enable billing on the Gemini key and raise
+  `MATCHING_DAILY_EMBED_TEXTS` (Gemini's embedding price is $0.15 per million tokens).
 - **Demo origin evidence:** `LOAD_DEMO_ORIGINS=1` loads `demo-hub/data`'s label readings on every
   deploy (idempotent), so the origin rules have something to act on. Set it to `0` once real
   evidence is ingested.
@@ -95,5 +102,4 @@ Leaving out the embedder saves $25: recipe names the seeds don't know are then m
   - the login works, and `/healthz` stays open;
   - the console, API, hub and wizard work through nginx;
   - the hub's guard still refuses foreign origins and requests without the console header;
-  - the embedder keeps serving while its model download retries.
 - `deploy/migrate.py` builds the same schema and data as pantry-db's own runner.
