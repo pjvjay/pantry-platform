@@ -89,7 +89,9 @@ pantry-api's `docs/meal-planning.md`, "Describing names no seed knows"). No self
 - **Downtime:** pantry-app has a disk, so a deploy stops the old instance before the new one
   starts: a few seconds for the API and the hub. pantry-web deploys with no downtime.
 - **Two ports, one service:** pantry-web reaches the API on `pantry-app:8000` and the hub on
-  `pantry-app:8090` over the private network. Should Render ever route only one port of a private
+  `pantry-app:8090` over the private network, looking the hostname up again every 10 s
+  (`resolver` in `deploy/web/default.conf.template`): a pantry-app redeploy moves it to a new
+  address, and nginx would otherwise keep the old one until restarted. Should Render ever route only one port of a private
   service, the fallback is a small nginx inside pantry-app on one port, routing by path.
 - **Not kept between deploys:** pantry-api's embedding cache and its Options log
   (`matching/events.jsonl`). Both are rebuilt or restarted on each deploy.
