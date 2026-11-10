@@ -78,9 +78,13 @@ def test_status_reports_every_service(upstream: list[httpx.Request]) -> None:
     assert services["ollama"]["models"] == ["command-r7b:latest"]
     assert services["mcp-sim"]["skill"] == "/skills/local"
     assert body["keys"] == {"gemini": True, "pantry_token": True, "contextforge_jwt": True,
-                            "youtube": False}
+                            "youtube": False, "google_calendar_client": False,
+                            "google_calendar_connected": False}
     cf_lists = [r for r in upstream if r.url.path == "/servers"]
     assert cf_lists[0].headers["authorization"] == "Bearer jwt"
+    assert body["geocoder"] is True                  # address search is on unless GEOCODER_URL=""
+    off = Settings(**{**SETTINGS.__dict__, "geocoder_url": ""})
+    assert make_client(off).get("/hub/status").json()["geocoder"] is False
 
 
 def test_the_pantry_proxy_forwards_method_path_query_and_body(upstream: list[httpx.Request]) -> None:

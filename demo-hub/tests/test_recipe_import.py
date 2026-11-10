@@ -14,7 +14,7 @@ import pytest
 
 from demo_hub.recipe_import import Importer, ImportFailure, import_note, needs_of
 from demo_hub.recipe_import.description import ingredient_lines, recipe_links
-from demo_hub.recipe_import.web import RecipeDoc
+from demo_hub.recipe_import.web import RecipeDoc, RecipeSource, preview_image
 from demo_hub.recipe_import.youtube import duration_seconds, video_id
 from tests.import_fakes import (
     REAL_EXTRACTOR,
@@ -87,6 +87,9 @@ def test_a_microdata_page(tmp_path: Path) -> None:
 
 
 FIXTURES = REAL_EXTRACTOR.parents[3] / "tests" / "fixtures" / "recipe_pages"
+# the WordPress page's Recipe has no image, so its og:image; the card's microdata Recipe has one
+FIXTURE_IMAGES = {"wordpress_graph.html": "https://example.com/wp-content/uploads/shrimp.jpg",
+                  "microdata_card.html": "https://example.org/images/cornbread.jpg"}
 
 
 @real_extractor
@@ -111,6 +114,7 @@ def test_pantrys_synthetic_recipe_pages_import_as_the_extractor_reads_them(
         assert result["doc"]["title"] == want["name"], name
         assert [ln["text"] for ln in result["doc"]["lines"]] == want["ingredients"][:60], name
         assert result["doc"]["source"]["extractor"].startswith("extract_recipe.py "), name
+        assert result["doc"]["source"]["image_url"] == FIXTURE_IMAGES.get(name), name
 
 
 @real_extractor
@@ -201,6 +205,114 @@ def test_needs() -> None:
     assert needs_of(None) == "choose_method"
 
 
+# --- the page's preview image --------------------------------------------------------------------
+
+IMG = "https://blog.example/img/dal.jpg"
+OG = "https://blog.example/og/dal.jpg"
+
+
+def jsonld_page(*nodes: dict[str, Any], og: str | None = OG) -> str:
+    meta = f'<meta property="og:image" content="{og}">' if og is not None else ""
+    blocks = "".join(f'<script type="application/ld+json">{json.dumps(n)}</script>'
+                     for n in nodes)
+    return f"<html><head><title>Dal</title>{meta}</head><body>{blocks}</body></html>"
+
+
+def dal(**extra: Any) -> dict[str, Any]:
+    return {"@context": "https://schema.org", "@type": "Recipe", "name": "Dal",
+            "recipeIngredient": DAL, **extra}
+
+
+@pytest.mark.parametrize(("image", "want"), [
+    (IMG, IMG),
+    ([IMG, "https://blog.example/img/dal-4x3.jpg"], IMG),
+    (["/img/dal.jpg", "//cdn.example/dal.jpg", IMG], IMG),            # absolute http(s) only
+    ({"@type": "ImageObject", "url": IMG, "width": 1200}, IMG),
+    ({"@type": "ImageObject", "contentUrl": IMG}, IMG),
+    ([{"@type": "ImageObject", "url": IMG}, "https://blog.example/other.jpg"], IMG),
+    ("  " + IMG + "  ", IMG),
+    ("data:image/png;base64,iVBORw0KGgo=", OG),                       # not a link: og:image
+    ("javascript:alert(1)", OG),
+    ("https://blog.example/" + "x" * 2000, OG),                       # past pantry's 2,000
+    ("https://blog.example/a b.jpg", OG),
+    (None, OG),
+    ({"@type": "ImageObject"}, OG),
+])
+def test_a_recipes_image_is_its_preview_else_the_pages_og_image(image: Any, want: str) -> None:
+    node = dal() if image is None else dal(image=image)
+    assert preview_image(jsonld_page(node), "jsonld") == want
+
+
+def test_an_image_named_by_id_in_a_graph_is_followed() -> None:
+    graph = {"@context": "https://schema.org", "@graph": [
+        {"@type": "WebPage", "@id": "https://blog.example/dal/#webpage",
+         "primaryImageOfPage": {"@id": "https://blog.example/dal/#primaryimage"}},
+        {"@type": "ImageObject", "@id": "https://blog.example/dal/#primaryimage", "url": IMG},
+        {**dal(image={"@id": "https://blog.example/dal/#primaryimage"}),
+         "@type": ["Recipe", "NewsArticle"]}]}
+    assert preview_image(jsonld_page(graph, og=None), "jsonld") == IMG
+
+
+def test_the_image_is_the_recipe_the_extractor_read_and_never_another_items() -> None:
+    """The first Recipe with ingredient lines, as the extractor reads it; an author's photo, a
+    page's logo, a Recipe without lines are not its image."""
+    page = jsonld_page(
+        {"@type": "Organization", "logo": "https://blog.example/logo.png",
+         "image": "https://blog.example/logo.png"},
+        {"@type": "Recipe", "name": "Teaser", "image": "https://blog.example/teaser.jpg"},
+        dal(image=IMG, author={"@type": "Person", "image": "https://blog.example/me.jpg"}))
+    assert preview_image(page, "jsonld") == IMG
+    # unreadable JSON-LD, or none with ingredient lines: the og:image, or nothing
+    broken = (f"<html><head><meta name='og:image' content='{OG}'></head><body>"
+              '<script type="application/ld+json">{"@type": "Recipe", </script></body></html>')
+    assert preview_image(broken, "jsonld") == OG
+    assert preview_image(jsonld_page(dal(), og="/og/dal.jpg"), "jsonld") is None
+    assert preview_image("<html><body><p>Hello</p></body></html>", "jsonld") is None
+
+
+def test_a_microdata_recipes_image_is_its_own_and_not_its_authors() -> None:
+    page = (f'<html><head><meta property="og:image" content="{OG}"></head><body>'
+            '<div itemscope itemtype="https://schema.org/Recipe"><h1 itemprop="name">Toast</h1>'
+            '<p>By <span itemprop="author" itemscope itemtype="https://schema.org/Person">'
+            '<img itemprop="image" src="https://blog.example/me.jpg"></span></p>'
+            f'<img itemprop="image" src="{IMG}"><ul>'
+            '<li itemprop="recipeIngredient">2 slices bread</li></ul></div></body></html>')
+    assert preview_image(page, "microdata") == IMG
+    meta = page.replace(f'<img itemprop="image" src="{IMG}">',
+                        f'<meta itemprop="image" content="{IMG}">')
+    assert preview_image(meta, "microdata") == IMG
+    without = page.replace(f'<img itemprop="image" src="{IMG}">', "")
+    assert preview_image(without, "microdata") == OG          # the author's photo is not it
+    outside = ('<html><body><img itemprop="image" src="https://blog.example/ad.jpg">'
+               '<div itemscope itemtype="https://schema.org/Recipe"></div></body></html>')
+    assert preview_image(outside, "microdata") is None
+
+
+def test_a_sources_image_url_is_checked_as_pantry_checks_it() -> None:
+    def source(url: str) -> RecipeSource:
+        return RecipeSource(kind="web", method="jsonld", image_url=url)
+
+    assert source(IMG).image_url == IMG and RecipeSource(kind="web", method="jsonld").image_url \
+        is None
+    for bad in ("/img/dal.jpg", "ftp://blog.example/dal.jpg", "javascript:alert(1)", " " + IMG,
+                "https://", "https://blog.example/" + "x" * 2000):
+        with pytest.raises(ValueError, match="image_url"):
+            source(bad)
+
+
+def test_an_imported_page_keeps_its_preview_image_as_a_link_and_never_fetches_it(
+        tmp_path: Path) -> None:
+    net = Net()
+    net.serve("https://blog.example/dal", jsonld_page(dal(image=IMG, recipeYield="4")))
+    result = run(make_importer(tmp_path, net), "https://blog.example/dal")
+    assert result["doc"]["source"]["image_url"] == IMG
+    assert RecipeDoc.model_validate(result["doc"]).source.image_url == IMG
+    assert [r.url.path for r in net.requests if r.url.path.endswith(".jpg")] == []
+    net.serve("https://blog.example/plain", jsonld_page(dal(recipeYield="4"), og=None))
+    assert run(make_importer(tmp_path, net), "https://blog.example/plain")["doc"]["source"][
+        "image_url"] is None
+
+
 # --- YouTube --------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("url", [
@@ -259,6 +371,8 @@ def test_a_description_with_a_list_becomes_a_doc(tmp_path: Path) -> None:
     assert result["linked_pages"] == [{"url": "https://homecook.example/recipes/weeknight-dal",
                                        "site": "homecook.example"}]
     assert result["video"]["duration_s"] == 750 and result["video"]["description_read"]
+    assert doc["source"]["image_url"] == f"https://i.ytimg.com/vi/{VID}/hqdefault.jpg"
+    assert all(r.url.host != "i.ytimg.com" for r in net.requests)     # a link, never fetched
     api = next(r for r in net.requests if r.url.host == "www.googleapis.com")
     assert api.headers["x-goog-api-key"] == "yt-key" and "yt-key" not in str(api.url)
     # the description itself is not in the result: only its lines and links
@@ -268,6 +382,7 @@ def test_a_description_with_a_list_becomes_a_doc(tmp_path: Path) -> None:
     linked = run(importer, "https://homecook.example/recipes/weeknight-dal")
     assert linked["method"] == "youtube_linked_page"
     assert linked["doc"]["source"]["channel"] == "Home Cook"
+    assert linked["doc"]["source"]["image_url"] is None            # the page's, not the video's
 
 
 def test_a_method_in_numbered_steps_is_not_imported_as_ingredients(tmp_path: Path) -> None:

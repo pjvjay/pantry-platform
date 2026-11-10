@@ -154,6 +154,53 @@ a change in the tools makes the model read everything after it again:
 The same table-by-code answer and shorter instructions apply to Gemini (fewer output tokens per
 answer, so a lower cost); Gemini was not run again for this.
 
+## Meal plans from one sentence (P8)
+
+*Measured 2026-10-09 on the same laptop (Intel Core i7-1068NG7, 32 GB, no GPU), Ollama 0.40.2,
+Granite 4.2 8B with thinking off, through the direct pantry MCP server, progressive disclosure,
+pantry in demo mode. 3 runs per round (`--repeat 3`), each after a warm-up, as the Assistant warms
+up while the shopper types. Gemini was not benched: it is a paid API and needs the user's OK.*
+
+The case is the user's sentence, "3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken briyani +
+7 mango milkshakes in 2 weeks" (`bench.py`, `meal-plan-fortnight`). The hub reads it with
+pantry's Quick add parse before the model and tells the model in a `[meals]` note; a run passes
+when the draft places 3 Pepperoni Pizza, 2 Chicken Fried Rice and 7 Mango Milkshake and only
+proposes Chicken Biryani.
+
+| Round | Runs passed | Tool-argument error rate | Time to first token, first call (median) | Total per run (median, range) | First call's prompt |
+|---|---|---|---|---|---|
+| plan_meals as first built | 3/3 | 0 of 3 | 160.4 s | 402.5 s (322-456 s) | 4,148 tokens |
+| hidden arguments' types left out of the schema | 3/3 | 0 of 3 | 31.8 s | 175.7 s (175-177 s) | 1,910 tokens |
+
+- **Tool-argument errors**: none. An error is malformed `dishes` (not a list of `{recipe,
+  count}`), another plan tool called instead of `plan_meals`, or a call pantry refused. In all 6
+  runs Granite called `plan_meals` itself with dishes it wrote, titles or slugs
+  (`pepperoni_pizza`, `Pepperoni Pizza`), and pantry received 3/2/7 of the three exact and
+  plural dishes, `days` 14 and Chicken Biryani as a proposal. It never sent the empty dishes the
+  instructions ask for, so its own were used. These runs kept what the hub sent, not what the
+  model wrote, so whether it also named Chicken Biryani (which the hub moves to the proposals,
+  listing the difference) is not recorded; in the live check it did. The bench now keeps the
+  model's own arguments (`plan_calls` in runs.jsonl). The hub never had to draft the plan itself.
+- **What made it faster**: the first round's first call read 4,148 tokens although the warm-up
+  had read the instructions. `plan_meals`' hidden arguments (`current`, `my_recipe_docs`,
+  `proposed`) were taken out of the schema the model sees, but the types they use (a RecipeDoc,
+  a meal plan and their parts) stayed in its `$defs`: 8,780 characters of tool definition for two
+  arguments. `_plan_tools` now keeps only the `$defs` a shown argument reaches (1,590 characters),
+  and the first token came 5x sooner. The machine was not throttled during the second round
+  (`pmset -g therm`: CPU speed limit 100); the first round ran right after the test suite and
+  wrote at 2.0 tokens/s against 3.6, so part of the total's drop is the CPU's, not the change's.
+- **Steps**: 2 of the first 3 runs and all 3 of the second called `list_recipes` first, a step of
+  about 35 s on a warm cache that the `[meals]` note makes unnecessary.
+- Live, in the console (the same sentence, first round's schema, the suite running alongside):
+  680 s, 3 steps, 7 of 7 online checks passed, including `no_invented_shelf_life`.
+
+Reproduce (pantry-api in demo mode on `PANTRY_API_URL`):
+
+```bash
+DEMO_OBSERVER_MODEL= .venv/bin/python -m demo_hub.bench --model 'ollama:granite4.2:8b#think=false' \
+  --case meal-plan-fortnight --repeat 3 --profile full --disclosure progressive --target pantry --warm
+```
+
 ## Reproduce
 
 ```bash

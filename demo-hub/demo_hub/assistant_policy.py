@@ -170,6 +170,36 @@ week_planner.when(
     id="several_meals") \
     .enable_tools("plan_week")
 
+# Counted dishes over one or two weeks: "3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken
+# briyani + 7 mango milkshakes in 2 weeks". Two or more counted items joined by +, a comma or
+# "and"; or a period of weeks ("in 2 weeks", "a fortnight", "10 days"); or "meal plan for".
+# "plan 5 dinners under $60" is one count and no period: week_planner's, not this one's. When it
+# holds, the hub reads the dishes with pantry's Quick add parse before the model (meal_plans.py).
+_COUNT = (r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen"
+          r"|twenty)")
+_COUNTED = rf"{_COUNT}\s*[x×]?\s*[a-z][\w'’ -]{{1,40}}?"
+MEAL_REQUEST = re.compile(
+    rf"\b{_COUNTED}\s*(?:\+|,|&|\band\b)\s*{_COUNT}\s*[x×]?\s*[a-z]"
+    rf"|\b(?:in|for|over|across|within)\s+(?:the\s+)?(?:next\s+)?(?:{_COUNT}|a|a couple of)"
+    r"\s+weeks?\b"
+    r"|\bfortnight\b|\b(?:1[0-4]|[89])\s+days\b|\bmeal plan for\b",
+    re.IGNORECASE)
+
+
+def wants_meal_plan(view: View) -> CheckResult:
+    """The shopper's newest message names counted dishes, or a period of one or two weeks."""
+    text = view.user_messages[-1] if view.user_messages else ""
+    if not text:
+        return None, "no message yet"
+    m = MEAL_REQUEST.search(text)
+    return (True, f"said {m.group(0).strip()[:60]!r}") if m else (False, "no counted dishes")
+
+
+meal_planner = Observer("meal_planner", "Hears counted dishes for one or two weeks of meals.")
+meal_planner.when("the shopper names counted dishes, or one or two weeks of meals",
+                  check=wants_meal_plan, id="counted_dishes") \
+    .enable_tools("plan_meals", "list_recipes")
+
 shelf_clerk = Observer("shelf_clerk", "Reads find_product's results and nothing else.",
                        on="tool_result")
 
@@ -218,14 +248,16 @@ compliance_officer.when("the shopper asks for help with something that would vio
                         "Canadian law (buying alcohol or tobacco for a minor, reselling recalled "
                         "food, mislabelling a product's origin, dodging import rules)",
                         id="unlawful_request") \
-    .disable_tools("plan_recipe", "plan_from_text", "plan_week", "submit_origin_evidence") \
+    .disable_tools("plan_recipe", "plan_from_text", "plan_week", "plan_meals",
+                   "submit_origin_evidence") \
     .enable_goal("Decline the unlawful part plainly, without lecturing, and help with whatever "
                  "is lawful.")
 
 POLICY = Policy(
     initial=["list_recipes", "find_product"],
-    observers=[link_reader, recipe_reader, menu_clerk, origin_desk, week_planner, shelf_clerk,
-               ops_desk, origin_listener, label_desk, diet_watch, tone_watch, compliance_officer],
+    observers=[link_reader, recipe_reader, menu_clerk, origin_desk, week_planner, meal_planner,
+               shelf_clerk, ops_desk, origin_listener, label_desk, diet_watch, tone_watch,
+               compliance_officer],
     # The cart's follow-ups to a plan: the hub calls them for the shopper's Options dialog and
     # "Use this", on the plan's basis, which the model never holds.
     hidden=["rank_alternatives", "reprice_plan"],

@@ -17,7 +17,7 @@ Then open **http://127.0.0.1:8090/pantry/**. Stop with `scripts/down.sh`; check 
 |---|---|---|
 | **Overview** | Architecture diagram and a 7-step guided tour | — |
 | **Planner** | Plan a pasted recipe (location, distance limit, partial plans, origin prefer/exclude), a week of dinners (budget, diet tags) or a library recipe (priced at stores near the chosen location, with a trip split). Shows the parsed lines, the per-step SQL query plan, the store split, coverage, and what could not be bought | pantry REST `/plan/nl`, `/plan/week`, `/plan/{slug}` |
-| **Assistant** | Chat with a grocery agent that plans by calling MCP tools; every call and result is shown live. Paste a recipe link or a YouTube link and the hub reads its ingredient lines before the model does; the model plans exactly those lines by their key, and pages the hub cannot read go through the gateway's fetch tool as before ([docs/recipe-import.md](docs/recipe-import.md)). Click a product in a plan's cart for its ranked alternatives, and swap it: the cart re-prices with no model call and the agent hears of it next turn ([docs/cart-alternatives.md](docs/cart-alternatives.md)) | hub agent loop (Gemini, or Ollama), MCP via ContextForge `pantry-recipes` (or direct pantry, or `pantry-sim`) |
+| **Assistant** | Chat with a grocery agent that plans by calling MCP tools; every call and result is shown live. Paste a recipe link or a YouTube link and the hub reads its ingredient lines before the model does; the model plans exactly those lines by their key, and pages the hub cannot read go through the gateway's fetch tool as before ([docs/recipe-import.md](docs/recipe-import.md)). Click a product in a plan's cart for its ranked alternatives, and swap it: the cart re-prices with no model call and the agent hears of it next turn ([docs/cart-alternatives.md](docs/cart-alternatives.md)). Ask for counted dishes over one or two weeks ("3 Pepperoni Pizza + 2 Chicken Fried Rice + 3 chicken briyani + 7 mango milkshakes in 2 weeks"): the hub reads the dishes in code, the model drafts the plan with `plan_meals` (or the hub does, when it makes no call), and the card applies it to the Meal plan in one undo step, with misspelt names asked about, never placed ([docs/meal-plans.md](docs/meal-plans.md)) | hub agent loop (Gemini, or Ollama), MCP via ContextForge `pantry-recipes` (or direct pantry, or `pantry-sim`) |
 | **Catalog** | The planner's own lookup (`find_product`, with direct/generic/relaxed match levels) and a product's store offers, origin and evidence | REST `/products`, MCP `find_product`, `get_product` |
 | **Provenance** | Coverage, label triage, submit a label reading (an MCP write), review queue (approve / reject), and the origin ranking changing live; one-click demo-data reset | MCP resource `pantry://origins/coverage`, tools `origin_triage`, `submit_origin_evidence`, `list_origin_submissions`, `review_origin_submission`; REST `/origins/rank` |
 | **MCP explorer** | All 15 tools (forms generated from their schemas, annotations shown), 4 resources + 1 template, 3 prompts — directly on pantry with a bearer token, anonymously (refused with 401), or through ContextForge's two virtual servers | hub `/hub/mcp/*` with the official MCP SDK |
@@ -30,9 +30,14 @@ Then open **http://127.0.0.1:8090/pantry/**. Stop with `scripts/down.sh`; check 
 browser ── :8090 demo hub ─┬─ /pantry/          the built pantry-frontend
                            ├─ /pantry/api/*     → pantry API :8000 (REST + /mcp)
                            ├─ /hub/mcp/*        → MCP: pantry :8000/mcp (bearer) | ContextForge :4444 virtual servers
-                           ├─ /hub/agent/chat   → agent loop: Gemini / Ollama  ⇄  MCP tools   (server-sent events)
+                           ├─ /hub/agent/chat   → agent loop: Gemini / Ollama  ⇄  MCP tools   (server-sent events);
+                           │                      body: message, recipe_doc, meal_plan (the console's plan, ≤ 64 KB);
+                           │                      counted dishes read first by pantry /mealplan/selection/parse
                            ├─ /hub/agent/conversations/{id}/alternatives, /swap → the cart: pantry :8000/mcp directly
                            ├─ /hub/sims/*       → mcp-sim runner :8765
+                           ├─ /hub/calendar/*   → Google Calendar sync (optional): connect, preview, apply
+                           ├─ /hub/geocode      → OpenStreetMap Nominatim (the Meal plan's "Where you shop")
+                           ├─ /hub/tiles/*      → OpenStreetMap tiles (the Meal plan's store map), cached on disk
                            └─ /hub/status       → every service's health
 ```
 
@@ -58,6 +63,91 @@ for you; a script adds `-H 'X-Pantry-Console: 1' -H 'Content-Type: application/j
 Options: `up.sh --reset` reseeds the demo data first; `up.sh --rebuild` rebuilds the frontend.
 Logs and pid files live in `~/.pantry-demo/`. A service up.sh reuses keeps its settings: stop it
 to apply new ones.
+
+## Google Calendar sync (optional)
+
+With an OAuth client you create in your own Google Cloud project, saved as
+`~/.pantry-secrets/google_oauth_client.json`, the Meal plan's **Add to calendar** dialog can
+keep a **Pantry plan** calendar in your Google account in step with the approved plan: every
+change previewed first, your edits in Google kept unless you choose Overwrite, no attendees and
+no invitations. Scope `calendar.app.created` only; the refresh token is a mode-600 file. Setup,
+the weekly reconnect while the app is in Testing, revoking, and the manual smoke test:
+[docs/google-calendar.md](docs/google-calendar.md).
+
+| Route | What |
+|---|---|
+| `GET /hub/calendar/status` | configured, connected, reconnect-by date (booleans and labels only) |
+| `POST /hub/calendar/connect` | Google's consent URL (PKCE, state bound to a cookie) |
+| `GET /hub/calendar/oauth/callback` | Google's redirect: stores the refresh token, back to the console |
+| `POST /hub/calendar/sync/preview` | the diff for an approved schedule, with optional times and reminders; writes nothing |
+| `POST /hub/calendar/sync/apply` | that exact diff, written (409 if anything changed since) |
+| `POST /hub/calendar/disconnect` | revoke, delete the token, optionally the calendar |
+
+## Address search
+
+The Meal plan's **Where you shop** takes an address. The console sends it to the hub
+(`GET /hub/geocode?q=<address>`, on submit, never as you type) and the hub asks
+[Nominatim](https://nominatim.org/), OpenStreetMap's public search, for up to five places:
+
+```json
+{"results": [{"label": "Vancouver Art Gallery, 750 Hornby Street, Vancouver",
+              "full": "Vancouver Art Gallery, 750, Hornby Street, Financial District, …, Canada",
+              "lat": 49.28, "lon": -123.12}],
+ "attribution": "© OpenStreetMap contributors", "source": "OpenStreetMap Nominatim"}
+```
+
+`full` is Nominatim's whole `display_name`. `label` is the short form for a list: the place's name
+when it has one (and it is not just the house number or the road), then the house number and
+road (or the road alone), then the city, town, village or municipality; a missing part is
+skipped, a repeat dropped, and with nothing left it is the first three parts of `full`.
+`results` is `[]` when nothing matches. Show the attribution wherever the places are shown.
+Refusals are `{detail: {code, message}}`: 400 `bad_query` (under 3 or over 200 characters),
+429 `rate_limited`, 502 `geocoder_unavailable` (an error, or no answer in 10 s), 503
+`geocoder_off`. `/hub/status` has `"geocoder": true|false`.
+
+**What is sent where.** Only the address text goes to `nominatim.openstreetmap.org` (over HTTPS,
+with `format=jsonv2&limit=5&addressdetails=1&accept-language=en`) and a User-Agent naming the app,
+`pantry-planner-demo-hub/1.0 (local demo)`: no email, no cookie, no location of yours. Nothing
+else leaves the machine for this. The hub keeps Nominatim's usage policy for you: one request a
+second for the whole process (searches queue for up to 3 s, then 429), a stop of a minute after
+Nominatim says 429, and answers kept in memory, 256 searches for 24 hours, under a hash of the
+query. The public service is for light use: for more, run your own and set `GEOCODER_URL`;
+`GEOCODER_URL=""` turns the route off (503, and `/hub/status` says `geocoder: false`).
+
+**The address is personal data.** It is not logged (the access log reads `?q=***` when the hub
+starts as `python -m demo_hub.app`, as `scripts/up.sh` does, and so does httpx's log of the
+request to Nominatim), not in the Assistant's traces, the metrics or the
+browser measures (a query is cut from a measured path), not in an error message, and not written
+to disk; the cache lives in memory and ends with the hub. The route answers with `no-store`.
+The tests check each of these and never call the real Nominatim.
+
+## Map tiles
+
+The Meal plan's store map draws OpenStreetMap's tiles through the hub
+(`GET /hub/tiles/{z}/{x}/{y}.png`), so the browser never calls a third party. **A map that shows
+them must show "© OpenStreetMap contributors", linked to
+<https://www.openstreetmap.org/copyright>**: the tile usage policy requires the credit, and the map
+data is under the Open Database License.
+
+The hub keeps [OpenStreetMap's tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
+for you (`demo_hub/tiles.py`):
+
+- a User-Agent naming the app, `pantry-planner-demo-hub/1.0 (local demo)` as for address search,
+  and nothing of yours: no cookie, no Referer, no address;
+- a disk cache in `DEMO_TILE_DIR` (default `~/.pantry-demo/tiles`, folders 0700, files 0600): a
+  tile is kept as long as the tile server's `Cache-Control` max-age (else its `Expires`) says, and
+  at least 7 days; then it is asked again with its ETag and Last-Modified (304 keeps it), and the
+  old copy is served while the server cannot be reached;
+- zoom 0 to 19, with x and y inside the zoom's grid (else 400);
+- at most 2 requests to the tile server at once, and one per tile however many ask for it;
+- only the tiles the map asks for: nothing is prefetched, nothing downloaded in bulk.
+
+Refusals are `{detail: {code, message}}`: 400 `bad_tile`, 404 `no_tile`, 502 `tiles_unavailable`
+(an error, an answer that is not an image, or none in 10 s, with no copy cached), 503
+`tiles_off`. `/hub/status` has `"tiles": true|false`. The public tile server is for light use: for
+more, use another tile server and set `TILES_URL` (with `{z}`, `{x}` and `{y}` in it);
+`TILES_URL=""` turns the route off. `scripts/up.sh` passes `TILES_URL` and `DEMO_TILE_DIR` to the
+hub. The tests use a fake tile server and never call OpenStreetMap.
 
 ## Demo data
 
@@ -205,7 +295,11 @@ time to paint. So a slow page shows up as the browser, the hub, the model, the g
 **Pictures**: plan tool calls show a card per purchase with the ingredient's photo (its Wikipedia
 thumbnail, `GET /hub/images/ingredient?name=`), where the trip buys it, the price, origin and
 confidence; a fetched recipe page shows the photos it holds (`GET /hub/images/remote?url=`,
-public http(s) hosts only, raster images up to 3 MB). The hub fetches each once and serves it from
+public http(s) hosts only, raster images up to 3 MB). The Meal plan's recipes show theirs: a demo
+recipe the lead image of the Wikipedia article pantry names for it (`GET /hub/images/wiki?title=`,
+320 px, that article only, never a search; 404 when it has none, 502 when Wikipedia does not
+answer), and an imported recipe its page's own preview image through the same remote route,
+credited to the site and linked back. The hub fetches each once and serves it from
 `~/.pantry-demo/images/`, so the browser never calls a third party.
 
 ContextForge records the gateway traces with `OBSERVABILITY_ENABLED=true` in its `.env`, but the
@@ -269,12 +363,16 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 318 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 600 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
 The tests cover the chat client (request shapes, retries, quota handling, every failure path),
 the agent loop (tool calls, failing tools, step budget, model fallback), the MCP client against a
-real MCP server over HTTP (catalog, calls, resources, prompts, 401), the runner client, and every
-HTTP route with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build`
-type-checks it); in dev, `npm run dev` proxies `/hub` to this hub on :8090.
+real MCP server over HTTP (catalog, calls, resources, prompts, 401), the runner client, the
+Google Calendar sync against a stateful fake Google (`tests/fake_google.py`: sign-in, conflicts,
+crash recovery, a lost ledger, rate limits, timed events and reminders), the address search against
+a fake Nominatim (its usage policy, and the address kept out of every log), the map tiles against a
+fake tile server (its usage policy and the disk cache), recipe pictures against a fake Wikipedia,
+and every HTTP route with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks
+it); in dev, `npm run dev` proxies `/hub` to this hub on :8090.

@@ -14,7 +14,11 @@ expectations, only the conversation's own tool results, so they run on every ans
 - import_grounded: a recipe the hub imported (or the shopper reviewed) this turn was planned
   exactly as reviewed: plan_from_lines, and every planned line's name, quantity and unit equal
   to the doc's (never plan_from_text, which re-reads the recipe and can change an amount); a
-  line pantry names as left out (water, a line past its cap) is not a dropped line.
+  line pantry names as left out (water, a line past its cap) is not a dropped line;
+- no_invented_shelf_life: every storage time the model's reply states ("keeps 3 days in the
+  fridge") is a figure a tool result of this turn holds; checked on every meal-plan turn;
+- grounded_nutrition: every kcal or protein figure in the model's reply is in a tool result,
+  and a reply quoting one for meals whose amounts are demo house amounts says "demo".
 
 ``answer_confidence`` is the share of applicable checks that passed. ``plan`` summarises the
 plan's own confidence: the selector's per-line confidence, how many lines matched the ingredient
@@ -28,10 +32,20 @@ from collections import Counter
 from collections.abc import Iterable
 from typing import Any
 
-from demo_hub.bench import COMMON, Check, Run
+from demo_hub.bench import COMMON, Check, Run, _numbers
 
 PLAN_TOOLS = ("plan_recipe", "plan_from_text", "plan_from_lines", "plan_week")
 TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
+# a sentence about how long food keeps, and the durations in it ("2 to 3 days", "3-4 days")
+STORAGE_WORDS = re.compile(r"\b(keeps?|kept|lasts?|fresh|fridge|refrigerat\w*|freez\w*|frozen"
+                           r"|thaw\w*|shelf|spoil\w*|storage|stored?|good for|use (it |them )?"
+                           r"within|use[- ]by)\b", re.IGNORECASE)
+DURATION = re.compile(r"(\d+(?:\.\d+)?)(?:\s*(?:-|–|to)\s*(\d+(?:\.\d+)?))?\s*"
+                      r"(hours?|days?|weeks?|months?|years?)\b", re.IGNORECASE)
+KCAL = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(?:kcal|k?cal(?:orie)?s?\b)", re.IGNORECASE)
+PROTEIN = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*g(?:rams?)?\s+(?:of\s+)?protein", re.IGNORECASE)
+MEAL_TOOLS = ("plan_meals",)
 
 
 def canonical(name: str) -> str:
@@ -175,6 +189,76 @@ def check_import_grounded(events: list[dict[str, Any]],
                  else detail)
 
 
+def reply_of(events: list[dict[str, Any]]) -> str:
+    """The model's own words in the turn's answer: its reply when the hub added tables (or a
+    card) after it, else the answer's text."""
+    for e in reversed(events):
+        if e.get("type") == "assistant":
+            return str(e.get("reply") if e.get("reply") is not None else e.get("text") or "")
+    return ""
+
+
+def _durations(text: str) -> list[tuple[str, str]]:
+    """(as written, normalised) for every duration in a sentence about keeping food."""
+    out = []
+    for sentence in SENTENCE.split(text):
+        if not STORAGE_WORDS.search(sentence):
+            continue
+        for m in DURATION.finditer(sentence):
+            unit = m.group(3).lower().rstrip("s")
+            span = f"{m.group(1)} to {m.group(2)}" if m.group(2) else m.group(1)
+            out.append((m.group(0), f"{span} {unit}"))
+    return out
+
+
+def _normalised_durations(text: str) -> set[str]:
+    return {f"{(f'{m.group(1)} to {m.group(2)}' if m.group(2) else m.group(1))} "
+            f"{m.group(3).lower().rstrip('s')}" for m in DURATION.finditer(text)}
+
+
+def check_no_invented_shelf_life(run: Run, reply: str | None = None) -> Check | None:
+    """Every storage time the reply states is one a tool result of this turn holds (pantry
+    cites them on trip lines and reasons): a "3 days in the fridge" no result has is invented.
+    Applies to a turn that planned meals, or whose reply states a storage time."""
+    said = _durations(run.answer if reply is None else reply)
+    meals = any(canonical(u.name) in MEAL_TOOLS for u in run.tool_uses)
+    if not said and not meals:
+        return None
+    seen = _normalised_durations(run.results_text().replace("\\u2013", "-"))
+    invented = sorted({raw for raw, norm in said if norm not in seen})
+    return Check("no_invented_shelf_life", not invented,
+                 f"storage times no tool result states: {invented}" if invented
+                 else f"{len(said)} storage time(s) stated, all from tool results" if said
+                 else "no storage time stated")
+
+
+def _figures(pattern: re.Pattern[str], text: str) -> list[tuple[str, float]]:
+    return [(m.group(0), float(m.group(1).replace(",", ""))) for m in pattern.finditer(text)]
+
+
+def check_grounded_nutrition(run: Run, reply: str | None = None) -> Check | None:
+    """Every kcal or protein figure in the reply is in a tool result of this turn (to the
+    nearest whole number), and a reply quoting one for meals whose amounts are demo house
+    amounts says "demo". Not applicable when the reply quotes no such figure."""
+    text = run.answer if reply is None else reply
+    quoted = _figures(KCAL, text) + _figures(PROTEIN, text)
+    if not quoted:
+        return None
+    seen_text = run.results_text()
+    seen = {round(n) for n in _numbers(seen_text)}
+    invented = [raw for raw, n in quoted if round(n) not in seen]
+    demo = '"demo_amounts": true' in seen_text or "demo amounts" in seen_text.lower()
+    problems = []
+    if invented:
+        problems.append(f"figures not in any tool result: {invented}")
+    if demo and "demo" not in text.lower():
+        problems.append("quotes nutrition for meals with demo house amounts without saying "
+                        "\"demo\"")
+    return Check("grounded_nutrition", not problems, "; ".join(problems) if problems
+                 else f"{len(quoted)} figure(s), all from tool results"
+                 + (", labelled demo" if demo else ""))
+
+
 def plan_confidence(run: Run) -> dict[str, Any] | None:
     """The last plan's own confidence: the selector's line confidence (min and mean), the share
     of lines matched exactly, and the origin coverage, when the plan has one."""
@@ -203,10 +287,13 @@ def evaluate(events: list[dict[str, Any]], stores: Iterable[str] = (),
     """Grade one answered turn from its events (and ``plans``, the hub's own record of this
     turn's plans with their basis lines, for import_grounded)."""
     run = Run.from_events(model, "online", 0, events)
+    reply = reply_of(events)
     checks: list[Check] = [check(run) for check in COMMON]
     checks.append(check_grounded_stores(run, stores))
     for optional in (check_plan_table(run), check_kept_location(run),
-                     check_import_grounded(events, plans)):
+                     check_import_grounded(events, plans),
+                     check_no_invented_shelf_life(run, reply),
+                     check_grounded_nutrition(run, reply)):
         if optional is not None:
             checks.append(optional)
     checks.append(check_no_scope_violation(events))
