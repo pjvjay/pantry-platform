@@ -6,6 +6,9 @@ server {
     listen ${PORT};
     server_name _;
     client_max_body_size 2m;
+    # Redirects as paths, never as absolute URLs: nginx listens on Render's internal port
+    # (10000), and an absolute Location would send the browser to http://host:10000/pantry/.
+    absolute_redirect off;
 
     # Render's health check: never behind the login.
     location = /healthz {
