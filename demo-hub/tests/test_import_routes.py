@@ -80,9 +80,9 @@ def test_a_video_import_is_a_trace_with_its_tokens_and_cost(tmp_path: Path) -> N
 
 def test_the_link_route_and_status(tmp_path: Path) -> None:
     net = Net()
-    net.serve("https://blog.example/dal?token=abc", recipe_page("Dal", ["200 g red lentils"]))
+    net.serve("https://blog.example/dal?token=QzT-secret", recipe_page("Dal", ["200 g red lentils"]))
     client, app = route_client(tmp_path, net)
-    r = client.post("/hub/recipes/import", json={"url": "https://blog.example/dal?token=abc"})
+    r = client.post("/hub/recipes/import", json={"url": "https://blog.example/dal?token=QzT-secret"})
     assert r.status_code == 200
     body = r.json()
     assert set(body) >= {"doc", "method", "linked_pages", "video", "needs", "warnings"}
@@ -90,7 +90,7 @@ def test_the_link_route_and_status(tmp_path: Path) -> None:
     stored = app.state.traces.get(app.state.traces.list(1)[0]["id"])
     assert stored["spans"][0]["attrs"]["url"] == "https://blog.example/dal"       # no query
     assert stored["spans"][0]["attrs"]["host"] == "blog.example"
-    assert "abc" not in json.dumps(stored)
+    assert "QzT-secret" not in json.dumps(stored)   # a token no hex id can contain by chance
     r = client.post("/hub/recipes/import", json={"url": "https://bob:s3cret@blog.example/dal"})
     assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_url"
     refused = app.state.traces.get(app.state.traces.list(1)[0]["id"])
