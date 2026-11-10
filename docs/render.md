@@ -57,8 +57,11 @@ pantry-api's `docs/meal-planning.md`, "Describing names no seed knows"). No self
    | pantry-app | `HUB_ALLOWED_HOSTS` | pantry-web's address without `https://`, e.g. `pantry-web.onrender.com` |
    | pantry-app | `HUB_OAUTH_ORIGINS` | the same with `https://`, e.g. `https://pantry-web.onrender.com` |
 
-   pantry-web's address appears once the blueprint creates it. If it is not
-   `pantry-web.onrender.com`, update the two `HUB_` values to match and redeploy pantry-app.
+   pantry-web's address appears once the blueprint creates it. Render adds a suffix to every
+   resource name of a blueprint (`pantry-web-rxyh`, `pantry-app-rxyh`, `pantry-db-rxyh`), so the
+   address is `pantry-web-<suffix>.onrender.com`: enter the two `HUB_` values with that exact
+   host (or enter them afterwards on pantry-app's Environment tab, which redeploys it). The
+   `APP_HOST` value in `render.yaml` carries pantry-app's suffixed name for the same reason.
 3. **Apply.** Render creates the database, builds the two images, runs pantry-app's pre-deploy step
    and starts everything. The pre-deploy step also fills the matching cache with 511 common
    ingredient names, paced to Gemini's free tier (100 embedding texts a minute, so about six

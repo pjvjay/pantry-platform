@@ -47,8 +47,13 @@ services:
         - scripts/**
         - .github/**
     envVars:
+      # pantry-app's private hostname. Render gave every resource of this blueprint a suffix
+      # (pantry-app-rxyh, pantry-db-rxyh, ...), and a fromService reference by the blueprint
+      # name "pantry-app" names a service the workspace does not have, which fails the sync
+      # (the spec: the referenced service must exist in the workspace). The suffix is fixed for
+      # this blueprint; change this value if the service is ever recreated under another name.
       - key: APP_HOST
-        fromService: {type: pserv, name: pantry-app, property: host}
+        value: pantry-app-rxyh
       - key: REQUIRE_AUTH
         value: "1"
       - key: BASIC_AUTH_USER
