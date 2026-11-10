@@ -2,10 +2,19 @@
 # the demo hub under /hub/, all on one origin (the console calls both with relative URLs). Both
 # run in the pantry-app service, APP_HOST, on ports 8000 and 8090. Filled in at start by nginx's
 # own envsubst; 40-pantry-auth.sh writes /etc/nginx/pantry-auth.conf.
+#
+# APP_HOST is looked up again as it changes: nginx resolves a hostname written in proxy_pass
+# once, at start, and keeps that address, so when pantry-app redeploys onto a new instance
+# every call times out until nginx restarts (seen 2026-11-10). A hostname in a variable is
+# resolved through `resolver` instead, here the container's own nameservers
+# (NGINX_LOCAL_RESOLVERS, from /etc/resolv.conf by nginx's 15-local-resolvers.envsh), and the
+# answer is kept for 10 s at most.
 server {
     listen ${PORT};
     server_name _;
     client_max_body_size 2m;
+    resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+    set $app ${APP_HOST};
 
     # Render's health check: never behind the login.
     location = /healthz {
@@ -20,7 +29,8 @@ server {
     location = /pantry { return 302 /pantry/; }
 
     location /pantry/api/ {
-        proxy_pass http://${APP_HOST}:8000/;
+        rewrite ^/pantry/api/(.*)$ /$1 break;      # a variable proxy_pass passes the path as is
+        proxy_pass http://$app:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -32,7 +42,7 @@ server {
     # take minutes. The browser's Host is passed exactly, port included ($http_host, not $host):
     # the hub answers only to HUB_ALLOWED_HOSTS.
     location /hub/ {
-        proxy_pass http://${APP_HOST}:8090;
+        proxy_pass http://$app:8090;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
