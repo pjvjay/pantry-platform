@@ -470,7 +470,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/hub/images/wiki")
     async def wiki_image(title: str) -> Response:
         """A recipe's picture: the lead image of the English Wikipedia article ``title`` (a demo
-        recipe's image_wiki) as a 320 px thumbnail; 404 when it has none."""
+        recipe's image_wiki), the thumbnail its page summary names; 404 when it has none."""
         try:
             return _image(await images.wiki(title))
         except ImageError as exc:

@@ -297,21 +297,36 @@ thumbnail, `GET /hub/images/ingredient?name=`), where the trip buys it, the pric
 confidence; a fetched recipe page shows the photos it holds (`GET /hub/images/remote?url=`,
 public http(s) hosts only, raster images up to 3 MB). The Meal plan's recipes show theirs: a demo
 recipe the lead image of the Wikipedia article pantry names for it (`GET /hub/images/wiki?title=`,
-320 px, that article only, never a search; 404 when it has none, 502 when Wikipedia does not
-answer), and an imported recipe its page's own preview image through the same remote route,
-credited to the site and linked back. The hub fetches each once and serves it from
+that article only, its redirect followed, never a search; 404 when it has none, 502 when Wikipedia
+does not answer), and an imported recipe its page's own preview image through the same remote
+route, credited to the site and linked back. The hub fetches each once and serves it from
 `~/.pantry-demo/images/`, so the browser never calls a third party.
 
-A picture Wikipedia does not have (no article, for an ingredient no search hit either, or an
-article without a lead image) is a 404, and the miss is kept for 7 days with its reason in the
-cache's `index.json`. A Wikipedia that does not answer (an error, a timeout, a 429 or another
-non-2xx answer, an answer that cannot be read) is a 502 and is never kept: the next request asks
-again. A miss an older hub kept without a reason is looked up again too. Wikipedia is asked as its
-API etiquette and rate limits ask: one API request at a time, one lookup per picture however many
-ask for it, and a 429 retried once (after its Retry-After when that is 2 s or less, else after
-1 s). After no answer the hub asks it nothing for 10 s, or after a 429 as long as its Retry-After
-says, up to a minute, and a picture asked for meanwhile is a 502 at once. Thumbnails download 2 at
-once.
+An article is looked up in Wikipedia's REST page summary (`/api/rest_v1/page/summary/<Title>`), and
+the picture is the thumbnail the summary names, as named (Wikimedia makes thumbnails at a few widths
+only). An ingredient's head words are looked up as a title first; when that has no article (a 404 or
+a disambiguation page) or no lead image, the action API's search finds one. A thumbnail is fetched
+only from Wikimedia's own image servers: https, the host exactly `upload.wikimedia.org` or
+`thumb.wikimedia.org`, no user or password, the default port, redirects included; an answer naming
+an image anywhere else is not fetched. That list is checked by name, with no DNS lookup: a narrower
+guard than the public-address check a recipe page's image gets, and one that works behind an HTTPS
+proxy that resolves names itself (on a machine with no DNS of its own, the DNS check fails for every
+host).
+
+A picture Wikipedia does not have (no article, for an ingredient no search hit either, an article
+without a lead image, or a lead image not on Wikimedia's image servers) is a 404, and the miss is
+kept for 7 days with its reason in the cache's `index.json`; so is a recipe page's image its server
+definitely does not have (a 4xx other than 429, not a raster image, over 3 MB). A server that does
+not answer (an error, a timeout, a 429, a 5xx; from Wikipedia also another non-2xx answer or one
+that cannot be read) is a 502 and is never kept: the next request asks again. A miss an older hub
+kept without a reason is looked up again too. Wikipedia is asked as its API etiquette and rate
+limits ask: one request at a time to each endpoint (the page summary, the search), one lookup per
+picture however many ask for it, and a 429 retried once only when it asks for a short wait (after
+its Retry-After when that is 2 s or less, after 1 s when it gives none). After no answer the hub
+asks that endpoint nothing for 10 s, or after a 429 as long as its Retry-After says, up to a
+minute; a picture that needs it meanwhile is a 502 at once, and every such 502 says for how long
+("not asked again for N s"). The two endpoints pause separately, so a refused search does not hold
+up the page summaries, which are limited apart from the action API. Thumbnails download 2 at once.
 
 ContextForge records the gateway traces with `OBSERVABILITY_ENABLED=true` in its `.env`, but the
 admin UI's Observability tab does not render them in 1.0.11 (its dashboard component needs eval,
@@ -374,7 +389,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 644 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 711 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
@@ -385,6 +400,8 @@ Google Calendar sync against a stateful fake Google (`tests/fake_google.py`: sig
 crash recovery, a lost ledger, rate limits, timed events and reminders), the address search against
 a fake Nominatim (its usage policy, and the address kept out of every log), the map tiles against a
 fake tile server (its usage policy and the disk cache), ingredient and recipe pictures against a
-fake Wikipedia (its refusals and rate limits, and what is cached as a miss),
-and every HTTP route with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks
-it); in dev, `npm run dev` proxies `/hub` to this hub on :8090.
+fake Wikipedia (its two endpoints' refusals and rate limits, what is cached as a miss, thumbnails
+only from Wikimedia's image servers and with no DNS lookup), a recipe page's images against a
+fake site (a server that does not answer is never a cached miss), and every HTTP route with its
+upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks it); in
+dev, `npm run dev` proxies `/hub` to this hub on :8090.

@@ -257,9 +257,9 @@ def test_ingredient_thumbnails_come_from_wikipedia_once(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         if request.url.host == "en.wikipedia.org":
-            assert request.url.params["titles"] == "Garlic"
-            return httpx.Response(200, json={"query": {"pages": [{"title": "Garlic", "thumbnail": {
-                "source": "https://upload.wikimedia.org/garlic.jpg"}}]}})
+            assert request.url.path == "/api/rest_v1/page/summary/Garlic"
+            return httpx.Response(200, json={"type": "standard", "title": "Garlic", "thumbnail": {
+                "source": "https://upload.wikimedia.org/garlic.jpg"}})
         return httpx.Response(200, content=b"\xff\xd8jpeg", headers={"content-type": "image/jpeg"})
 
     async def public(host: str) -> None:

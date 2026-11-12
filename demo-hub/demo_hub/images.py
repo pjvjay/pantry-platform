@@ -3,29 +3,45 @@ recipe page holds, both fetched once by the hub and served from its cache (the b
 calls a third party, and a second look costs nothing).
 
 - ``ingredient(name)``: the ingredient's head words ("Canned Tomatoes" -> "tomato", "Extra Virgin
-  Olive Oil 500ml" -> "olive oil"), looked up as a Wikipedia title, then by Wikipedia search; the
-  page's lead image as a 240 px thumbnail.
+  Olive Oil 500ml" -> "olive oil") as a Wikipedia title, looked up in that article's REST page
+  summary; when there is no such article (a 404, or a disambiguation page) or it has no usable
+  lead image, by Wikipedia search. The picture is the article's lead image, the thumbnail
+  Wikipedia names.
 - ``wiki(title)``: a recipe's picture, the lead image of the English Wikipedia article the title
-  names (a demo recipe's ``image_wiki``; a redirect is followed, nothing is searched) as a 320 px
-  thumbnail.
+  names (a demo recipe's ``image_wiki``), from its page summary: a redirect is followed, nothing
+  is searched.
 - ``remote(url)``: an image from a recipe page. Guarded: http(s) only, every address the host
   resolves to must be public (no loopback, private, link-local or reserved ranges), redirects are
   re-checked, the reply must be a raster image (SVG can carry script), at most 3 MB.
 
-A Wikipedia miss is cached only when Wikipedia answered and had nothing: no article (for an
-ingredient, no search hit either), or an article without a lead image. The index says which
-("answered": true, "reason": "no-article" or "no-image"). A Wikipedia that does not answer (an
-error, a timeout, a 429 or another non-2xx answer, an answer that cannot be read), or a thumbnail
-that cannot be fetched, is a 502 and is not cached, so a moment offline or a rate limit never
-hides a picture for good. A Wikipedia miss cached without that mark (older code cached a Wikipedia
-that did not answer as a miss too) is looked up again, and so is any miss over 7 days old.
+A thumbnail Wikipedia names is fetched only from Wikimedia's own image servers: https, the host
+exactly upload.wikimedia.org or thumb.wikimedia.org, no user or password, the default port, and
+a redirect is held to the same rule. Those addresses are checked by name, with no DNS lookup
+(``wikimedia_image`` says why). Any other address in an answer is not fetched: the article counts
+as one without a usable lead image.
 
-Wikipedia's API is asked as its etiquette and rate limits ask (mediawiki.org/wiki/API:Etiquette):
-one request at a time for the whole hub, one lookup per picture however many ask for it at once,
-and a 429 retried once, after its Retry-After when that is 2 s or less, else after 1 s. When
-Wikipedia does not answer (for a 429, its retry neither), the hub leaves it alone for 10 s, or
-after a 429 as long as its Retry-After says, up to a minute; a lookup in that time is a 502 at
-once. Thumbnails come from Wikimedia's image servers, at most 2 downloads at once.
+A miss is cached only when the server answered and had nothing. For Wikipedia: no article (for an
+ingredient, no search hit either), an article without a lead image, or a lead image elsewhere than
+on Wikimedia's image servers; the index says which ("answered": true, "reason": "no-article",
+"no-image" or "not-wikimedia"). For a recipe page's image: a status other than 200 that is
+neither a 429 nor a 5xx (a 404, say), a reply that is not a raster image, one over 3 MB, or more
+than 3 redirects ("reason": "status-404", "not-an-image", "too-large", "too-many-redirects").
+Anything else is no answer: an error, a timeout, a 429, a 5xx; from Wikipedia also any other
+status but a 2xx (or a page summary's 404) and an answer that cannot be read; and a thumbnail
+that cannot be fetched. No answer is a 502 and is not cached, so a moment offline or a rate limit
+never hides a picture for good. A miss cached without that mark (older code cached a server that
+did not answer as a miss too) is looked up again, and so is any miss over 7 days old.
+
+Wikipedia is asked as its etiquette and rate limits ask (mediawiki.org/wiki/API:Etiquette): one
+request at a time to each of the two endpoints the hub uses, the REST page summary and the action
+API's search; one lookup per picture however many ask for it at once; and a 429 retried once
+only when it asks for a short wait: after its Retry-After when that is 2 s or less, after 1 s
+when it gives none. When an endpoint does not answer (for a 429, its retry neither, or its
+Retry-After asks for longer), the hub leaves that endpoint alone for 10 s, or after a 429 as
+long as its Retry-After says, up to a minute; a lookup that needs it in that time is a 502 at
+once. Each such 502 says how long the endpoint is left alone ("not asked again for N s"). Each
+endpoint pauses on its own, so a refused search does not hold up the page summaries, which are
+limited apart from the action API. Thumbnails download at most 2 at once.
 """
 
 from __future__ import annotations
@@ -39,20 +55,27 @@ import math
 import re
 import socket
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"
+WIKI_SUMMARY = "https://en.wikipedia.org/api/rest_v1/page/summary/"
+WIKIMEDIA_IMAGES = frozenset({"upload.wikimedia.org", "thumb.wikimedia.org"})
 USER_AGENT = "pantry-demo-hub/0.1 (local demo; https://github.com/pjvjay/pantry-platform)"
 MAX_BYTES = 3 * 1024 * 1024
-INGREDIENT_PX, RECIPE_PX = 240, 320
-# What no Wikipedia title holds (a "|" would ask the API for two pages), and a title's limit.
+MAX_REDIRECTS = 3
+# The width a search asks its thumbnails at, one of the standard widths Wikimedia's image servers
+# make thumbnails at. A summary's thumbnail is taken as it is named.
+SEARCH_PX = 330
+# What no Wikipedia title holds, and a title's limit.
 NOT_IN_TITLES = re.compile(r"[#<>\[\]|{}\x00-\x1f\x7f]")
 MAX_TITLE_BYTES = 255
 TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
@@ -65,15 +88,18 @@ DESCRIPTORS = {
     "baby", "lean", "of", "and", "a", "the", "pack", "bag", "box", "jar", "can", "bottle", "bulb"}
 SIZE = re.compile(r"\b\d+(\.\d+)?\s*(g|kg|ml|l|oz|lb|lbs|x|pack|ct)\b|\(.*?\)|~\S+",
                   re.IGNORECASE)
-WIKIPEDIA_KEYS = ("ingredient:", "wiki:")    # the index's Wikipedia lookups (else "url:")
 MISS_TTL = timedelta(days=7)                # how long a cached miss is believed
 MAX_THUMBNAILS = 2                          # thumbnail downloads at once
-RETRY_WAIT_S = 1.0                          # before a 429's one retry, unless its Retry-After
-MAX_RETRY_WAIT_S = 2.0                      # asks for no longer than this: then that
-PAUSE_S = 10.0                              # Wikipedia left alone after it did not answer;
+RETRY_WAIT_S = 1.0                          # before a 429's one retry when it has no Retry-After
+MAX_RETRY_WAIT_S = 2.0                      # a longer Retry-After is not retried: a pause
+PAUSE_S = 10.0                              # an endpoint left alone after it did not answer;
 MAX_PAUSE_S = 60.0                          # after a 429, Retry-After's seconds up to this
 
 log = logging.getLogger(__name__)
+
+# One way to find an article's lead image: (thumbnail URL, the article's title), as _summary
+# and _search return them.
+Ask = Callable[[], Awaitable[tuple[str | None, str | None]]]
 
 
 def ingredient_query(name: str) -> str:
@@ -125,6 +151,35 @@ async def public_host(host: str) -> None:
             raise ImageError(f"{host} is not a public address", 403)
 
 
+def wikimedia_image(url: str) -> bool:
+    """Whether ``url`` is on Wikimedia's own image servers: https, the host exactly
+    upload.wikimedia.org or thumb.wikimedia.org, no user or password, the default port. The URL
+    is read as httpx reads it, since httpx makes the request.
+
+    This, not ``public_host``, guards the thumbnails Wikipedia's answers name. Those should only
+    ever point at Wikimedia, and two exact hosts are a narrower guard than a DNS check, which
+    lets any host through whose addresses are public. Nor does it need a lookup: behind an HTTPS
+    proxy that resolves names itself, on a machine with no DNS of its own, a DNS check fails for
+    every host and no picture would ever arrive. ``remote`` fetches images from any site a
+    recipe names, so it keeps the DNS check."""
+    try:
+        parts = httpx.URL(url)
+    except httpx.InvalidURL:
+        return False
+    return (parts.scheme == "https" and parts.host in WIKIMEDIA_IMAGES and not parts.userinfo
+            and parts.port is None)              # httpx reads ":443" on https as no port
+
+
+@dataclass
+class Endpoint:
+    """One of Wikipedia's endpoints as the hub asks it: one request at a time, and after it did
+    not answer, a pause in which it is not asked."""
+    name: str
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    paused_until: float = 0.0
+    paused_for: str = ""
+
+
 class ImageCache:
     """Everything behind the image routes. Sleep and clock (for Wikipedia's pauses) are
     swappable for tests."""
@@ -145,11 +200,12 @@ class ImageCache:
             except ValueError:
                 self._index = {}
         self._lock = asyncio.Lock()
-        # Wikipedia: one API request at a time, a few thumbnails at once, one lookup per key
-        self._api = asyncio.Lock()
+        # Wikipedia: one request at a time to each endpoint, each with its own pause; a few
+        # thumbnails at once; one lookup per key
+        self._summaries = Endpoint("Wikipedia's page summary")
+        self._searches = Endpoint("Wikipedia's search")
         self._thumbnails = asyncio.Semaphore(MAX_THUMBNAILS)
         self._pending: dict[str, asyncio.Future[tuple[Path, str] | None]] = {}
-        self._paused_until, self._paused_for = 0.0, ""
 
     def _client(self) -> httpx.AsyncClient:
         if self.client is None:
@@ -166,14 +222,14 @@ class ImageCache:
             if (self.dir / file).is_file():
                 return True, self.dir / file, str(entry.get("type", "image/jpeg"))
             return False, None, ""
-        return self._miss_stands(key, entry), None, ""
+        return self._miss_stands(entry), None, ""
 
     @staticmethod
-    def _miss_stands(key: str, entry: dict[str, Any]) -> bool:
-        """A cached miss is believed for MISS_TTL; a Wikipedia one only when Wikipedia answered.
-        Older code also cached a Wikipedia that did not answer as a miss, without the mark: such
-        a miss is looked up again."""
-        if key.startswith(WIKIPEDIA_KEYS) and entry.get("answered") is not True:
+    def _miss_stands(entry: dict[str, Any]) -> bool:
+        """A cached miss is believed for MISS_TTL, and only when the server answered. Older code
+        also cached a server that did not answer as a miss, without the mark: such a miss is
+        looked up again."""
+        if entry.get("answered") is not True:
             return False
         try:
             return datetime.now(UTC) - datetime.fromisoformat(entry["at"]) < MISS_TTL
@@ -197,17 +253,17 @@ class ImageCache:
         query = ingredient_query(name)
         if not query:
             return None
-        asks = [{"titles": query[:1].upper() + query[1:]},
-                {"generator": "search", "gsrsearch": f"{query} food", "gsrlimit": "1"}]
-        return await self._wikipedia(f"ingredient:{query}", asks, INGREDIENT_PX, query=query)
+        asks = (partial(self._summary, query[:1].upper() + query[1:]),
+                partial(self._search, f"{query} food"))
+        return await self._wikipedia(f"ingredient:{query}", asks, query=query)
 
     async def wiki(self, title: str) -> tuple[Path, str] | None:
         title = " ".join(title.replace("_", " ").split())
         if not title or len(title.encode()) > MAX_TITLE_BYTES or NOT_IN_TITLES.search(title):
             raise ImageError("not a Wikipedia article title")
-        return await self._wikipedia(f"wiki:{title}", [{"titles": title}], RECIPE_PX)
+        return await self._wikipedia(f"wiki:{title}", (partial(self._summary, title),))
 
-    async def _wikipedia(self, key: str, asks: list[dict[str, str]], width: int,
+    async def _wikipedia(self, key: str, asks: Sequence[Ask],
                          **about: Any) -> tuple[Path, str] | None:
         """``key``'s picture from the cache, else from Wikipedia: one lookup per key however many
         ask for it at once (the others wait for its answer, or its error)."""
@@ -216,51 +272,84 @@ class ImageCache:
             return (path, ctype) if path else None
         task = self._pending.get(key)
         if task is None:
-            task = asyncio.ensure_future(self._look_up(key, asks, width, **about))
+            task = asyncio.ensure_future(self._look_up(key, asks, **about))
             self._pending[key] = task
             task.add_done_callback(lambda _t: self._pending.pop(key, None))
         return await asyncio.shield(task)
 
-    async def _look_up(self, key: str, asks: list[dict[str, str]], width: int,
+    async def _look_up(self, key: str, asks: Sequence[Ask],
                        **about: Any) -> tuple[Path, str] | None:
-        """The first lead image Wikipedia's API finds for ``asks``, asked in turn, downloaded and
-        kept. A miss is kept only when Wikipedia answered every ask and none found one."""
-        found = None                       # the title of a page found without a lead image
-        for params in asks:
-            thumb, title = await self._lead_image(params, width)
-            if thumb:
+        """The first lead image on Wikimedia's image servers that ``asks`` find, asked in turn,
+        downloaded and kept. A miss is kept only when Wikipedia answered every ask and none found
+        one; a lead image elsewhere is not fetched, and the miss keeps its address."""
+        found: str | None = None             # the title of a page without a usable lead image
+        elsewhere: str | None = None         # a lead image not on Wikimedia's image servers
+        for ask in asks:
+            thumb, title = await ask()
+            if thumb and wikimedia_image(thumb):
                 return await self._thumbnail(key, thumb, **about, title=title)
+            if thumb:
+                log.warning("picture not fetched, not on Wikimedia's image servers: %s", thumb)
+                elsewhere = elsewhere or thumb
             found = found or title
-        await self._remember(key, None, "image/jpeg", **about, title=found, source=None,
-                             answered=True, reason="no-image" if found else "no-article")
+        reason = "not-wikimedia" if elsewhere else "no-image" if found else "no-article"
+        await self._remember(key, None, "image/jpeg", **about, title=found, source=elsewhere,
+                             answered=True, reason=reason)
         return None
 
     async def _thumbnail(self, key: str, thumb: str, **about: Any) -> tuple[Path, str] | None:
-        """The lead image's thumbnail, downloaded (MAX_THUMBNAILS at once) and kept. One that
-        cannot be fetched is a 502 and is not kept: Wikipedia has a picture, the hub did not get
-        it this time."""
-        try:
-            async with self._thumbnails:
-                content, ctype = await self._download(thumb)
-        except ImageError as exc:
-            if exc.status != 404:          # a refusal stays one (403: not a public address)
-                raise
-            # 404 is a host that did not resolve: Wikimedia's servers exist, the network failed
-            raise ImageError("Wikipedia's image server could not be reached", 502) from exc
+        """The lead image's thumbnail, downloaded from Wikimedia's image servers (MAX_THUMBNAILS
+        at once) and kept. One that cannot be fetched is a 502 and is not kept: Wikipedia has a
+        picture, the hub did not get it this time."""
+        async with self._thumbnails:
+            content, kind = await self._download(thumb, wikimedia=True)
         if content is None:
-            raise ImageError("the article's image could not be read", 502)
-        path = await self._remember(key, content, ctype, **about, source=thumb)
-        return (path, ctype) if path else None
+            raise ImageError(f"the article's image could not be read ({kind})", 502)
+        path = await self._remember(key, content, kind, **about, source=thumb)
+        return (path, kind) if path else None
 
-    async def _lead_image(self, params: dict[str, str],
-                          width: int) -> tuple[str | None, str | None]:
-        """(thumbnail URL, title) of the first page Wikipedia's API finds for ``params`` that has
-        a lead image, ``width`` px wide; (None, title) when the pages it finds have none, and
-        (None, None) when it finds no page. Raises ImageError 502 when Wikipedia did not answer."""
-        body = await self._ask({
+    async def _summary(self, title: str) -> tuple[str | None, str | None]:
+        """(thumbnail URL, title) of the article ``title`` names, from its REST page summary,
+        redirects followed (to other page summaries only): the thumbnail as the summary names it
+        (Wikimedia makes thumbnails at a few widths only, so none is asked for), None when the
+        article has no lead image; (None, None) when there is no article (a 404, or a
+        disambiguation page). Any other answer is ImageError 502, and the endpoint's pause."""
+        url = WIKI_SUMMARY + quote(title.replace(" ", "_"), safe="!*'()")
+        for _ in range(MAX_REDIRECTS + 1):
+            r = await self._get(self._summaries, url)
+            if not r.is_redirect:
+                break
+            url = urljoin(url, r.headers["location"])
+            if not url.startswith(WIKI_SUMMARY):
+                break                              # not followed: a 3xx is not an answer here
+        if r.status_code == 404:
+            return None, None
+        if not r.is_success:
+            raise self._pause(self._summaries, f"{self._summaries.name} answered {r.status_code}",
+                              PAUSE_S)
+        page = self._read(self._summaries, r)
+        if page.get("type") == "disambiguation":
+            return None, None
+        titles = page.get("titles")
+        name = (titles.get("normalized") if isinstance(titles, dict) else None) or page.get("title")
+        thumbnail = page.get("thumbnail")
+        source = thumbnail.get("source") if isinstance(thumbnail, dict) else None
+        return (str(source) if source else None), str(name or title).replace("_", " ")
+
+    async def _search(self, words: str) -> tuple[str | None, str | None]:
+        """(thumbnail URL, title) of the first page Wikipedia's search finds for ``words`` that
+        has a lead image, through the action API; (None, title) when the pages it finds have
+        none, and (None, None) when it finds no page. Any answer but a 2xx JSON object without an
+        API error is ImageError 502, and the endpoint's pause."""
+        r = await self._get(self._searches, WIKI_API, {
             "action": "query", "format": "json", "formatversion": "2", "prop": "pageimages",
-            "piprop": "thumbnail", "pithumbsize": str(width), "redirects": "1", **params})
-        query = body.get("query")                  # none at all when a search has no hit
+            "piprop": "thumbnail", "pithumbsize": str(SEARCH_PX), "redirects": "1",
+            "generator": "search", "gsrsearch": words, "gsrlimit": "1"})
+        if not r.is_success:
+            raise self._pause(self._searches, f"{self._searches.name} answered {r.status_code}",
+                              PAUSE_S)
+        body = self._read(self._searches, r)
+        query = body.get("query")                  # none at all when the search has no hit
         pages = query.get("pages") if isinstance(query, dict) else None
         found = None
         for page in pages if isinstance(pages, list) else []:
@@ -274,76 +363,98 @@ class ImageCache:
             found = found or title
         return None, found or None
 
-    async def _ask(self, params: dict[str, str]) -> dict[str, Any]:
-        """Wikipedia's API answer to ``params``: one request at a time for the whole hub, a 429
-        retried once. No answer to read (an error, a timeout, a non-2xx answer, anything but a
-        JSON object, an API error) is ImageError 502, and starts a pause."""
-        async with self._api:
-            if (left := self._paused_until - self.clock()) > 0:
-                raise ImageError(f"{self._paused_for}; not asked again for {math.ceil(left)} s",
+    async def _get(self, endpoint: Endpoint, url: str,
+                   params: dict[str, str] | None = None) -> httpx.Response:
+        """``endpoint``'s answer to a GET of ``url``, whatever its status (redirects are not
+        followed): one request at a time to each endpoint, a 429 retried once when it asks for
+        a short wait. No answer (an error, a timeout, a 429 that asks for longer or comes again)
+        is ImageError 502, and starts the endpoint's pause, in which every request to it is that
+        502 at once."""
+        async with endpoint.lock:
+            if (left := endpoint.paused_until - self.clock()) > 0:
+                raise ImageError(f"{endpoint.paused_for}; not asked again for {math.ceil(left)} s",
                                  502)
             for attempt in (1, 2):
                 try:
-                    r = await self._client().get(WIKI_API, params=params,
+                    r = await self._client().get(url, params=params,
                                                  headers={"User-Agent": USER_AGENT})
                 except httpx.HTTPError as exc:
-                    raise self._pause("Wikipedia did not answer", PAUSE_S) from exc
+                    raise self._pause(endpoint, f"{endpoint.name} did not answer", PAUSE_S) from exc
                 if r.status_code != 429:
                     break
                 asked = retry_after(r.headers, time.time())
-                if attempt == 2:
-                    raise self._pause("Wikipedia answered 429 (too many requests)",
+                if attempt == 2 or (asked is not None and asked > MAX_RETRY_WAIT_S):
+                    raise self._pause(endpoint, f"{endpoint.name} answered 429 (too many requests)",
                                       PAUSE_S if asked is None else min(asked, MAX_PAUSE_S))
-                await self.sleep(asked if asked is not None and asked <= MAX_RETRY_WAIT_S
-                                 else RETRY_WAIT_S)
-            if not r.is_success:
-                raise self._pause(f"Wikipedia answered {r.status_code}", PAUSE_S)
-            try:
-                body = r.json()
-            except ValueError as exc:
-                raise self._pause("Wikipedia's answer could not be read", PAUSE_S) from exc
-            if not isinstance(body, dict) or "error" in body:
-                raise self._pause("Wikipedia's answer could not be read", PAUSE_S)
-            return body
+                await self.sleep(RETRY_WAIT_S if asked is None else asked)
+            return r
 
-    def _pause(self, why: str, seconds: float) -> ImageError:
-        """Wikipedia left alone for ``seconds`` after it did not answer: the error to raise."""
-        self._paused_until, self._paused_for = self.clock() + seconds, why
+    def _read(self, endpoint: Endpoint, r: httpx.Response) -> dict[str, Any]:
+        """The JSON object ``r`` holds. Anything else (not JSON, not an object, an API error) is
+        an answer that cannot be read: ImageError 502, and the endpoint's pause."""
+        unreadable = f"{endpoint.name} sent an answer that could not be read"
+        try:
+            body = r.json()
+        except ValueError as exc:
+            raise self._pause(endpoint, unreadable, PAUSE_S) from exc
+        if not isinstance(body, dict) or "error" in body:
+            raise self._pause(endpoint, unreadable, PAUSE_S)
+        return body
+
+    def _pause(self, endpoint: Endpoint, why: str, seconds: float) -> ImageError:
+        """``endpoint`` left alone for ``seconds`` after it did not answer: the error to raise,
+        which says for how long."""
+        endpoint.paused_until, endpoint.paused_for = self.clock() + seconds, why
         log.warning("picture lookups paused for %.0f s: %s", seconds, why)
-        return ImageError(why, 502)
+        return ImageError(f"{why}; not asked again for {math.ceil(seconds)} s", 502)
 
     async def remote(self, url: str) -> tuple[Path, str] | None:
         key = f"url:{url}"
         known, path, ctype = self._hit(key)
         if known:
             return (path, ctype) if path else None
-        content, ctype = await self._download(url)
-        path = await self._remember(key, content, ctype or "image/jpeg", source=url)
-        return (path, ctype) if path else None
+        content, kind = await self._download(url)
+        if content is None:                    # a definite answer, and not a picture: a miss
+            await self._remember(key, None, "image/jpeg", source=url, answered=True, reason=kind)
+            return None
+        path = await self._remember(key, content, kind, source=url)
+        return (path, kind) if path else None
 
-    async def _download(self, url: str) -> tuple[bytes | None, str]:
-        """A raster image from a public http(s) URL, redirects re-checked; (None, "") when the
-        reply is not one."""
-        for _ in range(4):
+    async def _download(self, url: str, *, wikimedia: bool = False) -> tuple[bytes | None, str]:
+        """A raster image from ``url``: (content, its type), or (None, why) when the server's
+        definite answer is not one: "status-N" for a status other than 200 that is neither a 429
+        nor a 5xx (a 404, say), "not-an-image", "too-large" or "too-many-redirects". Every
+        address, redirects included, is checked before it is asked: with ``wikimedia`` it must be
+        on Wikimedia's image servers (``wikimedia_image``), else http(s) on a public host
+        (``check_host``). No answer (an error, a timeout, a 429, a 5xx) is ImageError 502."""
+        for _ in range(MAX_REDIRECTS + 1):
             parts = urlsplit(url)
-            if parts.scheme not in ("http", "https") or not parts.hostname:
-                raise ImageError("only http(s) image URLs")
-            await self.check_host(parts.hostname)
+            if wikimedia:
+                if not wikimedia_image(url):
+                    raise ImageError("not an address on Wikimedia's image servers", 403)
+            else:
+                if parts.scheme not in ("http", "https") or not parts.hostname:
+                    raise ImageError("only http(s) image URLs")
+                await self.check_host(parts.hostname)
             try:
                 async with self._client().stream("GET", url, follow_redirects=False,
                                                  headers={"User-Agent": USER_AGENT}) as r:
                     if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
                         url = urljoin(url, r.headers["location"])
                         continue
+                    if r.status_code == 429 or r.status_code >= 500:
+                        raise ImageError(f"{parts.hostname} answered {r.status_code}", 502)
+                    if r.status_code != 200:
+                        return None, f"status-{r.status_code}"
                     ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
-                    if r.status_code != 200 or ctype not in TYPES:
-                        return None, ""
+                    if ctype not in TYPES:
+                        return None, "not-an-image"
                     body = bytearray()
                     async for chunk in r.aiter_bytes():
                         body += chunk
                         if len(body) > MAX_BYTES:
-                            return None, ""
+                            return None, "too-large"
                     return bytes(body), ctype
-            except httpx.HTTPError:
-                return None, ""
-        return None, ""
+            except httpx.HTTPError as exc:
+                raise ImageError(f"{parts.hostname} did not answer", 502) from exc
+        return None, "too-many-redirects"
