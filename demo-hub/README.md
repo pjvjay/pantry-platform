@@ -302,6 +302,17 @@ answer), and an imported recipe its page's own preview image through the same re
 credited to the site and linked back. The hub fetches each once and serves it from
 `~/.pantry-demo/images/`, so the browser never calls a third party.
 
+A picture Wikipedia does not have (no article, for an ingredient no search hit either, or an
+article without a lead image) is a 404, and the miss is kept for 7 days with its reason in the
+cache's `index.json`. A Wikipedia that does not answer (an error, a timeout, a 429 or another
+non-2xx answer, an answer that cannot be read) is a 502 and is never kept: the next request asks
+again. A miss an older hub kept without a reason is looked up again too. Wikipedia is asked as its
+API etiquette and rate limits ask: one API request at a time, one lookup per picture however many
+ask for it, and a 429 retried once (after its Retry-After when that is 2 s or less, else after
+1 s). After no answer the hub asks it nothing for 10 s, or after a 429 as long as its Retry-After
+says, up to a minute, and a picture asked for meanwhile is a 502 at once. Thumbnails download 2 at
+once.
+
 ContextForge records the gateway traces with `OBSERVABILITY_ENABLED=true` in its `.env`, but the
 admin UI's Observability tab does not render them in 1.0.11 (its dashboard component needs eval,
 which the admin page's CSP and Alpine's CSP build do not allow); `gateway-traces.sh` reads the
@@ -363,7 +374,7 @@ run, and rerunning with the same `--out` resumes.
 
 ```bash
 cd demo-hub && python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 600 tests; no network, no keys
+.venv/bin/python -m pytest -q          # 644 tests; no network, no keys
 .venv/bin/ruff check demo_hub tests
 ```
 
@@ -373,6 +384,7 @@ real MCP server over HTTP (catalog, calls, resources, prompts, 401), the runner 
 Google Calendar sync against a stateful fake Google (`tests/fake_google.py`: sign-in, conflicts,
 crash recovery, a lost ledger, rate limits, timed events and reminders), the address search against
 a fake Nominatim (its usage policy, and the address kept out of every log), the map tiles against a
-fake tile server (its usage policy and the disk cache), recipe pictures against a fake Wikipedia,
+fake tile server (its usage policy and the disk cache), ingredient and recipe pictures against a
+fake Wikipedia (its refusals and rate limits, and what is cached as a miss),
 and every HTTP route with its upstreams mocked. The frontend lives in `pantry-frontend` (`npm run build` type-checks
 it); in dev, `npm run dev` proxies `/hub` to this hub on :8090.

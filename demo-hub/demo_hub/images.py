@@ -4,14 +4,28 @@ calls a third party, and a second look costs nothing).
 
 - ``ingredient(name)``: the ingredient's head words ("Canned Tomatoes" -> "tomato", "Extra Virgin
   Olive Oil 500ml" -> "olive oil"), looked up as a Wikipedia title, then by Wikipedia search; the
-  page's lead image as a 240 px thumbnail. A miss is cached too.
+  page's lead image as a 240 px thumbnail.
 - ``wiki(title)``: a recipe's picture, the lead image of the English Wikipedia article the title
   names (a demo recipe's ``image_wiki``; a redirect is followed, nothing is searched) as a 320 px
-  thumbnail. A miss (no such article, or no lead image) is cached too; a Wikipedia that does not
-  answer is not, so a moment offline never hides a picture for good.
+  thumbnail.
 - ``remote(url)``: an image from a recipe page. Guarded: http(s) only, every address the host
   resolves to must be public (no loopback, private, link-local or reserved ranges), redirects are
   re-checked, the reply must be a raster image (SVG can carry script), at most 3 MB.
+
+A Wikipedia miss is cached only when Wikipedia answered and had nothing: no article (for an
+ingredient, no search hit either), or an article without a lead image. The index says which
+("answered": true, "reason": "no-article" or "no-image"). A Wikipedia that does not answer (an
+error, a timeout, a 429 or another non-2xx answer, an answer that cannot be read), or a thumbnail
+that cannot be fetched, is a 502 and is not cached, so a moment offline or a rate limit never
+hides a picture for good. A Wikipedia miss cached without that mark (older code cached a Wikipedia
+that did not answer as a miss too) is looked up again, and so is any miss over 7 days old.
+
+Wikipedia's API is asked as its etiquette and rate limits ask (mediawiki.org/wiki/API:Etiquette):
+one request at a time for the whole hub, one lookup per picture however many ask for it at once,
+and a 429 retried once, after its Retry-After when that is 2 s or less, else after 1 s. When
+Wikipedia does not answer (for a 429, its retry neither), the hub leaves it alone for 10 s, or
+after a 429 as long as its Retry-After says, up to a minute; a lookup in that time is a 502 at
+once. Thumbnails come from Wikimedia's image servers, at most 2 downloads at once.
 """
 
 from __future__ import annotations
@@ -20,9 +34,14 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
+import math
 import re
 import socket
-from datetime import UTC, datetime
+import time
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -46,6 +65,15 @@ DESCRIPTORS = {
     "baby", "lean", "of", "and", "a", "the", "pack", "bag", "box", "jar", "can", "bottle", "bulb"}
 SIZE = re.compile(r"\b\d+(\.\d+)?\s*(g|kg|ml|l|oz|lb|lbs|x|pack|ct)\b|\(.*?\)|~\S+",
                   re.IGNORECASE)
+WIKIPEDIA_KEYS = ("ingredient:", "wiki:")    # the index's Wikipedia lookups (else "url:")
+MISS_TTL = timedelta(days=7)                # how long a cached miss is believed
+MAX_THUMBNAILS = 2                          # thumbnail downloads at once
+RETRY_WAIT_S = 1.0                          # before a 429's one retry, unless its Retry-After
+MAX_RETRY_WAIT_S = 2.0                      # asks for no longer than this: then that
+PAUSE_S = 10.0                              # Wikipedia left alone after it did not answer;
+MAX_PAUSE_S = 60.0                          # after a 429, Retry-After's seconds up to this
+
+log = logging.getLogger(__name__)
 
 
 def ingredient_query(name: str) -> str:
@@ -63,6 +91,20 @@ def _singular(word: str) -> str:
     if word.endswith("s") and not word.endswith(("ss", "us")) and len(word) > 3:
         return word[:-1]
     return word
+
+
+def retry_after(headers: httpx.Headers, now: float) -> float | None:
+    """How many seconds a 429 asks to wait: Retry-After in seconds, or as a date against the
+    answer's Date (or now); None when it says neither."""
+    value = headers.get("retry-after", "").strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        when = parsedate_to_datetime(value).timestamp()
+        date = parsedate_to_datetime(headers["date"]).timestamp() if "date" in headers else now
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    return max(0.0, when - date)
 
 
 class ImageError(Exception):
@@ -84,11 +126,17 @@ async def public_host(host: str) -> None:
 
 
 class ImageCache:
+    """Everything behind the image routes. Sleep and clock (for Wikipedia's pauses) are
+    swappable for tests."""
+
     def __init__(self, directory: str | Path, client: httpx.AsyncClient | None = None,
-                 check_host: Any = public_host) -> None:
+                 check_host: Any = public_host, *,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.dir = Path(directory).expanduser()
         self.client = client
         self.check_host = check_host
+        self.sleep, self.clock = sleep, clock
         self._index_path = self.dir / "index.json"
         self._index: dict[str, dict[str, Any]] = {}
         if self._index_path.is_file():
@@ -97,6 +145,11 @@ class ImageCache:
             except ValueError:
                 self._index = {}
         self._lock = asyncio.Lock()
+        # Wikipedia: one API request at a time, a few thumbnails at once, one lookup per key
+        self._api = asyncio.Lock()
+        self._thumbnails = asyncio.Semaphore(MAX_THUMBNAILS)
+        self._pending: dict[str, asyncio.Future[tuple[Path, str] | None]] = {}
+        self._paused_until, self._paused_for = 0.0, ""
 
     def _client(self) -> httpx.AsyncClient:
         if self.client is None:
@@ -104,13 +157,28 @@ class ImageCache:
         return self.client
 
     def _hit(self, key: str) -> tuple[bool, Path | None, str]:
+        """(known, path, type): the picture on disk, or a miss that still stands."""
         entry = self._index.get(key)
         if entry is None:
             return False, None, ""
         file = entry.get("file")
-        if file and (self.dir / file).is_file():
-            return True, self.dir / file, str(entry.get("type", "image/jpeg"))
-        return (not file), None, ""          # a cached miss stays a miss
+        if file:
+            if (self.dir / file).is_file():
+                return True, self.dir / file, str(entry.get("type", "image/jpeg"))
+            return False, None, ""
+        return self._miss_stands(key, entry), None, ""
+
+    @staticmethod
+    def _miss_stands(key: str, entry: dict[str, Any]) -> bool:
+        """A cached miss is believed for MISS_TTL; a Wikipedia one only when Wikipedia answered.
+        Older code also cached a Wikipedia that did not answer as a miss, without the mark: such
+        a miss is looked up again."""
+        if key.startswith(WIKIPEDIA_KEYS) and entry.get("answered") is not True:
+            return False
+        try:
+            return datetime.now(UTC) - datetime.fromisoformat(entry["at"]) < MISS_TTL
+        except (KeyError, TypeError, ValueError):
+            return False
 
     async def _remember(self, key: str, content: bytes | None, ctype: str,
                         **about: Any) -> Path | None:
@@ -129,63 +197,120 @@ class ImageCache:
         query = ingredient_query(name)
         if not query:
             return None
-        key = f"ingredient:{query}"
-        known, path, ctype = self._hit(key)
-        if known:
-            return (path, ctype) if path else None
-        thumb, title = await self._wiki_thumbnail(query)
-        content, ctype = (await self._download(thumb)) if thumb else (None, "")
-        path = await self._remember(key, content, ctype or "image/jpeg", query=query,
-                                    title=title, source=thumb)
-        return (path, ctype) if path else None
-
-    async def _wiki_thumbnail(self, query: str) -> tuple[str | None, str | None]:
-        for params in ({"titles": query[:1].upper() + query[1:]},
-                       {"generator": "search", "gsrsearch": f"{query} food", "gsrlimit": "1"}):
-            try:
-                source, title = await self._lead_image(params, INGREDIENT_PX)
-            except (httpx.HTTPError, ValueError):
-                return None, None
-            if source:
-                return source, title
-        return None, None
+        asks = [{"titles": query[:1].upper() + query[1:]},
+                {"generator": "search", "gsrsearch": f"{query} food", "gsrlimit": "1"}]
+        return await self._wikipedia(f"ingredient:{query}", asks, INGREDIENT_PX, query=query)
 
     async def wiki(self, title: str) -> tuple[Path, str] | None:
         title = " ".join(title.replace("_", " ").split())
         if not title or len(title.encode()) > MAX_TITLE_BYTES or NOT_IN_TITLES.search(title):
             raise ImageError("not a Wikipedia article title")
-        key = f"wiki:{title}"
+        return await self._wikipedia(f"wiki:{title}", [{"titles": title}], RECIPE_PX)
+
+    async def _wikipedia(self, key: str, asks: list[dict[str, str]], width: int,
+                         **about: Any) -> tuple[Path, str] | None:
+        """``key``'s picture from the cache, else from Wikipedia: one lookup per key however many
+        ask for it at once (the others wait for its answer, or its error)."""
         known, path, ctype = self._hit(key)
         if known:
             return (path, ctype) if path else None
+        task = self._pending.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._look_up(key, asks, width, **about))
+            self._pending[key] = task
+            task.add_done_callback(lambda _t: self._pending.pop(key, None))
+        return await asyncio.shield(task)
+
+    async def _look_up(self, key: str, asks: list[dict[str, str]], width: int,
+                       **about: Any) -> tuple[Path, str] | None:
+        """The first lead image Wikipedia's API finds for ``asks``, asked in turn, downloaded and
+        kept. A miss is kept only when Wikipedia answered every ask and none found one."""
+        found = None                       # the title of a page found without a lead image
+        for params in asks:
+            thumb, title = await self._lead_image(params, width)
+            if thumb:
+                return await self._thumbnail(key, thumb, **about, title=title)
+            found = found or title
+        await self._remember(key, None, "image/jpeg", **about, title=found, source=None,
+                             answered=True, reason="no-image" if found else "no-article")
+        return None
+
+    async def _thumbnail(self, key: str, thumb: str, **about: Any) -> tuple[Path, str] | None:
+        """The lead image's thumbnail, downloaded (MAX_THUMBNAILS at once) and kept. One that
+        cannot be fetched is a 502 and is not kept: Wikipedia has a picture, the hub did not get
+        it this time."""
         try:
-            thumb, found = await self._lead_image({"titles": title}, RECIPE_PX)
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ImageError("Wikipedia did not answer", 502) from exc
-        content, ctype = (await self._download(thumb)) if thumb else (None, "")
-        if thumb and content is None:
+            async with self._thumbnails:
+                content, ctype = await self._download(thumb)
+        except ImageError as exc:
+            if exc.status != 404:          # a refusal stays one (403: not a public address)
+                raise
+            # 404 is a host that did not resolve: Wikimedia's servers exist, the network failed
+            raise ImageError("Wikipedia's image server could not be reached", 502) from exc
+        if content is None:
             raise ImageError("the article's image could not be read", 502)
-        path = await self._remember(key, content, ctype or "image/jpeg", title=found,
-                                    source=thumb)
+        path = await self._remember(key, content, ctype, **about, source=thumb)
         return (path, ctype) if path else None
 
     async def _lead_image(self, params: dict[str, str],
                           width: int) -> tuple[str | None, str | None]:
         """(thumbnail URL, title) of the first page Wikipedia's API finds for ``params`` that has
-        a lead image, ``width`` px wide; (None, None) when none has. Raises httpx.HTTPError or
-        ValueError when Wikipedia cannot be asked or its answer read."""
-        r = await self._client().get(WIKI_API, params={
+        a lead image, ``width`` px wide; (None, title) when the pages it finds have none, and
+        (None, None) when it finds no page. Raises ImageError 502 when Wikipedia did not answer."""
+        body = await self._ask({
             "action": "query", "format": "json", "formatversion": "2", "prop": "pageimages",
-            "piprop": "thumbnail", "pithumbsize": str(width), "redirects": "1", **params},
-            headers={"User-Agent": USER_AGENT})
-        r.raise_for_status()
-        body = r.json()
-        query = body.get("query") if isinstance(body, dict) else None
-        for page in (query or {}).get("pages") or []:
-            source = (page.get("thumbnail") or {}).get("source")
+            "piprop": "thumbnail", "pithumbsize": str(width), "redirects": "1", **params})
+        query = body.get("query")                  # none at all when a search has no hit
+        pages = query.get("pages") if isinstance(query, dict) else None
+        found = None
+        for page in pages if isinstance(pages, list) else []:
+            if not isinstance(page, dict) or "missing" in page or "invalid" in page:
+                continue
+            thumbnail = page.get("thumbnail")
+            source = thumbnail.get("source") if isinstance(thumbnail, dict) else None
+            title = str(page.get("title") or "")
             if source:
-                return str(source), str(page.get("title") or "")
-        return None, None
+                return str(source), title
+            found = found or title
+        return None, found or None
+
+    async def _ask(self, params: dict[str, str]) -> dict[str, Any]:
+        """Wikipedia's API answer to ``params``: one request at a time for the whole hub, a 429
+        retried once. No answer to read (an error, a timeout, a non-2xx answer, anything but a
+        JSON object, an API error) is ImageError 502, and starts a pause."""
+        async with self._api:
+            if (left := self._paused_until - self.clock()) > 0:
+                raise ImageError(f"{self._paused_for}; not asked again for {math.ceil(left)} s",
+                                 502)
+            for attempt in (1, 2):
+                try:
+                    r = await self._client().get(WIKI_API, params=params,
+                                                 headers={"User-Agent": USER_AGENT})
+                except httpx.HTTPError as exc:
+                    raise self._pause("Wikipedia did not answer", PAUSE_S) from exc
+                if r.status_code != 429:
+                    break
+                asked = retry_after(r.headers, time.time())
+                if attempt == 2:
+                    raise self._pause("Wikipedia answered 429 (too many requests)",
+                                      PAUSE_S if asked is None else min(asked, MAX_PAUSE_S))
+                await self.sleep(asked if asked is not None and asked <= MAX_RETRY_WAIT_S
+                                 else RETRY_WAIT_S)
+            if not r.is_success:
+                raise self._pause(f"Wikipedia answered {r.status_code}", PAUSE_S)
+            try:
+                body = r.json()
+            except ValueError as exc:
+                raise self._pause("Wikipedia's answer could not be read", PAUSE_S) from exc
+            if not isinstance(body, dict) or "error" in body:
+                raise self._pause("Wikipedia's answer could not be read", PAUSE_S)
+            return body
+
+    def _pause(self, why: str, seconds: float) -> ImageError:
+        """Wikipedia left alone for ``seconds`` after it did not answer: the error to raise."""
+        self._paused_until, self._paused_for = self.clock() + seconds, why
+        log.warning("picture lookups paused for %.0f s: %s", seconds, why)
+        return ImageError(why, 502)
 
     async def remote(self, url: str) -> tuple[Path, str] | None:
         key = f"url:{url}"
