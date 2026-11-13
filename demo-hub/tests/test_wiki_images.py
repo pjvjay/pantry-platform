@@ -436,6 +436,19 @@ def test_an_ingredient_is_looked_up_as_a_title_in_its_page_summary(tmp_path: Pat
     assert (entry["query"], entry["title"], entry["source"]) == ("olive oil", "Olive oil", THUMB)
 
 
+@pytest.mark.parametrize("name,title", [("Fresh Mint 30g", "Mentha"),
+                                        ("Granulated Sugar 2kg", "Sugar")])
+def test_an_ingredient_whose_own_article_misleads_asks_for_the_right_one(
+        tmp_path: Path, name: str, title: str) -> None:
+    fake = Wikipedia({title: THUMB})
+    found = ingredient(cache_on(tmp_path, fake), name)
+    assert found is not None and found[0].read_bytes() == JPEG
+    summary, _thumb = fake.requests
+    assert str(summary.url) == f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+    (entry,) = index(tmp_path).values()
+    assert entry["title"] == title
+
+
 @pytest.mark.parametrize("thumbs,disambiguation", [
     ({}, set()), ({"Penne": THUMB}, {"Penne"}), ({"Penne": None}, set()),
     ({"Penne": "https://example.org/penne.jpg"}, set())],

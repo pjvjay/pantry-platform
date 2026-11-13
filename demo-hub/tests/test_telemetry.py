@@ -246,6 +246,7 @@ def test_the_hub_takes_browser_telemetry_and_serves_metrics(tmp_path: Path) -> N
     ("Canned Tomatoes", "tomato"), ("Extra Virgin Olive Oil 500ml", "olive oil"),
     ("Fresh Garlic (~50g)", "garlic"), ("Mozzarella Shredded 200g", "mozzarella"),
     ("Penne", "penne"), ("boneless skinless chicken thighs", "chicken thigh"),
+    ("Petite Diced Tomatoes 796ml", "tomato"),
 ])
 def test_ingredient_names_become_lookup_words(name: str, query: str) -> None:
     assert ingredient_query(name) == query

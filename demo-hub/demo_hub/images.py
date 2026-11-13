@@ -85,7 +85,12 @@ DESCRIPTORS = {
     "sliced", "minced", "shredded", "grated", "smoked", "raw", "organic", "boneless", "skinless",
     "large", "small", "medium", "extra", "virgin", "light", "dark", "toasted", "roasted",
     "unsalted", "salted", "low", "reduced", "sodium", "free", "range", "rigate", "plain", "pure",
-    "baby", "lean", "of", "and", "a", "the", "pack", "bag", "box", "jar", "can", "bottle", "bulb"}
+    "baby", "lean", "of", "and", "a", "the", "pack", "bag", "box", "jar", "can", "bottle", "bulb",
+    "petite"}
+# Lookup words whose own article is about something else or pictures it badly: "Mint" is a
+# disambiguation page (its search finds an ice cream) and "Granulated sugar" leads to the
+# sucrose molecule.
+ARTICLES = {"mint": "Mentha", "granulated sugar": "Sugar"}
 SIZE = re.compile(r"\b\d+(\.\d+)?\s*(g|kg|ml|l|oz|lb|lbs|x|pack|ct)\b|\(.*?\)|~\S+",
                   re.IGNORECASE)
 MISS_TTL = timedelta(days=7)                # how long a cached miss is believed
@@ -253,7 +258,7 @@ class ImageCache:
         query = ingredient_query(name)
         if not query:
             return None
-        asks = (partial(self._summary, query[:1].upper() + query[1:]),
+        asks = (partial(self._summary, ARTICLES.get(query) or query[:1].upper() + query[1:]),
                 partial(self._search, f"{query} food"))
         return await self._wikipedia(f"ingredient:{query}", asks, query=query)
 
