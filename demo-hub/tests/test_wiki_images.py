@@ -449,6 +449,25 @@ def test_an_ingredient_whose_own_article_misleads_asks_for_the_right_one(
     assert entry["title"] == title
 
 
+@pytest.mark.parametrize("name,query,title,wrong", [
+    ("Fresh Mint 30g", "mint", "Mentha", "Mint chocolate chip"),
+    ("Granulated Sugar 2kg", "granulated sugar", "Sugar", "Sucrose")])
+def test_a_wrong_picture_cached_before_the_article_was_named_is_not_served(
+        tmp_path: Path, name: str, query: str, title: str, wrong: str) -> None:
+    """A hub that cached the misleading article's picture under the plain key, before
+    ARTICLES named the right one, asks Wikipedia for the right article: a picture never
+    expires, so the right one has a key of its own."""
+    (tmp_path / "old.jpg").write_bytes(b"the wrong picture")
+    (tmp_path / "index.json").write_text(json.dumps({f"ingredient:{query}": {
+        "file": "old.jpg", "type": "image/jpeg", "at": datetime.now(UTC).isoformat(),
+        "query": query, "title": wrong, "source": THUMB}}), encoding="utf-8")
+    fake = Wikipedia({title: THUMB})
+    found = ingredient(cache_on(tmp_path, fake), name)
+    assert found is not None and found[0].read_bytes() == JPEG
+    assert asked_for(fake.requests[0]) == title
+    assert index(tmp_path)[f"ingredient:{query}={title}"]["title"] == title
+
+
 @pytest.mark.parametrize("thumbs,disambiguation", [
     ({}, set()), ({"Penne": THUMB}, {"Penne"}), ({"Penne": None}, set()),
     ({"Penne": "https://example.org/penne.jpg"}, set())],

@@ -89,7 +89,8 @@ DESCRIPTORS = {
     "petite"}
 # Lookup words whose own article is about something else or pictures it badly: "Mint" is a
 # disambiguation page (its search finds an ice cream) and "Granulated sugar" leads to the
-# sucrose molecule.
+# sucrose molecule. Such a word's cache key names its article, so a picture cached under the
+# plain key before the word was listed here is never served again (a picture never expires).
 ARTICLES = {"mint": "Mentha", "granulated sugar": "Sugar"}
 SIZE = re.compile(r"\b\d+(\.\d+)?\s*(g|kg|ml|l|oz|lb|lbs|x|pack|ct)\b|\(.*?\)|~\S+",
                   re.IGNORECASE)
@@ -258,9 +259,11 @@ class ImageCache:
         query = ingredient_query(name)
         if not query:
             return None
-        asks = (partial(self._summary, ARTICLES.get(query) or query[:1].upper() + query[1:]),
+        article = ARTICLES.get(query)
+        asks = (partial(self._summary, article or query[:1].upper() + query[1:]),
                 partial(self._search, f"{query} food"))
-        return await self._wikipedia(f"ingredient:{query}", asks, query=query)
+        key = f"ingredient:{query}" + (f"={article}" if article else "")
+        return await self._wikipedia(key, asks, query=query)
 
     async def wiki(self, title: str) -> tuple[Path, str] | None:
         title = " ".join(title.replace("_", " ").split())
