@@ -436,15 +436,27 @@ def test_an_ingredient_is_looked_up_as_a_title_in_its_page_summary(tmp_path: Pat
     assert (entry["query"], entry["title"], entry["source"]) == ("olive oil", "Olive oil", THUMB)
 
 
-@pytest.mark.parametrize("name,title", [("Fresh Mint 30g", "Mentha"),
-                                        ("Granulated Sugar 2kg", "Sugar")])
+@pytest.mark.parametrize("name,title", [
+    ("Fresh Mint 30g", "Mentha"), ("Granulated Sugar 2kg", "Sugar"),
+    # each of these found an article about something else, or one without a picture
+    ("Limes 4-Pack", "Lime (fruit)"), ("English Cucumber", "Cucumber"),
+    ("Black Beans Canned 540ml", "Black turtle bean"), ("Fermented Black Beans 227g", "Black turtle bean"),
+    ("Nestles PBJ", "Peanut butter and jelly sandwich"), ("Pork Shoulder Roast 1.2kg", "Boston butt"),
+    ("Whole Chicken 1.6kg", "Chicken as food"), ("Milk Chocolate Cadbury", "Chocolate"),
+    ("Doubanjiang Chili Bean Paste 500g", "Doubanjiang"), ("Canadian Peanut Butter Cream", "Peanut butter"),
+    ("Shaoxing Cooking Wine 750ml", "Huangjiu"), ("Coconut Yogurt 500g", "Yogurt"),
+    ("Beef Sirloin Steak 450g", "Steak"), ("Raw Shrimp 340g", "Shrimp and prawn as food"),
+    ("Eggs Large Dozen", "Eggs as food"), ("Fusilli Family Pack 900g", "Pasta"),
+    ("Ghee 400g", "Clarified butter"), ("Queso Fresco 300g", "Cheese"),
+])
 def test_an_ingredient_whose_own_article_misleads_asks_for_the_right_one(
         tmp_path: Path, name: str, title: str) -> None:
     fake = Wikipedia({title: THUMB})
     found = ingredient(cache_on(tmp_path, fake), name)
     assert found is not None and found[0].read_bytes() == JPEG
     summary, _thumb = fake.requests
-    assert str(summary.url) == f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+    assert str(summary.url) == ("https://en.wikipedia.org/api/rest_v1/page/summary/"
+                                + quote(title.replace(" ", "_"), safe="!*'()"))
     (entry,) = index(tmp_path).values()
     assert entry["title"] == title
 
@@ -466,6 +478,20 @@ def test_a_wrong_picture_cached_before_the_article_was_named_is_not_served(
     assert found is not None and found[0].read_bytes() == JPEG
     assert asked_for(fake.requests[0]) == title
     assert index(tmp_path)[f"ingredient:{query}={title}"]["title"] == title
+
+
+def test_a_cut_no_longer_looked_up_never_serves_its_old_picture(tmp_path: Path) -> None:
+    """"Chicken Thighs Bone-In" looked up "bone in" and cached a bone marrow soup. It now looks
+    up "chicken thigh", a key of its own, so the soup is never served for it again."""
+    (tmp_path / "old.jpg").write_bytes(b"bone marrow soup")
+    (tmp_path / "index.json").write_text(json.dumps({"ingredient:bone in": {
+        "file": "old.jpg", "type": "image/jpeg", "at": datetime.now(UTC).isoformat(),
+        "query": "bone in", "title": "Bone marrow as food", "source": THUMB}}), encoding="utf-8")
+    fake = Wikipedia({"Chicken thigh": THUMB})
+    found = ingredient(cache_on(tmp_path, fake), "Chicken Thighs Bone-In 700g")
+    assert found is not None and found[0].read_bytes() == JPEG
+    assert asked_for(fake.requests[0]) == "Chicken thigh"
+    assert index(tmp_path)["ingredient:chicken thigh"]["query"] == "chicken thigh"
 
 
 @pytest.mark.parametrize("thumbs,disambiguation", [

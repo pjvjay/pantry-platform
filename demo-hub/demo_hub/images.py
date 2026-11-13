@@ -86,12 +86,40 @@ DESCRIPTORS = {
     "large", "small", "medium", "extra", "virgin", "light", "dark", "toasted", "roasted",
     "unsalted", "salted", "low", "reduced", "sodium", "free", "range", "rigate", "plain", "pure",
     "baby", "lean", "of", "and", "a", "the", "pack", "bag", "box", "jar", "can", "bottle", "bulb",
-    "petite"}
-# Lookup words whose own article is about something else or pictures it badly: "Mint" is a
-# disambiguation page (its search finds an ice cream) and "Granulated sugar" leads to the
-# sucrose molecule. Such a word's cache key names its article, so a picture cached under the
-# plain key before the word was listed here is never served again (a picture never expires).
-ARTICLES = {"mint": "Mentha", "granulated sugar": "Sugar"}
+    "petite",
+    # how a product is cut or packed, not what it is: "Broccoli Crown", "Bell Pepper Trio",
+    # "Parmesan Wedge", "Cheddar Cheese Block", "Vegan Cheese Shreds", "Fusilli Family Pack",
+    # "Eggs Large Dozen" (looked up with these words, each found an article about something else)
+    "crown", "crowns", "trio", "wedge", "wedges", "block", "blocks", "shreds", "chunks", "family",
+    "dozen"}
+# The same, written as two words: "Chicken Thighs Bone-In" (which found bone marrow soup),
+# "Skin-On Salmon", "Gluten-Free Bread" (which found gluten).
+CUTS = re.compile(r"\bbone[- ]?in\b|\bskin[- ]?on\b|\b[a-z]+[- ]free\b", re.IGNORECASE)
+# Lookup words whose own article is about something else or pictures it badly, and the article
+# that pictures the food: "Mint" is a disambiguation page (its search finds an ice cream) and
+# "Granulated sugar" leads to the sucrose molecule. Each comment says what the word found before.
+# Such a word's cache key names its article, so a picture cached under the plain key before the
+# word was listed here is never served again (a picture never expires).
+ARTICLES = {
+    "mint": "Mentha", "granulated sugar": "Sugar",
+    "lime": "Lime (fruit)",                            # calcium hydroxide, a white powder
+    "english cucumber": "Cucumber",                    # a sea cucumber
+    "black bean": "Black turtle bean",                 # black-eyed peas
+    "nestle pbj": "Peanut butter and jelly sandwich",  # a street in Glasgow, Montana
+    "shoulder roast": "Boston butt",                   # lamb ("Pork Shoulder Roast")
+    "chicken": "Chicken as food",                      # live hens ("Whole Chicken")
+    "chocolate cadbury": "Chocolate",                  # the Cadbury logo
+    "bean paste": "Doubanjiang",                       # sweet red bean paste
+    "butter cream": "Peanut butter",                   # cupcakes ("Peanut Butter Cream")
+    "cooking wine": "Huangjiu",                        # a dish cooked with wine ("Shaoxing ...")
+    "coconut yogurt": "Yogurt",                        # frozen yogurt with fruit
+    "sirloin steak": "Steak",                          # a diagram of beef cuts
+    "shrimp": "Shrimp and prawn as food",              # a live shrimp under water
+    "egg": "Eggs as food",                             # wild birds' eggs ("Eggs Large Dozen")
+    "fusilli": "Pasta",                                # an article with no picture
+    "ghee": "Clarified butter",                        # an article with no picture
+    "queso fresco": "Cheese",                          # an article with no picture
+}
 SIZE = re.compile(r"\b\d+(\.\d+)?\s*(g|kg|ml|l|oz|lb|lbs|x|pack|ct)\b|\(.*?\)|~\S+",
                   re.IGNORECASE)
 MISS_TTL = timedelta(days=7)                # how long a cached miss is believed
@@ -109,8 +137,9 @@ Ask = Callable[[], Awaitable[tuple[str | None, str | None]]]
 
 
 def ingredient_query(name: str) -> str:
-    """The words worth looking up: no sizes, no descriptors, singular."""
-    words = [w for w in re.findall(r"[a-z]+", SIZE.sub(" ", name.lower())) if w not in DESCRIPTORS]
+    """The words worth looking up: no sizes, cuts or descriptors, singular."""
+    words = [w for w in re.findall(r"[a-z]+", CUTS.sub(" ", SIZE.sub(" ", name.lower())))
+             if w not in DESCRIPTORS]
     words = [_singular(w) for w in words] or [_singular(name.lower().strip())]
     return " ".join(words[-2:])          # the head noun, with one modifier ("olive oil")
 

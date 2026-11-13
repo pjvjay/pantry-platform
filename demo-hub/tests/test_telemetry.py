@@ -247,6 +247,14 @@ def test_the_hub_takes_browser_telemetry_and_serves_metrics(tmp_path: Path) -> N
     ("Fresh Garlic (~50g)", "garlic"), ("Mozzarella Shredded 200g", "mozzarella"),
     ("Penne", "penne"), ("boneless skinless chicken thighs", "chicken thigh"),
     ("Petite Diced Tomatoes 796ml", "tomato"),
+    # a cut or a pack is not the food: each of these found an article about something else
+    ("Chicken Thighs Bone-In", "chicken thigh"), ("Chicken Thighs Bone In 700g", "chicken thigh"),
+    ("Skin-On Salmon Fillet", "salmon fillet"), ("Gluten-Free Bread 400g", "bread"),
+    ("Gluten-Free Penne 340g", "penne"), ("Broccoli Crown", "broccoli"),
+    ("Bell Pepper Trio", "bell pepper"), ("Parmesan Wedge 200g", "parmesan"),
+    ("Cheddar Cheese Block 300g", "cheddar cheese"), ("Vegan Cheese Shreds 200g", "vegan cheese"),
+    ("Fusilli Family Pack 900g", "fusilli"), ("Eggs Large Dozen", "egg"),
+    ("Frozen Mango Chunks 600g", "mango"),
 ])
 def test_ingredient_names_become_lookup_words(name: str, query: str) -> None:
     assert ingredient_query(name) == query
